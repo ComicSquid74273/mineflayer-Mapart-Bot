@@ -184,7 +184,7 @@ All fields below are from `nerv-printer-config.json`.
 |---|---|---:|---|
 | `multiUser.enabled` | boolean | `false` | Currently ignored in single-bot implementation |
 
-### 3.7 `anchorTranslation`
+### 3.7 `anchorTranslation` Diamond Block
 
 Use this to relocate the full fixed machine layout by one anchor delta.
 
