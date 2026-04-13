@@ -1,0 +1,25 @@
+# Local auth/session cache
+auth-cache/
+
+# Runtime logs
+logs/
+
+# Reference/source dump folder
+reference/
+
+# Node-generated dependencies
+node_modules/
+
+# Generated finished map outputs
+finished-maps/
+
+# Backup/old config files
+*-backup.json
+*.backup.json
+*_backup.json
+*.bak
+*.old
+*.old.json
+*_old.json
+nerv-printer-config.old.json
+nerv-printer-config.backup.json
