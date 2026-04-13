@@ -1,0 +1,103 @@
+{
+  "bot": {
+    "host": "127.0.0.1",
+    "port": 54321,
+    "username": "MapartBot",
+    "auth": "offline",
+    "version": "1.21.8",
+    "profilesFolder": "./auth-cache",
+    "viewDistance": "normal",
+    "checkTimeoutInterval": 60000,
+    "reconnect": {
+      "enabled": true,
+      "delayMs": 9500,
+      "maxAttempts": 10
+    }
+  },
+  "files": {
+    "inputMode": "nbt",
+    "planFile": "./mapart-plan.json",
+    "resumeProgress": true,
+    "progressFile": "./logs/nerv-printer-progress.json",
+    "progressSaveEvery": 64,
+    "moveToFinishedFolder": true,
+    "finishedFolder": "./finished-maps",
+    "disableOnFinished": true
+  },
+  "printer": {
+    "startOnSpawn": true,
+    "startDelayMs": 1500,
+    "allowJump": false,
+    "placeWhileSprinting": true,
+    "postPrintTestOnly": false,
+    "printOffset": {
+      "x": 0,
+      "y": 0,
+      "z": -1
+    },
+    "linesPerRun": 4,
+    "placeRange": 4,
+    "minPlaceDistance": 0.8,
+    "ignoredBlocks": [],
+    "placeDelayMs": 1,
+    "rotate": false,
+    "northToSouth": true,
+    "mapFillSquareSize": 1,
+    "sprintMode": "always"
+  },
+  "advanced": {
+    "preRestockDelayMs": 10,
+    "inventoryActionDelayMs": 10,
+    "postRestockDelayMs": 10,
+    "restockFailureCooldownMs": 10,
+    "predictiveRestock": true,
+    "predictiveRestockMaxPullsPerBlock": 5,
+    "predictiveLookaheadRows": 128,
+    "dumpUnneededBeforeRefill": true,
+    "sneakOnDispenserOnly": true,
+    "postPrintWorkflowEnabled": true,
+    "postPrintFillMapEnabled": true,
+    "postPrintUseCartographyEnabled": true,
+    "postPrintStoreFinishedMapEnabled": true,
+    "postPrintResetEnabled": true,
+    "postPrintXpRefillEnabled": true,
+    "postPrintRenameMapEnabled": true,
+    "postPrintMinXpLevel": 2,
+    "postPrintTargetXpLevel": 3,
+    "postPrintSkipResetInteraction": false,
+    "postPrintWalkToCenter": true,
+    "postPrintCenterWaitMs": 20000,
+    "postPrintInteractionDelayMs": 200,
+    "postPrintMapSettleDelayMs": 200,
+    "dumpAimSettleMs": 50,
+    "dumpYawInvert": false,
+    "dumpPitchInvert": false,
+    "postBuildDelayMs": 0,
+    "preSwapDelayMs": 10,
+    "postSwapDelayMs": 10,
+    "retryInteractTimeoutMs": 400,
+    "checkpointBuffer": 0.2,
+    "breakCarpetAboveReset": false,
+    "debugPrints": false
+  },
+  "errorHandling": {
+    "logErrors": true,
+    "errorAction": "repair"
+  },
+  "anchorTranslation": {
+    "enabled": true,
+    "sourceAnchor": {
+      "x": -450,
+      "y": 0,
+      "z": -962
+    },
+    "targetAnchor": {
+      "x": -450,
+      "y": 0,
+      "z": -962
+    }
+  },
+  "multiUser": {
+    "enabled": false
+  }
+}
