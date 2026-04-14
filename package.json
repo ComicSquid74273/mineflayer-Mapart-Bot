@@ -8,6 +8,8 @@
     "clean:install": "npm run clean && npm install",
     "start": "node index.js",
     "start:nerv": "node nerv-printer.js",
+    "test:dump": "node nerv-printer.js --test-dump",
+    "test:moving-place": "node nerv-printer.js --test-moving-place",
     "start:broadcast": "set ENABLE_QUOTE_BROADCAST=true&& node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

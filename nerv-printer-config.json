@@ -48,6 +48,9 @@
     "sprintMode": "always",
     "fastTraversalEnabled": true,
     "fastTraversalTickMs": 40,
+    "fastTraversalCheckpointEveryRows": 8,
+    "fastTraversalCatchupPasses": 4,
+    "fastTraversalCatchupStallMs": 6000,
     "maxPlacementsPerTick": 4
   },
   "advanced": {
@@ -78,6 +81,11 @@
     "dumpAimSettleMs": 50,
     "dumpYawInvert": false,
     "dumpPitchInvert": false,
+    "dumpTestStationWaitMs": 7000,
+    "dumpTestTossAtEachStation": true,
+    "movingPlaceTestTargetCount": 64,
+    "movingPlaceTestCheckpointEveryRows": 8,
+    "movingPlaceTestWaitAfterMs": 5000,
     "postBuildDelayMs": 0,
     "preSwapDelayMs": 10,
     "postSwapDelayMs": 10,
