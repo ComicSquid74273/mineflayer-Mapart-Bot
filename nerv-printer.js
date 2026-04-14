@@ -1066,15 +1066,16 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
   const itemInfo = bot.registry.itemsByName[blockName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
-  const desiredPulls = Math.max(1, toNumber(requestedPulls, 1))
-  const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, stackSize]])
+  // requestedPulls = number of stacks wanted. Convert to item count for precise pull tracking.
+  const desiredItemCount = Math.max(stackSize, Math.max(1, toNumber(requestedPulls, 1)) * stackSize)
+  const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
 
   if (!inventoryHasRoomForItem(bot, blockName)) {
     const dumped = await dumpUnneededCarpets(bot, config, keepPlan)
     if (!dumped && !inventoryHasRoomForItem(bot, blockName)) {
       restockFailureCache.set(blockName, Date.now())
       if (config.errorHandling?.logErrors !== false) {
-        console.log(`[RESTOCK-WARN] No inventory space available for ${blockName}, and no dumpable stack was freed.`)
+        console.log(`[RESTOCK-WARN] No inventory space for ${blockName} and nothing dumpable.`)
       }
       return false
     }
@@ -1082,30 +1083,49 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
   for (let groupIndex = 0; groupIndex < spotGroups.length; groupIndex += 1) {
     const group = spotGroups[groupIndex]
-    if (config.advanced?.debugPrints) {
-      const anchor = group[0]
-      console.log(`[RESTOCK-GROUP] item=${blockName} group=${groupIndex + 1}/${spotGroups.length} anchor=${anchor?.x} ${anchor?.y} ${anchor?.z}`)
-    }
 
     for (const spot of group) {
       let container = null
       try {
         container = await openContainerAt(bot, spot)
-        let fullStacksAvailable = container.containerItems()
-          .filter((entry) => entry.type === itemId && toNumber(entry.count, 0) >= stackSize)
-          .length
+        await delay(toNumber(advanced.preRestockDelayMs, 200))
 
-        if (fullStacksAvailable <= 0) {
+        // Count ALL of the target item in this chest — including partial stacks.
+        // BUG FIX: old code used Math.floor(total/64) which silently skipped chests
+        // with partial stacks (e.g. 30 carpets -> 30/64=0 -> skipped entirely).
+        const chestSlots = container.containerItems().filter((entry) => entry.type === itemId)
+        const totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+
+        if (totalInChest <= 0) {
+          if (config.advanced?.debugPrints) {
+            console.log(`[RESTOCK-SKIP] Chest at ${spot.x} ${spot.y} ${spot.z} has 0 of ${blockName}, moving to next.`)
+          }
+          try { container.close() } catch { }
+          container = null
           continue
         }
 
-        let pullsFromChest = 0
-        let recoveredFromFullInventory = false
-        await delay(toNumber(advanced.preRestockDelayMs, 500))
-        while (fullStacksAvailable > 0 && pullsFromChest < desiredPulls) {
-          // Nerv-style restock behavior: move full stacks only.
+        // How much do we need vs what the chest has?
+        const haveAtStart = countInventoryItems(bot, blockName)
+        const stillNeedTotal = Math.max(0, desiredItemCount - haveAtStart)
+        const willPullTotal = Math.min(totalInChest, stillNeedTotal)
+
+        if (config.errorHandling?.logErrors !== false) {
+          console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} need=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal}`)
+        }
+
+        // Pull in increments until we get what we need from this chest.
+        // Handles fragmented chests (many small stacks) correctly.
+        const targetCount = haveAtStart + willPullTotal
+        let attempts = 0
+        const maxAttempts = chestSlots.length + 8
+        while (countInventoryItems(bot, blockName) < targetCount && attempts < maxAttempts) {
+          attempts++
+          const amountStillNeeded = targetCount - countInventoryItems(bot, blockName)
+          const pullAmount = Math.min(stackSize, amountStillNeeded)
           try {
-            await container.withdraw(itemId, null, stackSize)
+            await container.withdraw(itemId, null, pullAmount)
+            await delay(toNumber(advanced.inventoryActionDelayMs, 80))
           } catch (err) {
             const message = String(err?.message || err).toLowerCase()
             const inventoryFull = message.includes('no free') ||
@@ -1113,37 +1133,29 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               message.includes('free room') ||
               message.includes('no space')
 
-            if (inventoryFull && !recoveredFromFullInventory) {
-              recoveredFromFullInventory = true
+            if (inventoryFull) {
               if (config.errorHandling?.logErrors !== false) {
-                console.log(`[RESTOCK-WARN] Inventory full while pulling ${blockName}. Dumping unneeded carpets and retrying.`)
+                console.log(`[RESTOCK-WARN] Inventory full while pulling ${blockName}. Dumping and retrying.`)
               }
-
-              try { container.close() } catch {}
+              try { container.close() } catch { }
               container = null
               await dumpUnneededCarpets(bot, config, keepPlan)
-              await delay(toNumber(advanced.postRestockDelayMs, 500))
-
+              await delay(toNumber(advanced.postRestockDelayMs, 300))
               container = await openContainerAt(bot, spot)
-              fullStacksAvailable = container.containerItems()
-                .filter((entry) => entry.type === itemId && toNumber(entry.count, 0) >= stackSize)
-                .length
-              if (fullStacksAvailable <= 0) break
+              await delay(toNumber(advanced.preRestockDelayMs, 200))
               continue
             }
-
-            throw err
+            if (config.advanced?.debugPrints) {
+              console.log(`[RESTOCK-DEBUG] withdraw error for ${blockName}: ${err?.message || err}`)
+            }
+            break
           }
-
-          pullsFromChest += 1
-          await delay(toNumber(advanced.inventoryActionDelayMs, 100))
-          fullStacksAvailable -= 1
         }
-        await delay(toNumber(advanced.postRestockDelayMs, 500))
+
+        await delay(toNumber(advanced.postRestockDelayMs, 300))
 
         const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
         if (inventoryItem) {
-          await bot.equip(inventoryItem, 'hand')
           await bot.equip(inventoryItem, 'hand')
           restockFailureCache.delete(blockName)
           unavailableMaterialCache.delete(blockName)
@@ -1151,13 +1163,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         }
       } catch (err) {
         if (config.advanced?.debugPrints) {
-          console.log(`[RESTOCK-DEBUG] ${err?.message || err}`)
+          console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.z}: ${err?.message || err}`)
         }
       } finally {
         if (container) {
-          try {
-            container.close()
-          } catch {}
+          try { container.close() } catch { }
         }
       }
     }
@@ -1165,7 +1175,6 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
   restockFailureCache.set(blockName, Date.now())
   unavailableMaterialCache.add(blockName)
-
   return false
 }
 
@@ -1898,54 +1907,83 @@ async function ensureMaterialsForTargets(bot, config, targets) {
   const advanced = config.advanced || {}
   if (advanced.predictiveRestock === false || !targets.length) return
 
-  const neededByBlock = estimateNeededFromTargetsLimitedByCapacity(targets, bot)
+  // Use full 36-slot capacity as the target (Java Nerv-Printer behavior):
+  // predict assuming a fully clean inventory, then dump trash first, then refill.
+  const capacityOverride = advanced.dumpUnneededBeforeRefill !== false ? 36 : null
+  const neededByBlock = estimateNeededFromTargetsLimitedByCapacity(targets, null, capacityOverride)
   if (!neededByBlock.size) return
 
   for (const blockName of neededByBlock.keys()) {
     unavailableMaterialCache.delete(blockName)
   }
 
+  // Dump carpets not in the future plan BEFORE restocking (frees slots first)
   if (advanced.dumpUnneededBeforeRefill !== false) {
-    await dumpUnneededCarpets(bot, config, neededByBlock)
+    const dumpable = getDumpableCarpetStacks(bot, neededByBlock)
+    if (dumpable.length > 0) {
+      if (config.advanced?.debugPrints) console.log(`[PREDUMP] Dumping ${dumpable.length} unneeded stacks before restocking.`)
+      await dumpCarpetStacks(bot, config, dumpable, 'predumpBeforeRefill')
+    }
   }
 
-  const maxPulls = Math.max(1, toNumber(advanced.predictiveRestockMaxPullsPerBlock, 4))
-
-  const materialPlans = Array.from(neededByBlock.entries()).map(([blockName, needed]) => {
+  const configMaxPulls = toNumber(advanced.predictiveRestockMaxPullsPerBlock, 36)
+  const maxPulls = configMaxPulls < 6 ? 36 : configMaxPulls
+  let restockList = Array.from(neededByBlock.entries()).map(([blockName, needed]) => {
     const have = countInventoryItems(bot, blockName)
     const deficit = Math.max(0, needed - have)
-    return { blockName, needed, have, deficit }
+    return { blockName, needed, deficit }
   }).filter((entry) => entry.deficit > 0)
 
-  if (!materialPlans.length) return
+  if (!restockList.length) return
 
-  for (const plan of materialPlans) {
-    const blockName = plan.blockName
-    const needed = plan.needed
-    const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
-    let have = plan.have
-    const deficit = plan.deficit
-    const stacksNeeded = Math.ceil(deficit / 64)
-    const plannedPulls = Math.min(stacksNeeded, maxPulls)
+  const maxIterations = restockList.length * 10
+  let safetyCounter = 0
 
-    if (config.advanced?.debugPrints || plannedPulls > 0) {
-      console.log(`[PRESTOCK-PLAN] item=${blockName} need=${needed} have=${have} deficit=${deficit} stackSize=${stackSize} stacksNeeded=${stacksNeeded} plannedPulls=${plannedPulls}`)
+  while (restockList.length > 0 && safetyCounter < maxIterations) {
+    safetyCounter++
+    let closestDist = Infinity
+    let closestItem = null
+
+    for (const item of restockList) {
+      if (restockFailureCache.has(item.blockName) && Date.now() - restockFailureCache.get(item.blockName) < Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))) {
+        continue
+      }
+      
+      const groups = getMaterialChestGroupsForRefill(bot, config, item.blockName)
+      if (!groups || !groups.length || !groups[0].length) continue
+
+      const nearestChest = groups[0][0]
+      const dist = horizontalDist2(bot, nearestChest)
+      
+      if (dist < closestDist) {
+        closestDist = dist
+        closestItem = item
+      }
     }
 
-    let pulls = 0
-    while (have < needed && pulls < plannedPulls) {
-      const restocked = await restockMaterial(bot, config, blockName, 1, neededByBlock)
-      if (!restocked) break
-      pulls += 1
-      have = countInventoryItems(bot, blockName)
+    if (!closestItem) break
+
+    const haveBefore = countInventoryItems(bot, closestItem.blockName)
+    const pullsNeeded = Math.min(Math.ceil((closestItem.needed - haveBefore) / 64), maxPulls)
+    
+    if (pullsNeeded <= 0) {
+      restockList = restockList.filter(i => i.blockName !== closestItem.blockName)
+      continue
     }
 
-    if (pulls > 0) {
-      console.log(`[PRESTOCK-RESULT] item=${blockName} pulledStacks=${pulls} nowHave=${have} need=${needed}`)
-    }
+    console.log(`[GREEDY-RESTOCK] Closest material=${closestItem.blockName} dist=${Math.round(Math.sqrt(closestDist))} pullsRequested=${pullsNeeded}`)
 
-    if (have < needed) {
-      console.log(`[PRESTOCK-WARN] item=${blockName} need=${needed} have=${have}`)
+    const restocked = await restockMaterial(bot, config, closestItem.blockName, pullsNeeded, neededByBlock)
+
+    if (!restocked) {
+      restockList = restockList.filter(i => i.blockName !== closestItem.blockName)
+    } else {
+      const haveAfter = countInventoryItems(bot, closestItem.blockName)
+      if (haveAfter >= closestItem.needed) {
+        restockList = restockList.filter(i => i.blockName !== closestItem.blockName)
+      } else if (haveAfter <= haveBefore && restocked) {
+        restockList = restockList.filter(i => i.blockName !== closestItem.blockName)
+      }
     }
   }
 }
@@ -2110,16 +2148,18 @@ async function placeTarget(bot, config, target) {
 }
 
 async function repairTargets(bot, config, targets, placeRange) {
+  if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
+
   const printer = config.printer || {}
   const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const northToSouth = printer.northToSouth !== false
-  const placeWhileSprinting = printer.placeWhileSprinting === true
+  const tickMs = Math.max(10, toNumber(printer.fastTraversalTickMs, 40))
+  const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
   const orderedTargets = orderTargetsLineByLine(targets, linesPerRun, northToSouth)
 
   const byColRow = new Map()
   const cols = new Set()
   const rows = new Set()
-
   for (const target of orderedTargets) {
     cols.add(target.col)
     rows.add(target.row)
@@ -2129,83 +2169,94 @@ async function repairTargets(bot, config, targets, placeRange) {
   const sortedCols = [...cols].sort((a, b) => a - b)
   const sortedRowsAsc = [...rows].sort((a, b) => a - b)
 
-  let startOnNorthSide = northToSouth
   let placed = 0
   let already = 0
   let skipped = 0
+  let startOnNorthSide = northToSouth
+
+  const Vec3 = bot.entity.position.constructor
 
   for (let i = 0; i < sortedCols.length; i += linesPerRun) {
     const colBatch = sortedCols.slice(i, i + linesPerRun)
     const rowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
 
-    const firstTarget = rowOrder
-      .map((row) => colBatch.map((col) => byColRow.get(`${col}:${row}`)).find(Boolean))
-      .find(Boolean)
-
-    if (firstTarget) {
-      const startGoal = new GoalNear(firstTarget.position.x, firstTarget.position.y, firstTarget.position.z, Math.max(1, placeRange - 1))
-      try {
-        await bot.pathfinder.goto(startGoal)
-      } catch (err) {
-        if (config.errorHandling?.logErrors !== false) {
-          console.log(`[REPAIR-MOVE] ${firstTarget.position.x} ${firstTarget.position.y} ${firstTarget.position.z} -> ${err?.message || err}`)
-        }
+    const batchTargets = []
+    for (const row of rowOrder) {
+      for (const col of colBatch) {
+        const t = byColRow.get(`${col}:${row}`)
+        if (t) batchTargets.push(t)
       }
     }
 
-    for (const row of rowOrder) {
-      const rowTargets = colBatch
-        .map((col) => byColRow.get(`${col}:${row}`))
-        .filter(Boolean)
+    if (!batchTargets.length) {
+      startOnNorthSide = !startOnNorthSide
+      continue
+    }
 
-      if (!rowTargets.length) continue
+    // Build sprint checkpoints every 8 rows
+    const checkpoints = []
+    const checkpointInterval = 8
+    for (let r = 0; r < rowOrder.length; r += checkpointInterval) {
+      const row = rowOrder[r]
+      const midCol = colBatch[Math.floor(colBatch.length / 2)]
+      const t = byColRow.get(`${midCol}:${row}`) || batchTargets.find(bt => bt.row === row)
+      if (t) checkpoints.push(t.position)
+    }
+    checkpoints.push(batchTargets[batchTargets.length - 1].position)
 
-      const rowAnchor = rowTargets[0]
-      const rowGoal = new GoalNear(rowAnchor.position.x, rowAnchor.position.y, rowAnchor.position.z, Math.max(1, placeRange - 1))
+    let batchActive = true
+    const processedTargets = new Set()
 
-      let shouldGotoRow = true
-      if (placeWhileSprinting) {
-        const dx = bot.entity.position.x - (rowAnchor.position.x + 0.5)
-        const dz = bot.entity.position.z - (rowAnchor.position.z + 0.5)
-        const distance2 = dx * dx + dz * dz
-        shouldGotoRow = distance2 > Math.pow(Math.max(1, placeRange - 0.5), 2)
-      }
+    // Concurrent placement loop — runs while bot sprints through checkpoints
+    const placementLoop = (async () => {
+      while (batchActive) {
+        const botPos = bot.entity.position
+        let placementsThisTick = 0
 
-      if (shouldGotoRow) {
-        try {
-          await bot.pathfinder.goto(rowGoal)
-        } catch (err) {
-          skipped += rowTargets.length
-          if (config.errorHandling?.logErrors !== false) {
-            console.log(`[REPAIR-MOVE] ${rowAnchor.position.x} ${rowAnchor.position.y} ${rowAnchor.position.z} -> ${err?.message || err}`)
-          }
-          continue
-        }
-      }
+        const candidates = batchTargets.filter(t =>
+          !processedTargets.has(t) &&
+          botPos.distanceTo(new Vec3(t.position.x + 0.5, t.position.y + 0.5, t.position.z + 0.5)) <= placeRange
+        )
 
-      for (const target of rowTargets) {
-        try {
-          const result = await placeTarget(bot, config, target)
-          if (result.state === 'placed') {
-            placed += 1
-            if (config.advanced?.debugPrints) {
-              console.log(`[REPAIR-PLACED] ${target.blockName} at ${target.position.x} ${target.position.y} ${target.position.z}`)
-            }
-          } else if (result.state === 'already') {
-            already += 1
-          } else {
-            skipped += 1
+        candidates.sort((a, b) => {
+          const da = botPos.distanceTo(new Vec3(a.position.x + 0.5, a.position.y + 0.5, a.position.z + 0.5))
+          const db = botPos.distanceTo(new Vec3(b.position.x + 0.5, b.position.y + 0.5, b.position.z + 0.5))
+          return da - db
+        })
+
+        for (const target of candidates) {
+          if (placementsThisTick >= maxPerTick) break
+          processedTargets.add(target)
+          placementsThisTick++
+          try {
+            const result = await placeTarget(bot, config, target, true)
+            if (result.state === 'placed') placed++
+            else if (result.state === 'already') already++
+            else skipped++
+          } catch (err) {
+            skipped++
             if (config.errorHandling?.logErrors !== false) {
-              console.log(`[REPAIR-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+              console.log(`[REPAIR-FAST-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
             }
           }
-        } catch (err) {
-          skipped += 1
-          if (config.errorHandling?.logErrors !== false) {
-            console.log(`[REPAIR-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
-          }
         }
+
+        await delay(tickMs)
       }
+    })()
+
+    try {
+      for (const cp of checkpoints) {
+        if (!batchActive) break
+        await bot.pathfinder.goto(new GoalNear(cp.x, cp.y, cp.z, 1))
+      }
+    } catch (err) {
+      if (config.errorHandling?.logErrors !== false) {
+        console.log(`[REPAIR-MOVE-ERR] Traversal interrupted: ${err?.message || err}`)
+      }
+    } finally {
+      batchActive = false
+      await placementLoop
     }
 
     startOnNorthSide = !startOnNorthSide
@@ -2242,6 +2293,7 @@ async function runPrint(bot, config) {
   const placeWhileSprinting = printer.placeWhileSprinting === true
   const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
   let resumeFrom = 0
+  let resumePhase = 'printing'  // tracks which bot phase to resume after crash
 
   if (progressEnabled) {
     const previous = readProgressState(progressFile)
@@ -2253,6 +2305,11 @@ async function runPrint(bot, config) {
 
     if (sameInput) {
       resumeFrom = Math.max(0, Math.min(orderedTargets.length, toNumber(previous.processedTargets, 0)))
+      // If the bot crashed inside repair or post_print, skip the main sweep and jump directly there
+      if (previous.phase === 'repair' || previous.phase === 'post_print') {
+        resumePhase = previous.phase
+        resumeFrom = orderedTargets.length
+      }
     }
   }
 
@@ -2300,8 +2357,31 @@ async function runPrint(bot, config) {
       }
     }
 
-    console.log(`[DONE-SWEEP] placed=${placed} already=${already} skipped=${skipped} errors=${errorList.length}`)
+  console.log(`[DONE-SWEEP] placed=${placed} already=${already} skipped=${skipped} incrementalErrors=${errorList.length}`)
 
+  // Final comprehensive scan: verify ALL targets against world state before finishing
+  if (resumePhase !== 'post_print') {
+    console.log('[FINAL-SCAN] Scanning entire map for final verification...')
+    const Vec3_Final = bot.entity.position.constructor
+    const fullMapErrors = []
+    for (const target of orderedTargets) {
+      const actual = bot.blockAt(new Vec3_Final(target.position.x, target.position.y, target.position.z))
+      if (!actual || actual.name !== target.blockName) fullMapErrors.push(target)
+    }
+    errorList.length = 0
+    errorList.push(...fullMapErrors)
+    if (errorList.length > 0) console.log(`[FINAL-SCAN] Found ${errorList.length} mismatch(es).`)
+
+    // Persist phase=repair before repair pass for crash recovery
+    if (progressEnabled) {
+      writeProgressState(progressFile, {
+        sourceType: input.sourceType, sourceName: input.sourceName, sourcePath: input.sourcePath,
+        totalTargets: orderedTargets.length, processedTargets: orderedTargets.length,
+        phase: 'repair', updatedAt: new Date().toISOString()
+      })
+    }
+
+    // Repair pass: fix any missed or broken blocks
     const errorAction = String(config.errorHandling?.errorAction || 'repair').toLowerCase()
     if (errorList.length && errorAction === 'repair') {
       console.log(`[REPAIR-PASS] Starting repair pass for ${errorList.length} error(s).`)
@@ -2311,10 +2391,22 @@ async function runPrint(bot, config) {
       already += repairResult.already
       skipped += repairResult.skipped
     }
+  } else {
+    console.log('[RESUME] Skipping final scan and repair (crashed during post_print). Going to post-print workflow.')
+  }
 
-    console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
+  console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
 
-    await runPostPrintWorkflow(bot, config, { sourceName: input.sourceName, sourcePath: input.sourcePath, sourceType: input.sourceType })
+    // Persist phase=post_print so crash here resumes post-print, not repair again
+  if (progressEnabled) {
+    writeProgressState(progressFile, {
+      sourceType: input.sourceType, sourceName: input.sourceName, sourcePath: input.sourcePath,
+      totalTargets: orderedTargets.length, processedTargets: orderedTargets.length,
+      phase: 'post_print', updatedAt: new Date().toISOString()
+    })
+  }
+
+  await runPostPrintWorkflow(bot, config, { sourceName: input.sourceName, sourcePath: input.sourcePath, sourceType: input.sourceType })
     await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
 
     if (files.moveToFinishedFolder) {
@@ -2354,7 +2446,16 @@ async function runPrint(bot, config) {
 
   if (postPrintTestOnly) {
     console.log('[TEST] postPrintTestOnly=true, skipping carpet placement and running post-print workflow only.')
-    await runPostPrintWorkflow(bot, config, { sourceName: input.sourceName, sourcePath: input.sourcePath, sourceType: input.sourceType })
+    // Persist phase=post_print so crash here resumes post-print, not repair again
+  if (progressEnabled) {
+    writeProgressState(progressFile, {
+      sourceType: input.sourceType, sourceName: input.sourceName, sourcePath: input.sourcePath,
+      totalTargets: orderedTargets.length, processedTargets: orderedTargets.length,
+      phase: 'post_print', updatedAt: new Date().toISOString()
+    })
+  }
+
+  await runPostPrintWorkflow(bot, config, { sourceName: input.sourceName, sourcePath: input.sourcePath, sourceType: input.sourceType })
     await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
     return {
       sourceType: input.sourceType,
@@ -2431,6 +2532,7 @@ async function runPrint(bot, config) {
       sourcePath: input.sourcePath,
       totalTargets: orderedTargets.length,
       processedTargets,
+      phase: 'printing',
       updatedAt: new Date().toISOString()
     })
   }
@@ -2564,6 +2666,15 @@ async function runPrint(bot, config) {
   }
 
   console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
+
+  // Persist phase=post_print so crash here resumes post-print, not repair again
+  if (progressEnabled) {
+    writeProgressState(progressFile, {
+      sourceType: input.sourceType, sourceName: input.sourceName, sourcePath: input.sourcePath,
+      totalTargets: orderedTargets.length, processedTargets: orderedTargets.length,
+      phase: 'post_print', updatedAt: new Date().toISOString()
+    })
+  }
 
   await runPostPrintWorkflow(bot, config, { sourceName: input.sourceName, sourcePath: input.sourcePath, sourceType: input.sourceType })
 

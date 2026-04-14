@@ -17,9 +17,11 @@
   "files": {
     "inputMode": "nbt",
     "planFile": "./mapart-plan.json",
+    "machineConfigProfile": "carpet",
+    "machineConfigFile": "./nerv-printer-config/_configs/carpet-printer-config.json",
     "resumeProgress": true,
     "progressFile": "./logs/nerv-printer-progress.json",
-    "progressSaveEvery": 64,
+    "progressSaveEvery": 10,
     "moveToFinishedFolder": true,
     "finishedFolder": "./finished-maps",
     "disableOnFinished": true
@@ -35,7 +37,7 @@
       "y": 0,
       "z": -1
     },
-    "linesPerRun": 4,
+    "linesPerRun": 3,
     "placeRange": 4,
     "minPlaceDistance": 0.8,
     "ignoredBlocks": [],
@@ -43,7 +45,10 @@
     "rotate": false,
     "northToSouth": true,
     "mapFillSquareSize": 1,
-    "sprintMode": "always"
+    "sprintMode": "always",
+    "fastTraversalEnabled": true,
+    "fastTraversalTickMs": 40,
+    "maxPlacementsPerTick": 4
   },
   "advanced": {
     "preRestockDelayMs": 10,
@@ -55,6 +60,7 @@
     "predictiveLookaheadRows": 128,
     "dumpUnneededBeforeRefill": true,
     "sneakOnDispenserOnly": true,
+    "resetChestWaitMs": 500,
     "postPrintWorkflowEnabled": true,
     "postPrintFillMapEnabled": true,
     "postPrintUseCartographyEnabled": true,

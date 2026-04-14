@@ -146,6 +146,9 @@ All fields below are from `nerv-printer-config.json`.
 | `printer.northToSouth` | boolean | `true` | Controls row traversal direction |
 | `printer.mapFillSquareSize` | number | `1` | Reserved currently |
 | `printer.sprintMode` | string | `notPlacing` | Current meaningful value: `always` enables continuous sprint toggle |
+| `printer.fastTraversalEnabled` | boolean | `false` | Enables non-stop continuous placement logic |
+| `printer.fastTraversalTickMs` | number | `40` | Background scanner tick interval (ms) for continuous placement |
+| `printer.maxPlacementsPerTick` | number | `1` | Maximum blocks placed simultaneously per scanner tick limit |
 
 ### 3.4 `advanced`
 
