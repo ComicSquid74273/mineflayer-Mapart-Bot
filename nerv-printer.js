@@ -2,6 +2,7 @@ const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
 const fs = require('fs')
 const path = require('path')
+const { AsyncLocalStorage } = require('async_hooks')
 const mineflayer = require('mineflayer')
 const nbt = require('prismarine-nbt')
 const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder')
@@ -10,6 +11,8 @@ const CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config.json')
 const DEFAULT_IMPORTED_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'carpet-printer-config.json')
 const TEST_BOT_CONFIG_FILE = path.resolve(process.cwd(), 'config.test.json')
 const LOG_FILE = path.resolve(process.cwd(), 'logs', 'nerv-printer.log')
+const logContext = new AsyncLocalStorage()
+const botLogStreams = new Map()
 
 function formatLogArg(value) {
   if (typeof value === 'string') return value
@@ -27,6 +30,14 @@ function initLogger() {
   }
 
   const stream = fs.createWriteStream(LOG_FILE, { flags: 'a' })
+  const getBotStream = (botName) => {
+    const safeName = sanitizeSyncName(botName)
+    if (!safeName) return null
+    if (!botLogStreams.has(safeName)) {
+      botLogStreams.set(safeName, fs.createWriteStream(path.join(logDir, `nerv-printer-${safeName}.log`), { flags: 'a' }))
+    }
+    return botLogStreams.get(safeName)
+  }
   const original = {
     log: console.log,
     warn: console.warn,
@@ -35,7 +46,13 @@ function initLogger() {
 
   const write = (level, args) => {
     const message = args.map(formatLogArg).join(' ')
-    stream.write(`[${new Date().toISOString()}] [${level}] ${message}\n`)
+    const context = logContext.getStore()
+    const botName = context?.botName || null
+    const prefix = botName ? ` [${botName}]` : ''
+    const line = `[${new Date().toISOString()}] [${level}]${prefix} ${message}\n`
+    stream.write(line)
+    const botStream = botName ? getBotStream(botName) : null
+    if (botStream) botStream.write(line)
   }
 
   console.log = (...args) => {
@@ -55,6 +72,9 @@ function initLogger() {
 
   process.on('exit', () => {
     stream.end()
+    for (const botStream of botLogStreams.values()) {
+      botStream.end()
+    }
   })
 
   original.log(`[LOG] Writing runtime logs to ${LOG_FILE}`)
@@ -89,6 +109,10 @@ function writeJson(filePath, data) {
     fs.mkdirSync(dir, { recursive: true })
   }
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8')
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value))
 }
 
 function readProgressState(filePath) {
@@ -263,12 +287,17 @@ function createDefaultConfig() {
       inventoryCycleTestWaitAfterMs: 5000,
       inventoryCycleTestRows: 2,
       dumpPathThinkTimeoutMs: 3000,
-      dumpAlreadyNearRange: 2.25,
+      dumpAlreadyNearRange: 4,
+      dumpGoalRange: 4,
+      multiDumpLockStaleMs: 30000,
       dumpReaimEveryStacks: 0,
       repairTestWaitAfterMs: 5000,
       repairTestMaxPasses: 3,
       repairGoalRange: 3.25,
       repairTargetSettleMs: 0,
+      repairMoveTimeoutMs: 30000,
+      repairProgressLogMs: 5000,
+      repairFallbackToStopPlace: true,
       repairVerifySettleMs: 120,
       repairMaxMismatchRatio: 0.25,
       repairMaxMismatchCount: 512,
@@ -307,7 +336,24 @@ function createDefaultConfig() {
       materialDict: {}
     },
     multiUser: {
-      enabled: false
+      enabled: false,
+      mode: 'file',
+      syncFolder: './logs/nerv-printer-sync',
+      requireAllReady: true,
+      recoveryMarginBlocks: 20,
+      recoveryDelayMs: 2000,
+      staleStateMs: 15000,
+      heartbeatMs: 5000,
+      resumeExistingJob: true,
+      startAllOnMasterReady: true,
+      joinStaggerMs: 8000,
+      startStaggerMs: 3000,
+      launchFromSingleProcess: true,
+      bots: [
+        { name: 'MapartBot', role: 'master', enabled: true, joinDelayMs: 0, startDelayMs: 0 },
+        { name: 'MapartBot_1', role: 'slave', enabled: false, joinDelayMs: 8000, startDelayMs: 3000 },
+        { name: 'MapartBot_2', role: 'slave', enabled: false, joinDelayMs: 16000, startDelayMs: 6000 }
+      ]
     }
   }
 }
@@ -1446,6 +1492,19 @@ function stopMovementControls(bot) {
   }
 }
 
+function configurePathfinderMovements(bot, config) {
+  const printer = config.printer || {}
+  const allowJump = printer.allowJump !== false
+  const movements = new Movements(bot)
+  movements.canDig = false
+  movements.allow1by1towers = false
+  movements.allowParkour = allowJump
+  movements.allowSprinting = true
+  movements.canSprint = true
+  bot.pathfinder.setMovements(movements)
+  return movements
+}
+
 async function gotoWithTemporaryThinkTimeout(bot, goal, timeoutMs) {
   const pathfinderApi = bot.pathfinder || {}
   const previous = pathfinderApi.thinkTimeout
@@ -1459,6 +1518,57 @@ async function gotoWithTemporaryThinkTimeout(bot, goal, timeoutMs) {
     if (Number.isFinite(previous)) {
       pathfinderApi.thinkTimeout = previous
     }
+  }
+}
+
+function currentMultiBotName(config) {
+  return config.multiUser?.runtime?.assignment?.name || config.bot?.username || 'single-bot'
+}
+
+async function withMultiDumpLock(config, action) {
+  if (config.multiUser?.runtime?.enabled !== true) {
+    return await action()
+  }
+
+  const syncFolder = resolveMultiSyncFolder(config)
+  fs.mkdirSync(syncFolder, { recursive: true })
+  const lockFile = path.join(syncFolder, 'dump_lock.json')
+  const owner = currentMultiBotName(config)
+  const staleMs = Math.max(5000, toNumber(config.advanced?.multiDumpLockStaleMs, 30000))
+  const pollMs = 250
+  let lockHandle = null
+  let lastLogAt = 0
+
+  while (!lockHandle) {
+    try {
+      lockHandle = fs.openSync(lockFile, 'wx')
+      fs.writeFileSync(lockHandle, JSON.stringify({ owner, timestampMs: Date.now() }), 'utf8')
+      break
+    } catch (err) {
+      const state = readOptionalJson(lockFile)
+      const age = Number.isFinite(state?.timestampMs) ? Date.now() - state.timestampMs : Number.POSITIVE_INFINITY
+      if (age > staleMs) {
+        try { fs.unlinkSync(lockFile) } catch { }
+        continue
+      }
+      if (Date.now() - lastLogAt > 5000) {
+        lastLogAt = Date.now()
+        console.log(`[MULTI-DUMP] ${owner} waiting for dump lock held by ${state?.owner || 'unknown'}.`)
+      }
+      await delay(pollMs)
+    }
+  }
+
+  try {
+    return await action()
+  } finally {
+    if (lockHandle) {
+      try { fs.closeSync(lockHandle) } catch { }
+    }
+    try {
+      const state = readOptionalJson(lockFile)
+      if (!state || state.owner === owner) fs.unlinkSync(lockFile)
+    } catch { }
   }
 }
 
@@ -1486,7 +1596,8 @@ async function reachDumpStation(bot, config, station, range = 0.5) {
   const stationPos = station?.position
   if (!stationPos) return false
 
-  const dumpAlreadyNearRange = Math.max(range, toNumber(config.advanced?.dumpAlreadyNearRange, 2.25))
+  const dumpAlreadyNearRange = Math.max(range, toNumber(config.advanced?.dumpAlreadyNearRange, 4))
+  const dumpGoalRange = Math.max(range, toNumber(config.advanced?.dumpGoalRange, dumpAlreadyNearRange))
   const dist = bot.entity.position.distanceTo(new bot.entity.position.constructor(Number(stationPos.x), Number(stationPos.y), Number(stationPos.z)))
   if (dist <= dumpAlreadyNearRange) {
     await maintainDumpAim(bot, config, station)
@@ -1494,7 +1605,7 @@ async function reachDumpStation(bot, config, station, range = 0.5) {
   }
 
   const dumpPathThinkTimeoutMs = Math.max(1000, toNumber(config.advanced?.dumpPathThinkTimeoutMs, 3000))
-  await gotoWithTemporaryThinkTimeout(bot, new GoalNear(Number(stationPos.x), Number(stationPos.y), Number(stationPos.z), range), dumpPathThinkTimeoutMs)
+  await gotoWithTemporaryThinkTimeout(bot, new GoalNear(Number(stationPos.x), Number(stationPos.y), Number(stationPos.z), dumpGoalRange), dumpPathThinkTimeoutMs)
   await maintainDumpAim(bot, config, station)
   return true
 }
@@ -2334,7 +2445,11 @@ function getDumpableCarpetStacks(bot, neededByBlock = new Map()) {
   return dumpable
 }
 
-async function dumpCarpetStacks(bot, config, stacks, reasonLabel = 'dumpedStacks') {
+async function dumpCarpetStacks(bot, config, stacks, reasonLabel = 'dumpedStacks', lockHeld = false) {
+  if (!lockHeld && config.multiUser?.runtime?.enabled === true) {
+    return await withMultiDumpLock(config, async () => dumpCarpetStacks(bot, config, stacks, reasonLabel, true))
+  }
+
   const dumpStations = buildDumpStations(config)
   if (!stacks.length) return 0
 
@@ -2496,7 +2611,11 @@ function estimateDumpSlotsNeededForRestock(bot, restockList) {
   return dumpsNeeded
 }
 
-async function dumpCarpetStacksForSpace(bot, config, keepNames = new Set(), maxStacks = 1) {
+async function dumpCarpetStacksForSpace(bot, config, keepNames = new Set(), maxStacks = 1, lockHeld = false) {
+  if (!lockHeld && config.multiUser?.runtime?.enabled === true) {
+    return await withMultiDumpLock(config, async () => dumpCarpetStacksForSpace(bot, config, keepNames, maxStacks, true))
+  }
+
   const dumpStations = buildDumpStations(config)
   if (!dumpStations.length || maxStacks <= 0) return 0
 
@@ -2595,6 +2714,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
     console.log(`[NERV-INVENTORY-WINDOW] ${windowLabel} materials=${planning.materials.length}/16 targets=${planningTargets.length}/${targets.length}`)
   }
   let safetyCounter = 0
+  let didRestockThisWindow = false
 
   while (safetyCounter < maxIterations) {
     safetyCounter++
@@ -2619,7 +2739,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
     }
 
     if (!restockList.length) {
-      if (options.dumpWithoutRestock === true && advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
+      if (!didRestockThisWindow && options.dumpWithoutRestock === true && advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
         console.log(`[NERV-DUMP] Dumping ${plan.dumpSlots.length} slot(s) before next chunk: ${formatDumpSlots(plan.dumpSlots)}`)
         const dumped = await dumpNervInventorySlots(bot, config, plan.dumpSlots, 'nervDumpBeforeNextChunk')
         if (dumped <= 0) return false
@@ -2629,7 +2749,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       return true
     }
 
-    if (advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
+    if (!didRestockThisWindow && advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
       const dumpsNeeded = options.dumpAllUnneededBeforeRestock === true
         ? plan.dumpSlots.length
         : Math.min(plan.dumpSlots.length, estimateDumpSlotsNeededForRestock(bot, restockList))
@@ -2700,6 +2820,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
     }
 
     await delay(toNumber(advanced.postRestockDelayMs, 300))
+    didRestockThisWindow = true
   }
 
   if (config.errorHandling?.logErrors !== false) {
@@ -3159,12 +3280,20 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   const tickMs = Math.max(10, toNumber(advanced.repairFastTickMs, toNumber(printer.fastTraversalTickMs, 40)))
   const maxPerTick = Math.max(1, toNumber(advanced.repairFastMaxPlacementsPerTick, toNumber(printer.maxPlacementsPerTick, 1)))
   const goalRange = Math.max(0.5, toNumber(advanced.repairFastGoalRange, toNumber(advanced.repairGoalRange, Math.max(0.75, placeRange - 1.5))))
+  const moveTimeoutMs = Math.max(1000, toNumber(advanced.repairMoveTimeoutMs, 8000))
+  const progressLogMs = Math.max(1000, toNumber(advanced.repairProgressLogMs, 5000))
+  const fallbackToStopPlace = advanced.repairFallbackToStopPlace !== false
   const Vec3 = bot.entity.position.constructor
   const processed = new Set()
   let active = true
   let placed = 0
   let already = 0
   let skipped = 0
+  let lastProgressAt = Date.now()
+  let lastLogAt = 0
+  let fallbackNeeded = false
+  let stopRepairActive = false
+  const moveFailures = new Map()
 
   const targetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
   const targetPosition = (target) => new Vec3(target.position.x, target.position.y, target.position.z)
@@ -3176,6 +3305,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   }
 
   const markResult = (target, result, prefix) => {
+    lastProgressAt = Date.now()
     if (result.state === 'placed') placed += 1
     else if (result.state === 'already') already += 1
     else {
@@ -3188,6 +3318,11 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
 
   const fastAirLoop = (async () => {
     while (active) {
+      if (stopRepairActive) {
+        await delay(tickMs)
+        continue
+      }
+
       const botPos = bot.entity.position
       const candidates = targets
         .filter((target) => !processed.has(targetKey(target)))
@@ -3233,6 +3368,11 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
     bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
 
     while (processed.size < targets.length) {
+      if (Date.now() - lastLogAt >= progressLogMs) {
+        lastLogAt = Date.now()
+        console.log(`[${label}-PROGRESS] processed=${processed.size}/${targets.length} placed=${placed} already=${already} skipped=${skipped} pos=${bot.entity.position.x.toFixed(1)},${bot.entity.position.y.toFixed(1)},${bot.entity.position.z.toFixed(1)}`)
+      }
+
       const botPos = bot.entity.position
       const remaining = targets
         .map(getResolvedTarget)
@@ -3246,7 +3386,32 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
       const target = remaining[0]
       if (!target) break
 
-      await bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
+      try {
+        await Promise.race([
+          bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange)),
+          delay(moveTimeoutMs).then(() => {
+            throw new Error(`repair move timeout after ${moveTimeoutMs}ms`)
+          })
+        ])
+      } catch (err) {
+        if (typeof bot.pathfinder?.stop === 'function') {
+          try { bot.pathfinder.stop() } catch { }
+        }
+        const message = String(err?.message || err)
+        const failures = (moveFailures.get(targetKey(target)) || 0) + 1
+        moveFailures.set(targetKey(target), failures)
+        console.log(`[${label}-MOVE-WARN] ${target.position.x} ${target.position.y} ${target.position.z} -> ${message}; continuing fast repair (${failures}/2).`)
+        if (failures >= 2) {
+          processed.add(targetKey(target))
+          skipped += 1
+          if (config.errorHandling?.logErrors !== false) {
+            console.log(`[${label}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (move-failed)`)
+          }
+        }
+        await delay(tickMs)
+        continue
+      }
+
       const key = targetKey(target)
       if (processed.has(key)) continue
 
@@ -3260,15 +3425,37 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
 
       processed.add(key)
       try {
-        const result = actual && actual.name !== 'air'
-          ? await placeTarget(bot, config, target, true)
-          : await placeNervScannerTarget(bot, config, target)
+        let result
+        if (actual && actual.name !== 'air') {
+          stopRepairActive = true
+          bot.setControlState('forward', false)
+          bot.setControlState('sprint', false)
+          bot.setControlState('left', false)
+          bot.setControlState('right', false)
+          bot.setControlState('back', false)
+          console.log(`[${label}-STOP-FIX] ${target.position.x} ${target.position.y} ${target.position.z} occupied-by=${actual.name} expected=${target.blockName}`)
+          try {
+            result = await placeTarget(bot, config, target, true)
+          } finally {
+            stopRepairActive = false
+            bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
+          }
+        } else {
+          result = await placeNervScannerTarget(bot, config, target)
+        }
         markResult(target, result, actual && actual.name !== 'air' ? `${label}-STOP` : label)
       } catch (err) {
+        stopRepairActive = false
         skipped += 1
         if (config.errorHandling?.logErrors !== false) {
           console.log(`[${label}-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
         }
+      }
+
+      if (Date.now() - lastProgressAt > Math.max(moveTimeoutMs, progressLogMs * 2)) {
+        console.log(`[${label}-PROGRESS-WARN] no repair placement progress for ${Date.now() - lastProgressAt}ms; falling back to stop-place.`)
+        fallbackNeeded = true
+        break
       }
     }
   } catch (err) {
@@ -3278,6 +3465,19 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   } finally {
     active = false
     await fastAirLoop
+  }
+
+  if (fallbackNeeded && fallbackToStopPlace) {
+    const remainingTargets = targets
+      .map(getResolvedTarget)
+      .filter((target) => !processed.has(targetKey(target)))
+    if (remainingTargets.length > 0) {
+      console.log(`[${label}-FALLBACK] stop-place repair for ${remainingTargets.length} remaining target(s).`)
+      const fallback = await repairTargets(bot, config, remainingTargets, placeRange)
+      placed += fallback.placed
+      already += fallback.already
+      skipped += fallback.skipped
+    }
   }
 
   return { placed, already, skipped }
@@ -3770,7 +3970,27 @@ async function runPrint(bot, config) {
   }
 
   const input = await loadTargets(config)
-  const calibratedTargets = calibrateTargetsForWorld(bot, input.targets, config)
+  let calibratedTargets = calibrateTargetsForWorld(bot, input.targets, config)
+  const multiRuntime = config.multiUser?.runtime?.enabled === true ? config.multiUser.runtime : null
+  const multiAssignment = multiRuntime?.assignment || null
+  const multiRole = String(multiRuntime?.role || '').toLowerCase()
+  if (multiAssignment?.interval) {
+    const start = Math.max(0, toNumber(multiAssignment.interval.start, 0))
+    const end = Math.min(127, toNumber(multiAssignment.interval.end, 127))
+    calibratedTargets = calibratedTargets.filter((target) => target.col >= start && target.col <= end)
+    console.log(`[MULTI-${multiRole.toUpperCase() || 'WORKER'}] ${multiAssignment.name} interval=${start}-${end} selectedTargets=${calibratedTargets.length}/${input.targets.length}`)
+    if (multiRole !== 'master') {
+      writeMultiSlaveState(config, multiAssignment, { ready: true, finished: false, errorCount: 0, phase: 'ready' })
+      await waitForMultiMasterRunning(config)
+    } else {
+      await waitForMultiSlavesReady(config, multiRuntime.plan || buildMultiUserPlan(config))
+      writeMultiMasterState(config, multiRuntime.plan || buildMultiUserPlan(config), true, {
+        jobId: multiRuntime.jobId,
+        generation: multiRuntime.generation
+      })
+      console.log('[MULTI-MASTER] All workers released: master_state running=true.')
+    }
+  }
   const linesPerRun = toNumber(printer.linesPerRun, 3)
   const printChunkLines = getInventoryManagedLinesPerRun(config, linesPerRun)
   const northToSouth = printer.northToSouth !== false
@@ -3951,6 +4171,29 @@ async function runPrint(bot, config) {
 
   console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
 
+  if (multiRuntime && multiRole !== 'master') {
+    writeMultiSlaveState(config, multiAssignment, {
+      ready: false,
+      finished: true,
+      errorCount: errorList.length,
+      phase: 'finished'
+    })
+    console.log(`[MULTI-SLAVE] ${multiAssignment?.name || bot.username} finished interval ${multiAssignment?.interval?.start}-${multiAssignment?.interval?.end}; skipping post-print workflow.`)
+    if (progressEnabled) {
+      clearProgressState(progressFile)
+    }
+    return {
+      sourceType: input.sourceType,
+      sourcePath: input.sourcePath,
+      sourceName: input.sourceName,
+      didWork: true
+    }
+  }
+
+  if (multiRuntime && multiRole === 'master') {
+    await waitForMultiSlavesFinished(config, multiRuntime.plan || buildMultiUserPlan(config))
+  }
+
     // Persist phase=post_print so crash here resumes post-print, not repair again
   if (progressEnabled) {
     writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
@@ -4081,6 +4324,24 @@ async function runPrint(bot, config) {
     if (!progressEnabled) return
     const processedTargets = Math.min(orderedTargets.length, resumeFrom + processedInRun)
     writeProgressSnapshot(progressFile, input, orderedTargets.length, processedTargets, phase, details)
+    if (multiRuntime && multiAssignment) {
+      const heartbeatDetails = {
+        ready: multiRole !== 'master',
+        finished: false,
+        errorCount: errorList.length,
+        phase,
+        state: details.state || null,
+        action: details.action || null,
+        processedTargets,
+        totalTargets: orderedTargets.length,
+        sourceName: input.sourceName
+      }
+      if (multiRole === 'master') {
+        writeMultiMasterState(config, multiRuntime.plan || buildMultiUserPlan(config), true, heartbeatDetails)
+      } else {
+        writeMultiSlaveState(config, multiAssignment, heartbeatDetails)
+      }
+    }
   }
 
   if (progressEnabled) {
@@ -4356,6 +4617,29 @@ async function runPrint(bot, config) {
 
   console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
 
+  if (multiRuntime && multiRole !== 'master') {
+    writeMultiSlaveState(config, multiAssignment, {
+      ready: false,
+      finished: true,
+      errorCount: errorList.length,
+      phase: 'finished'
+    })
+    console.log(`[MULTI-SLAVE] ${multiAssignment?.name || bot.username} finished interval ${multiAssignment?.interval?.start}-${multiAssignment?.interval?.end}; skipping post-print workflow.`)
+    if (progressEnabled) {
+      clearProgressState(progressFile)
+    }
+    return {
+      sourceType: input.sourceType,
+      sourcePath: input.sourcePath,
+      sourceName: input.sourceName,
+      didWork: true
+    }
+  }
+
+  if (multiRuntime && multiRole === 'master') {
+    await waitForMultiSlavesFinished(config, multiRuntime.plan || buildMultiUserPlan(config))
+  }
+
   // Persist phase=post_print so crash here resumes post-print, not repair again
   if (progressEnabled) {
     writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
@@ -4383,6 +4667,17 @@ async function runPrint(bot, config) {
 
   if (files.disableOnFinished !== false) {
     console.log('[STATE] Job finished.')
+  }
+
+  if (multiRuntime && multiRole === 'master') {
+    writeMultiMasterState(config, multiRuntime.plan || buildMultiUserPlan(config), false, {
+      phase: 'finished',
+      state: 'job_finished',
+      action: 'post-print-complete',
+      processedTargets: orderedTargets.length,
+      totalTargets: orderedTargets.length,
+      sourceName: input.sourceName
+    })
   }
 
   if (progressEnabled) {
@@ -4420,6 +4715,359 @@ function getCliValue(name) {
   const prefix = `${name}=`
   const entry = process.argv.slice(2).find((arg) => arg.startsWith(prefix))
   return entry ? entry.slice(prefix.length) : null
+}
+
+function sanitizeSyncName(name) {
+  return String(name || '').replace(/[^a-zA-Z0-9._-]/g, '_')
+}
+
+function getEnabledMultiBots(config) {
+  const multi = config.multiUser || {}
+  const configured = Array.isArray(multi.bots) ? multi.bots : []
+  const bots = configured
+    .filter((entry) => entry && entry.enabled !== false)
+    .map((entry, index) => ({
+      name: String(entry.name || entry.username || `MapartBot_${index}`).trim(),
+      role: String(entry.role || (index === 0 ? 'master' : 'slave')).toLowerCase(),
+      joinDelayMs: Math.max(0, toNumber(entry.joinDelayMs, index * toNumber(multi.joinStaggerMs, 8000))),
+      startDelayMs: Math.max(0, toNumber(entry.startDelayMs, index * toNumber(multi.startStaggerMs, 3000))),
+      raw: entry
+    }))
+    .filter((entry) => entry.name)
+
+  if (!bots.some((entry) => entry.role === 'master') && bots.length) {
+    bots[0].role = 'master'
+  }
+
+  return bots
+}
+
+function computeWorkerIntervals(workerCount, width = 128) {
+  const count = Math.max(1, toNumber(workerCount, 1))
+  const size = Math.max(1, toNumber(width, 128))
+  const intervals = []
+  for (let i = 0; i < count; i += 1) {
+    intervals.push({
+      start: Math.floor(i * size / count),
+      end: Math.floor((i + 1) * size / count) - 1
+    })
+  }
+  return intervals
+}
+
+function buildMultiUserPlan(config) {
+  const bots = getEnabledMultiBots(config)
+  const master = bots.find((entry) => entry.role === 'master') || bots[0] || null
+  const slaves = bots.filter((entry) => entry !== master)
+  const orderedWorkers = master ? [master, ...slaves] : bots
+  const intervals = computeWorkerIntervals(orderedWorkers.length, 128)
+  const assignments = orderedWorkers.map((bot, index) => ({
+    ...bot,
+    interval: intervals[index] || { start: 0, end: 127 },
+    progressFile: `./logs/nerv-printer-progress-${sanitizeSyncName(bot.name)}.json`,
+    stateFile: bot.role === 'master'
+      ? 'master_state.json'
+      : `slave_${sanitizeSyncName(bot.name)}_state.json`
+  }))
+
+  return {
+    mode: String(config.multiUser?.mode || 'file').toLowerCase(),
+    syncFolder: config.multiUser?.syncFolder || './logs/nerv-printer-sync',
+    master: assignments.find((entry) => entry.role === 'master') || null,
+    assignments
+  }
+}
+
+function multiPlanMatchesState(plan, state) {
+  if (!state || !Array.isArray(state.intervals)) return false
+  const expected = plan.assignments.map((entry) => `${entry.name}:${entry.role}:${entry.interval.start}-${entry.interval.end}`).sort()
+  const actual = state.intervals.map((entry) => `${entry.player}:${entry.role}:${entry.start}-${entry.end}`).sort()
+  return expected.length === actual.length && expected.every((entry, index) => entry === actual[index])
+}
+
+function hasAnyMultiProgress(plan) {
+  return plan.assignments.some((assignment) => {
+    const progressPath = path.resolve(process.cwd(), assignment.progressFile)
+    const progress = readOptionalJson(progressPath)
+    return progress && String(progress.phase || '').toLowerCase() !== 'done'
+  })
+}
+
+function resolveMultiRuntimeForLaunch(config, plan) {
+  const now = Date.now()
+  const existing = readOptionalJson(path.join(resolveMultiSyncFolder(config), 'master_state.json'))
+  const canReuse = config.multiUser?.resumeExistingJob !== false &&
+    existing?.jobId &&
+    Number.isFinite(existing.generation) &&
+    multiPlanMatchesState(plan, existing) &&
+    (existing.running === true || hasAnyMultiProgress(plan))
+
+  if (canReuse) {
+    console.log(`[MULTI] Resuming existing jobId=${existing.jobId} generation=${existing.generation}.`)
+    return {
+      jobId: existing.jobId,
+      generation: Number(existing.generation),
+      resumed: true
+    }
+  }
+
+  return {
+    jobId: `job-${now}`,
+    generation: now,
+    resumed: false
+  }
+}
+
+function resolveMultiSyncFolder(config) {
+  return path.resolve(process.cwd(), config.multiUser?.syncFolder || './logs/nerv-printer-sync')
+}
+
+function multiStateFile(config, assignment) {
+  return path.join(resolveMultiSyncFolder(config), assignment.stateFile)
+}
+
+function getMultiRuntime(config) {
+  return config.multiUser?.runtime || {}
+}
+
+function multiStateMatchesRuntime(config, state) {
+  const runtime = getMultiRuntime(config)
+  if (!state) return false
+  if (runtime.jobId && state.jobId && state.jobId !== runtime.jobId) return false
+  if (Number.isFinite(runtime.generation) && Number.isFinite(state.generation) && Number(state.generation) !== Number(runtime.generation)) return false
+  return true
+}
+
+function readMultiState(config, assignment) {
+  const state = readOptionalJson(multiStateFile(config, assignment))
+  return multiStateMatchesRuntime(config, state) ? state : null
+}
+
+function readMultiMasterState(config) {
+  const state = readOptionalJson(path.join(resolveMultiSyncFolder(config), 'master_state.json'))
+  return multiStateMatchesRuntime(config, state) ? state : null
+}
+
+function writeMultiMasterState(config, plan, running, extra = {}) {
+  const master = plan.master
+  if (!master) return
+  const runtime = getMultiRuntime(config)
+  writeJson(path.join(resolveMultiSyncFolder(config), 'master_state.json'), {
+    jobId: runtime.jobId || extra.jobId || `job-${Date.now()}`,
+    generation: toNumber(runtime.generation, toNumber(extra.generation, 0)),
+    masterPlayerName: master.name,
+    running: running === true,
+    timestampMs: Date.now(),
+    heartbeatMs: Math.max(1000, toNumber(config.multiUser?.heartbeatMs, 5000)),
+    intervals: plan.assignments.map((entry) => ({
+      player: entry.name,
+      role: entry.role,
+      start: entry.interval.start,
+      end: entry.interval.end
+    })),
+    ...extra
+  })
+}
+
+function writeMultiSlaveState(config, assignment, state = {}) {
+  const previous = readOptionalJson(multiStateFile(config, assignment)) || {}
+  const runtime = getMultiRuntime(config)
+  writeJson(multiStateFile(config, assignment), {
+    jobId: runtime.jobId || previous.jobId || `job-${Date.now()}`,
+    generation: toNumber(runtime.generation, toNumber(previous.generation, 0)),
+    playerName: assignment.name,
+    role: assignment.role,
+    interval: assignment.interval,
+    ready: state.ready === true,
+    finished: state.finished === true,
+    errorCount: Math.max(0, toNumber(state.errorCount, 0)),
+    phase: state.phase || 'unknown',
+    state: state.state || previous.state || null,
+    action: state.action || previous.action || null,
+    processedTargets: Number.isFinite(state.processedTargets) ? state.processedTargets : previous.processedTargets,
+    totalTargets: Number.isFinite(state.totalTargets) ? state.totalTargets : previous.totalTargets,
+    sourceName: state.sourceName || previous.sourceName || null,
+    session: Number.isFinite(state.session) ? state.session : previous.session,
+    timestampMs: Date.now()
+  })
+}
+
+function isFreshMultiState(state, staleMs) {
+  if (!state || !Number.isFinite(state.timestampMs)) return false
+  const age = Date.now() - state.timestampMs
+  return age >= 0 && age <= Math.max(1000, toNumber(staleMs, 15000))
+}
+
+function writeMultiWorkerHeartbeat(config, assignment) {
+  if (!assignment || config.multiUser?.runtime?.enabled !== true) return
+  if (assignment.role === 'master') {
+    const plan = config.multiUser.runtime.plan || buildMultiUserPlan(config)
+    const previous = readMultiMasterState(config)
+    writeMultiMasterState(config, plan, previous?.running === true, {
+      phase: previous?.phase || 'connected',
+      state: previous?.state || null,
+      action: previous?.action || null,
+      processedTargets: previous?.processedTargets,
+      totalTargets: previous?.totalTargets,
+      sourceName: previous?.sourceName || null
+    })
+    return
+  }
+
+  const previous = readMultiState(config, assignment)
+  writeMultiSlaveState(config, assignment, {
+    ready: previous?.ready === true,
+    finished: previous?.finished === true,
+    errorCount: toNumber(previous?.errorCount, 0),
+    phase: previous?.phase || 'connected',
+    state: previous?.state || null,
+    action: previous?.action || null,
+    processedTargets: previous?.processedTargets,
+    totalTargets: previous?.totalTargets,
+    sourceName: previous?.sourceName || null
+  })
+}
+
+async function waitForMultiSlavesFinished(config, plan) {
+  const staleMs = Math.max(1000, toNumber(config.multiUser?.staleStateMs, 15000))
+  const pollMs = Math.max(500, Math.min(5000, Math.floor(staleMs / 3)))
+  const slaves = plan.assignments.filter((entry) => entry.role !== 'master')
+  if (!slaves.length) return true
+
+  console.log(`[MULTI-MASTER] Waiting for ${slaves.length} slave(s) to finish before post-print.`)
+  let lastLogAt = 0
+  let lastHeartbeatAt = 0
+  while (true) {
+    const pending = []
+    for (const slave of slaves) {
+      const state = readMultiState(config, slave)
+      const fresh = isFreshMultiState(state, staleMs)
+      const finished = state?.finished === true
+      if (!finished) pending.push(`${slave.name}${fresh ? '' : ':stale'}`)
+    }
+
+    if (!pending.length) {
+      console.log('[MULTI-MASTER] All slaves finished.')
+      return true
+    }
+
+    if (Date.now() - lastHeartbeatAt > Math.max(1000, toNumber(config.multiUser?.heartbeatMs, 5000))) {
+      lastHeartbeatAt = Date.now()
+      writeMultiMasterState(config, plan, true, { phase: 'waiting_slaves_finished' })
+    }
+    if (Date.now() - lastLogAt > 10000) {
+      lastLogAt = Date.now()
+      console.log(`[MULTI-MASTER] Waiting for slaves: ${pending.join(', ')}`)
+    }
+    await delay(pollMs)
+  }
+}
+
+async function waitForMultiSlavesReady(config, plan) {
+  if (config.multiUser?.requireAllReady === false) return true
+  const staleMs = Math.max(1000, toNumber(config.multiUser?.staleStateMs, 15000))
+  const pollMs = Math.max(500, Math.min(5000, Math.floor(staleMs / 3)))
+  const slaves = plan.assignments.filter((entry) => entry.role !== 'master')
+  if (!slaves.length) return true
+
+  console.log(`[MULTI-MASTER] Waiting for ${slaves.length} slave(s) ready before starting interval.`)
+  let lastLogAt = 0
+  let lastHeartbeatAt = 0
+  while (true) {
+    const pending = []
+    for (const slave of slaves) {
+      const state = readMultiState(config, slave)
+      const fresh = isFreshMultiState(state, staleMs)
+      const ready = fresh && state.ready === true
+      const finished = state?.finished === true
+      if (!ready && !finished) pending.push(`${slave.name}${fresh ? '' : ':stale'}`)
+    }
+
+    if (!pending.length) {
+      console.log('[MULTI-MASTER] All slaves ready.')
+      return true
+    }
+
+    if (Date.now() - lastHeartbeatAt > Math.max(1000, toNumber(config.multiUser?.heartbeatMs, 5000))) {
+      lastHeartbeatAt = Date.now()
+      writeMultiMasterState(config, plan, false, { phase: 'waiting_slaves_ready' })
+    }
+    if (Date.now() - lastLogAt > 10000) {
+      lastLogAt = Date.now()
+      console.log(`[MULTI-MASTER] Waiting for ready slaves: ${pending.join(', ')}`)
+    }
+    await delay(pollMs)
+  }
+}
+
+async function waitForMultiMasterRunning(config) {
+  const staleMs = Math.max(1000, toNumber(config.multiUser?.staleStateMs, 15000))
+  const pollMs = Math.max(500, Math.min(5000, Math.floor(staleMs / 3)))
+  const assignment = config.multiUser?.runtime?.assignment || null
+  let lastLogAt = 0
+  let lastReadyWriteAt = 0
+  while (true) {
+    if (assignment && Date.now() - lastReadyWriteAt >= Math.max(1000, Math.floor(pollMs / 2))) {
+      lastReadyWriteAt = Date.now()
+      writeMultiSlaveState(config, assignment, { ready: true, finished: false, errorCount: 0, phase: 'waiting_master' })
+    }
+    const state = readMultiMasterState(config)
+    if (isFreshMultiState(state, staleMs) && state.running === true) return true
+    if (Date.now() - lastLogAt > 10000) {
+      lastLogAt = Date.now()
+      console.log('[MULTI-SLAVE] Waiting for fresh master_state.json running=true.')
+    }
+    await delay(pollMs)
+  }
+}
+
+function makeMultiWorkerConfig(config, plan, assignment) {
+  const workerConfig = cloneJson(config)
+  workerConfig.bot = { ...(workerConfig.bot || {}), username: assignment.name }
+  workerConfig.files = {
+    ...(workerConfig.files || {}),
+    progressFile: assignment.progressFile,
+    moveToFinishedFolder: assignment.role === 'master' && config.files?.moveToFinishedFolder === true
+  }
+  workerConfig.printer = {
+    ...(workerConfig.printer || {}),
+    startDelayMs: Math.max(0, toNumber(config.printer?.startDelayMs, 1500) + toNumber(assignment.startDelayMs, 0))
+  }
+  workerConfig.multiUser = {
+    ...(workerConfig.multiUser || {}),
+    enabled: true,
+    runtime: {
+      enabled: true,
+      mode: plan.mode,
+      jobId: config.multiUser?.runtime?.jobId || `job-${Date.now()}`,
+      generation: toNumber(config.multiUser?.runtime?.generation, 0),
+      role: assignment.role,
+      assignment,
+      plan
+    }
+  }
+  return workerConfig
+}
+
+async function runMultiUserPlanTest(config) {
+  const plan = buildMultiUserPlan(config)
+  console.log(`[TEST-MULTI] mode=${plan.mode} syncFolder=${plan.syncFolder}`)
+  if (!plan.assignments.length) {
+    console.log('[TEST-MULTI] No enabled bots configured.')
+    return
+  }
+
+  for (const bot of plan.assignments) {
+    const width = bot.interval.end - bot.interval.start + 1
+    console.log(`[TEST-MULTI] ${bot.role.toUpperCase()} ${bot.name}: interval=${bot.interval.start}-${bot.interval.end} width=${width} joinDelayMs=${bot.joinDelayMs} startDelayMs=${bot.startDelayMs} progress=${bot.progressFile} state=${bot.stateFile}`)
+  }
+
+  const totalWidth = plan.assignments.reduce((sum, entry) => sum + (entry.interval.end - entry.interval.start + 1), 0)
+  const hasOverlap = plan.assignments.some((entry, index) => plan.assignments.some((other, otherIndex) => {
+    if (index >= otherIndex) return false
+    return entry.interval.start <= other.interval.end && other.interval.start <= entry.interval.end
+  }))
+  console.log(`[TEST-MULTI] coverage=${totalWidth}/128 overlap=${hasOverlap}`)
 }
 
 async function runDumpTest(bot, config) {
@@ -4491,11 +5139,7 @@ function runSingleDumpTestSession(config) {
 
       console.log('[TEST-DUMP] Connected.')
 
-      const movements = new Movements(bot)
-      movements.canDig = false
-      movements.allow1by1towers = false
-      movements.allowParkour = allowJump
-      bot.pathfinder.setMovements(movements)
+      configurePathfinderMovements(bot, config)
 
       try {
         await delay(toNumber(printer.startDelayMs, 1500))
@@ -4648,11 +5292,7 @@ function runSingleMovingPlaceTestSession(config) {
 
       console.log('[TEST-MOVE-PLACE] Connected.')
 
-      const movements = new Movements(bot)
-      movements.canDig = false
-      movements.allow1by1towers = false
-      movements.allowParkour = allowJump
-      bot.pathfinder.setMovements(movements)
+      configurePathfinderMovements(bot, config)
 
       try {
         await delay(toNumber(printer.startDelayMs, 1500))
@@ -4778,37 +5418,55 @@ async function placeNervScannerTarget(bot, config, target) {
   }
 
   if (String(bot.heldItem?.name || '') !== target.blockName) {
-    const inventoryItem = bot.inventory.items().find((entry) => entry.name === target.blockName)
-    if (!inventoryItem) {
+    const equipped = await equipMaterial(bot, config, target.blockName)
+    if (!equipped) {
       return { state: 'skip', reason: `missing-item-${target.blockName}` }
     }
     await delay(toNumber(advanced.scannerPreSwapDelayMs, 0))
-    await bot.equip(inventoryItem, 'hand')
     await delay(toNumber(advanced.scannerPostSwapDelayMs, 0))
+  }
+
+  if (String(bot.heldItem?.name || '') !== target.blockName) {
+    const equipped = await equipMaterial(bot, config, target.blockName)
+    if (!equipped || String(bot.heldItem?.name || '') !== target.blockName) {
+      return { state: 'skip', reason: `missing-item-${target.blockName}` }
+    }
   }
 
   const sneakOnDispenserOnly = config.advanced?.sneakOnDispenserOnly !== false
   const shouldSneak = sneakOnDispenserOnly ? support.name === 'dispenser' : true
-  try {
-    if (shouldSneak) {
-      bot.setControlState('sneak', true)
-    }
+  let lastErr = null
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      if (shouldSneak) {
+        bot.setControlState('sneak', true)
+      }
 
-    if (typeof bot._genericPlace === 'function') {
-      await bot._genericPlace(support, new Vec3(0, 1, 0), {
-        swingArm: 'right',
-        forceLook: 'ignore'
-      })
-    } else {
-      await bot.placeBlock(support, new Vec3(0, 1, 0))
+      if (typeof bot._genericPlace === 'function') {
+        await bot._genericPlace(support, new Vec3(0, 1, 0), {
+          swingArm: 'right',
+          forceLook: 'ignore'
+        })
+      } else {
+        await bot.placeBlock(support, new Vec3(0, 1, 0))
+      }
+      return { state: 'placed' }
+    } catch (err) {
+      lastErr = err
+      const errMsg = String(err?.message || err).toLowerCase()
+      if (!errMsg.includes('must be holding an item') || attempt >= 2) {
+        throw err
+      }
+      await equipMaterial(bot, config, target.blockName)
+      await delay(toNumber(advanced.scannerPostSwapDelayMs, 0))
+    } finally {
+      if (shouldSneak) {
+        bot.setControlState('sneak', false)
+      }
     }
-  } finally {
-    if (shouldSneak) {
-      bot.setControlState('sneak', false)
-    }
-  }
+  } 
 
-  return { state: 'placed' }
+  throw lastErr || new Error('scanner placement failed')
 }
 
 async function runNervScannerTest(bot, config) {
@@ -5107,11 +5765,7 @@ function runSingleNervScannerTestSession(config) {
 
       console.log('[TEST-NERV-SCANNER] Connected.')
 
-      const movements = new Movements(bot)
-      movements.canDig = false
-      movements.allow1by1towers = false
-      movements.allowParkour = allowJump
-      bot.pathfinder.setMovements(movements)
+      configurePathfinderMovements(bot, config)
 
       try {
         await delay(toNumber(printer.startDelayMs, 1500))
@@ -5157,11 +5811,7 @@ function runSingleNervWorkloadTestSession(config) {
 
       console.log('[TEST-NERV-WORKLOAD] Connected.')
 
-      const movements = new Movements(bot)
-      movements.canDig = false
-      movements.allow1by1towers = false
-      movements.allowParkour = allowJump
-      bot.pathfinder.setMovements(movements)
+      configurePathfinderMovements(bot, config)
 
       try {
         await delay(toNumber(printer.startDelayMs, 1500))
@@ -5470,11 +6120,7 @@ function runSingleInventoryCycleTestSession(config) {
 
       console.log('[TEST-INVENTORY-CYCLE] Connected.')
 
-      const movements = new Movements(bot)
-      movements.canDig = false
-      movements.allow1by1towers = false
-      movements.allowParkour = allowJump
-      bot.pathfinder.setMovements(movements)
+      configurePathfinderMovements(bot, config)
 
       try {
         await delay(toNumber(config.printer?.startDelayMs, 1500))
@@ -5520,11 +6166,7 @@ function runSingleRepairTestSession(config) {
 
       console.log('[TEST-REPAIR] Connected.')
 
-      const movements = new Movements(bot)
-      movements.canDig = false
-      movements.allow1by1towers = false
-      movements.allowParkour = allowJump
-      bot.pathfinder.setMovements(movements)
+      configurePathfinderMovements(bot, config)
 
       try {
         await delay(toNumber(config.printer?.startDelayMs, 1500))
@@ -5643,11 +6285,7 @@ function runSingleSession(config, sessionNumber) {
 
       console.log(`[SPAWN] Connected. session=${sessionNumber}`)
 
-      const movements = new Movements(bot)
-      movements.canDig = false
-      movements.allow1by1towers = false
-      movements.allowParkour = allowJump
-      bot.pathfinder.setMovements(movements)
+      configurePathfinderMovements(bot, config)
 
       await delay(toNumber(printer.startDelayMs, 1500))
 
@@ -5729,6 +6367,71 @@ function runSingleSession(config, sessionNumber) {
   })
 }
 
+async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
+  return logContext.run({ botName: assignment.name }, async () => {
+    await delay(Math.max(0, toNumber(assignment.joinDelayMs, 0)))
+    console.log(`[MULTI-LAUNCH] ${assignment.name} role=${assignment.role} joining after ${assignment.joinDelayMs}ms interval=${assignment.interval.start}-${assignment.interval.end}`)
+
+    let attempt = 1
+    while (true) {
+      if (attempt > 1) {
+        console.log(`[RECONNECT] Starting attempt ${attempt}/${reconnect.maxAttempts}.`)
+      }
+
+      writeMultiWorkerHeartbeat(workerConfig, assignment)
+      const heartbeatMs = Math.max(1000, toNumber(workerConfig.multiUser?.heartbeatMs, 5000))
+      const heartbeatTimer = setInterval(() => {
+        try { writeMultiWorkerHeartbeat(workerConfig, assignment) } catch { }
+      }, heartbeatMs)
+      let session
+      try {
+        session = await runSingleSession(workerConfig, attempt)
+      } finally {
+        clearInterval(heartbeatTimer)
+      }
+      const retryable = shouldRetryReconnect(session)
+      console.log(`[SESSION] attempt=${attempt} end=${session.endReason} retryable=${retryable}`)
+
+      if (!reconnect.enabled || !retryable || attempt >= reconnect.maxAttempts) {
+        break
+      }
+
+      console.log(`[RECONNECT] Retrying in ${reconnect.delayMs}ms. reason=${session.endReason}`)
+      await delay(reconnect.delayMs)
+      attempt += 1
+    }
+  })
+}
+
+async function runMultiUserLive(config, reconnect) {
+  const plan = buildMultiUserPlan(config)
+  if (plan.mode !== 'file') {
+    throw new Error(`Unsupported multiUser.mode=${plan.mode}; only "file" is implemented.`)
+  }
+  if (!plan.master) {
+    throw new Error('multiUser requires one enabled master bot.')
+  }
+  if (config.multiUser?.launchFromSingleProcess === false) {
+    throw new Error('multiUser.launchFromSingleProcess=false is not implemented yet. Set it true to launch the configured roster from this process.')
+  }
+
+  const runtime = resolveMultiRuntimeForLaunch(config, plan)
+  config.multiUser = { ...(config.multiUser || {}), runtime }
+  writeMultiMasterState(config, plan, runtime.resumed === true, { jobId: runtime.jobId, generation: runtime.generation, phase: runtime.resumed ? 'resumed' : 'starting' })
+
+  console.log(`[MULTI] Starting ${plan.assignments.length} worker(s) with file coordination. syncFolder=${plan.syncFolder}`)
+  for (const entry of plan.assignments) {
+    console.log(`[MULTI] ${entry.role.toUpperCase()} ${entry.name}: interval=${entry.interval.start}-${entry.interval.end} joinDelayMs=${entry.joinDelayMs} startDelayMs=${entry.startDelayMs}`)
+  }
+
+  const workers = plan.assignments.map((assignment) => {
+    const workerConfig = makeMultiWorkerConfig(config, plan, assignment)
+    return runWorkerReconnectLoop(workerConfig, assignment, reconnect)
+  })
+
+  await Promise.all(workers)
+}
+
 async function start() {
   const config = loadConfig()
   const reconnect = getReconnectConfig(config)
@@ -5791,8 +6494,16 @@ async function start() {
     return
   }
 
+  if (hasCliFlag('--test-multi-user-plan')) {
+    console.log('[TEST-MULTI] Running isolated multi-user planning test only. No bot will connect.')
+    await runMultiUserPlanTest(config)
+    setTimeout(() => process.exit(0), 100)
+    return
+  }
+
   if (config.multiUser?.enabled) {
-    console.log('[INFO] Multi-user settings are ignored in this single-bot Mineflayer implementation.')
+    await runMultiUserLive(config, reconnect)
+    return
   }
 
   let attempt = 1

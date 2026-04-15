@@ -45,13 +45,13 @@
     "rotate": false,
     "northToSouth": true,
     "mapFillSquareSize": 1,
-    "sprintMode": "always",
+    "sprintMode": "off",
     "fastTraversalEnabled": true,
     "fastTraversalTickMs": 10,
     "fastTraversalCheckpointEveryRows": 8,
-    "fastTraversalCatchupPasses": 4,
+    "fastTraversalCatchupPasses": 2,
     "fastTraversalCatchupStallMs": 500,
-    "maxPlacementsPerTick": 10
+    "maxPlacementsPerTick": 20
   },
   "advanced": {
     "preRestockDelayMs": 0,
@@ -90,7 +90,9 @@
     "dumpTestStationWaitMs": 7000,
     "dumpTestTossAtEachStation": true,
     "dumpPathThinkTimeoutMs": 3000,
-    "dumpAlreadyNearRange": 2.25,
+    "dumpAlreadyNearRange": 4,
+    "dumpGoalRange": 2,
+    "multiDumpLockStaleMs": 30000,
     "dumpReaimEveryStacks": 0,
     "movingPlaceTestTargetCount": 32,
     "movingPlaceTestCheckpointEveryRows": 8,
@@ -100,10 +102,10 @@
     "nervWorkloadTestLineGroups": 2,
     "nervWorkloadTestWaitAfterMs": 5000,
     "scannerPlaceDelayMs": 0,
-    "scannerMaxCatchupPlacements": 12,
-    "scannerWorkloadPollMs": 5,
+    "scannerMaxCatchupPlacements": 24,
+    "scannerWorkloadPollMs": 2,
     "scannerWorkloadLogEveryMs": 1000,
-    "scannerRetryCooldownMs": 30,
+    "scannerRetryCooldownMs": 10,
     "scannerPreSwapDelayMs": 0,
     "scannerPostSwapDelayMs": 0,
     "scannerWorkloadMode": "fixed",
@@ -113,6 +115,9 @@
     "repairTestMaxPasses": 3,
     "repairGoalRange": 3.25,
     "repairTargetSettleMs": 0,
+    "repairMoveTimeoutMs": 30000,
+    "repairProgressLogMs": 5000,
+    "repairFallbackToStopPlace": true,
     "repairVerifySettleMs": 120,
     "repairMaxMismatchRatio": 0.25,
     "repairMaxMismatchCount": 512,
@@ -144,6 +149,41 @@
 
   },
   "multiUser": {
-    "enabled": false
+    "enabled": true,
+    "mode": "file",
+    "syncFolder": "./logs/nerv-printer-sync",
+    "requireAllReady": true,
+    "recoveryMarginBlocks": 20,
+    "recoveryDelayMs": 2000,
+    "staleStateMs": 25000,
+    "heartbeatMs": 5000,
+    "resumeExistingJob": true,
+    "startAllOnMasterReady": true,
+    "joinStaggerMs": 8000,
+    "startStaggerMs": 3000,
+    "launchFromSingleProcess": true,
+    "bots": [
+      {
+        "name": "MapartBot",
+        "role": "master",
+        "enabled": true,
+        "joinDelayMs": 5000,
+        "startDelayMs": 5500
+      },
+      {
+        "name": "MapartBot1",
+        "role": "slave",
+        "enabled": true,
+        "joinDelayMs": 2000,
+        "startDelayMs": 2500
+      },
+      {
+        "name": "MapartBot2",
+        "role": "slave",
+        "enabled": true,
+        "joinDelayMs": 3000,
+        "startDelayMs": 3500
+      }
+    ]
   }
 }

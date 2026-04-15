@@ -16,6 +16,7 @@
     "test:inventory-cycle": "node nerv-printer.js --test-inventory-cycle",
     "test:inventory-2rows": "node nerv-printer.js --test-inventory-cycle --inventory-rows=2",
     "test:repair": "node nerv-printer.js --test-repair",
+    "test:multi-user-plan": "node nerv-printer.js --test-multi-user-plan",
     "start:broadcast": "set ENABLE_QUOTE_BROADCAST=true&& node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
