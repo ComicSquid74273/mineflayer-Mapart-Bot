@@ -105,6 +105,63 @@ function clearProgressState(filePath) {
   }
 }
 
+function compactProgressDetails(details = {}) {
+  const compacted = {}
+  for (const [key, value] of Object.entries(details || {})) {
+    if (value !== undefined) compacted[key] = value
+  }
+  return compacted
+}
+
+function createProgressState(input, totalTargets, processedTargets, phase, details = {}) {
+  const progressDetails = compactProgressDetails(details)
+  const state = {
+    sourceType: input.sourceType,
+    sourceName: input.sourceName,
+    sourcePath: input.sourcePath,
+    totalTargets,
+    processedTargets: Math.max(0, Math.min(totalTargets, toNumber(processedTargets, 0))),
+    phase,
+    state: progressDetails.state || phase,
+    updatedAt: new Date().toISOString()
+  }
+
+  for (const [key, value] of Object.entries(progressDetails)) {
+    if (key !== 'state') state[key] = value
+  }
+
+  return state
+}
+
+function writeProgressSnapshot(filePath, input, totalTargets, processedTargets, phase, details = {}) {
+  writeProgressState(filePath, createProgressState(input, totalTargets, processedTargets, phase, details))
+}
+
+function normalizeResumePhase(phase) {
+  const value = String(phase || 'printing').toLowerCase()
+  if (value === 'repair' || value.startsWith('repair_')) return 'repair'
+  if (value === 'post_print' || value.startsWith('post_print')) return 'post_print'
+  if (value === 'finished') return 'finished'
+  return 'printing'
+}
+
+function markProgressInterrupted(config, reason, sessionNumber) {
+  const files = config.files || {}
+  if (files.resumeProgress === false) return
+
+  const progressFile = path.resolve(process.cwd(), files.progressFile || './logs/nerv-printer-progress.json')
+  const previous = readProgressState(progressFile)
+  if (!previous || previous.phase === 'finished') return
+
+  writeJson(progressFile, {
+    ...previous,
+    interrupted: true,
+    lastSession: sessionNumber,
+    lastEndReason: reason || 'disconnected',
+    lastDisconnectAt: new Date().toISOString()
+  })
+}
+
 function createDefaultConfig() {
   return {
     bot: {
@@ -163,9 +220,10 @@ function createDefaultConfig() {
       postRestockDelayMs: 500,
       restockFailureCooldownMs: 8000,
       predictiveRestock: true,
-      predictiveRestockMaxPullsPerBlock: 4,
-      predictiveLookaheadRows: 128,
       dumpUnneededBeforeRefill: true,
+      inventoryRefillRows: 2,
+      inventoryMaxMaterialTypes: 16,
+      inventoryPlanUseWorldState: false,
       sneakOnDispenserOnly: true,
       postPrintWorkflowEnabled: true,
       postPrintFillMapEnabled: true,
@@ -203,6 +261,7 @@ function createDefaultConfig() {
       scannerPostSwapDelayMs: 0,
       scannerWorkloadMode: 'fixed',
       inventoryCycleTestWaitAfterMs: 5000,
+      inventoryCycleTestRows: 2,
       repairTestWaitAfterMs: 5000,
       repairTestMaxPasses: 3,
       repairGoalRange: 3.25,
@@ -1124,11 +1183,15 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const itemInfo = bot.registry.itemsByName[blockName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
   const requestedStackCount = Math.max(1, toNumber(requestedPulls, 1))
-  const desiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
-    ? Math.max(stackSize, toNumber(neededByBlock.get(blockName), requestedStackCount * stackSize))
-    : Math.max(stackSize, requestedStackCount * stackSize)
-  const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
   const haveBeforeRestock = countInventoryItems(bot, blockName)
+  const desiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
+    ? Math.max(
+      stackSize,
+      haveBeforeRestock + (requestedStackCount * stackSize),
+      toNumber(neededByBlock.get(blockName), requestedStackCount * stackSize)
+    )
+    : Math.max(stackSize, haveBeforeRestock + (requestedStackCount * stackSize))
+  const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
 
   if (!inventoryHasRoomForItem(bot, blockName)) {
     const dumped = await dumpUnneededCarpets(bot, config, keepPlan)
@@ -1619,25 +1682,45 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   const machine = config.machine || {}
   if (advanced.postPrintWorkflowEnabled === false) return
 
+  const postPrintSteps = ['withdraw', 'fill_map', 'cartography', 'rename_store', 'reset', 'center', 'done']
+  const resumeStep = postPrintSteps.includes(context.resumePostPrintStep) ? context.resumePostPrintStep : 'withdraw'
+  const resumeStepIndex = postPrintSteps.indexOf(resumeStep)
+  const shouldRunStep = (step) => postPrintSteps.indexOf(step) >= resumeStepIndex && resumeStep !== 'done'
+  const savePostPrintStep = (nextStep, action = `next-${nextStep}`) => {
+    if (typeof context.savePostPrintState === 'function') {
+      context.savePostPrintState(nextStep, action)
+    }
+  }
+
+  if (resumeStep !== 'withdraw') {
+    console.log(`[POSTPRINT-RESUME] Resuming post-print at step=${resumeStep}.`)
+  }
+  if (resumeStep === 'done') return
+
   const mapChestPos = nearestPosition(bot, machine.mapMaterialChests || [])
   const cartographyPos = machine.cartographyTable?.enabled ? machine.cartographyTable.position : null
   const finishedChestPos = machine.finishedMapChest?.enabled ? machine.finishedMapChest.position : null
   const anvilConfig = machine.anvil?.enabled ? machine.anvil : null
   const resetPos = machine.resetBlock?.enabled ? machine.resetBlock.position : null
-  let cartographySucceeded = false
+  let cartographySucceeded = resumeStepIndex > postPrintSteps.indexOf('cartography')
 
-  if (!mapChestPos) {
+  if (shouldRunStep('withdraw') && !mapChestPos) {
     console.log('[POSTPRINT-WARN] Missing map material chest position. Skipping post-print workflow.')
     return
   }
 
-  const gotMap = await withdrawFromChest(bot, config, mapChestPos, 'map', 1)
-  const gotPane = await withdrawFromChest(bot, config, mapChestPos, 'glass_pane', 1)
-  if (!gotMap || !gotPane) {
-    console.log('[POSTPRINT-WARN] Could not withdraw map/glass pane for post-print flow.')
+  savePostPrintStep(resumeStep, 'post-print-active')
+
+  if (shouldRunStep('withdraw')) {
+    const gotMap = countInventoryByType(bot, 'map') > 0 || await withdrawFromChest(bot, config, mapChestPos, 'map', 1)
+    const gotPane = countInventoryItems(bot, 'glass_pane') > 0 || await withdrawFromChest(bot, config, mapChestPos, 'glass_pane', 1)
+    if (!gotMap || !gotPane) {
+      console.log('[POSTPRINT-WARN] Could not withdraw map/glass pane for post-print flow.')
+    }
+    savePostPrintStep('fill_map', 'materials-withdrawn')
   }
 
-  if (advanced.postPrintFillMapEnabled !== false) {
+  if (shouldRunStep('fill_map') && advanced.postPrintFillMapEnabled !== false) {
     const mapItem = findInventoryItemByType(bot, 'map')
     if (mapItem) {
       const center = getMapCenterPosition(config)
@@ -1696,11 +1779,14 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     }
 
     await delay(toNumber(advanced.postPrintMapSettleDelayMs, 1500))
+    savePostPrintStep('cartography', 'map-filled')
+  } else if (shouldRunStep('fill_map')) {
+    savePostPrintStep('cartography', 'fill-map-skipped')
   }
 
   const hasFilledMap = countInventoryByType(bot, 'filled_map') > 0
 
-  if (advanced.postPrintUseCartographyEnabled !== false && cartographyPos && hasFilledMap) {
+  if (shouldRunStep('cartography') && advanced.postPrintUseCartographyEnabled !== false && cartographyPos && hasFilledMap) {
     try {
       const filledMapForTable = findInventoryItemByType(bot, 'filled_map')
       if (filledMapForTable && bot.heldItem?.type !== filledMapForTable.type) {
@@ -1733,9 +1819,13 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     } catch (err) {
       console.log(`[POSTPRINT-WARN] Cartography step failed: ${err?.message || err}`)
     }
+    savePostPrintStep('rename_store', cartographySucceeded ? 'cartography-complete' : 'cartography-failed')
+  } else if (shouldRunStep('cartography')) {
+    if (advanced.postPrintUseCartographyEnabled === false) cartographySucceeded = true
+    savePostPrintStep('rename_store', 'cartography-skipped')
   }
 
-  if (cartographySucceeded) {
+  if (shouldRunStep('rename_store') && cartographySucceeded) {
     await refillXpForPostPrint(bot, config)
     const renamedTarget = await renameFinishedMap(bot, config, anvilConfig, context.sourceName)
 
@@ -1759,15 +1849,19 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
         await depositToChest(bot, config, finishedChestPos, 'filled_map', stack.count, machine.finishedMapChest?.accessPosition)
       }
     }
-  } else if (advanced.postPrintUseCartographyEnabled !== false) {
+    savePostPrintStep('reset', 'map-renamed-and-stored')
+  } else if (shouldRunStep('rename_store') && advanced.postPrintUseCartographyEnabled !== false) {
     console.log('[POSTPRINT-WARN] Skipping XP refill and rename because cartography did not complete.')
+    savePostPrintStep('reset', 'rename-store-skipped')
+  } else if (shouldRunStep('rename_store')) {
+    savePostPrintStep('reset', 'rename-store-disabled')
   }
 
   const shouldInteractReset = advanced.postPrintResetEnabled !== false
     && resetPos
     && advanced.postPrintSkipResetInteraction !== true
 
-  if (shouldInteractReset) {
+  if (shouldRunStep('reset') && shouldInteractReset) {
     try {
       const resetContainer = await openContainerAt(bot, resetPos, machine.resetBlock?.accessPosition)
       await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
@@ -1775,11 +1869,15 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     } catch (err) {
       console.log(`[POSTPRINT-WARN] Reset step failed: ${err?.message || err}`)
     }
-  } else if (advanced.postPrintSkipResetInteraction === true && resetPos) {
+    savePostPrintStep('center', 'reset-complete')
+  } else if (shouldRunStep('reset') && advanced.postPrintSkipResetInteraction === true && resetPos) {
     console.log('[POSTPRINT] Reset interaction skipped by config. Walking to center step directly.')
+    savePostPrintStep('center', 'reset-skipped-by-config')
+  } else if (shouldRunStep('reset')) {
+    savePostPrintStep('center', 'reset-unavailable')
   }
 
-  if (advanced.postPrintWalkToCenter !== false) {
+  if (shouldRunStep('center') && advanced.postPrintWalkToCenter !== false) {
     const center = getMapCenterPosition(config)
 
     try {
@@ -1792,6 +1890,9 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     } catch (err) {
       console.log(`[POSTPRINT-WARN] Walk-to-center step failed: ${err?.message || err}`)
     }
+    savePostPrintStep('done', 'center-complete')
+  } else if (shouldRunStep('center')) {
+    savePostPrintStep('done', 'center-skipped')
   }
 }
 
@@ -1916,9 +2017,70 @@ function buildNervTargetGrid(targets) {
   }
 }
 
+function selectInventoryPlanningTargets(targets, config) {
+  const advanced = config.advanced || {}
+  const rowLimit = Math.max(1, toNumber(advanced.inventoryRefillRows, 2))
+  const maxMaterialTypes = Math.max(1, Math.min(16, toNumber(advanced.inventoryMaxMaterialTypes, 16)))
+  const selectedRows = new Set()
+  const selectedMaterials = new Set()
+  const selectedTargets = []
+
+  for (const target of targets) {
+    if (!target) continue
+
+    const isKnownRow = selectedRows.has(target.row)
+    if (!isKnownRow && selectedRows.size >= rowLimit) continue
+
+    const material = target.blockName
+    const isKnownMaterial = selectedMaterials.has(material)
+    if (!isKnownMaterial && selectedMaterials.size >= maxMaterialTypes) continue
+
+    selectedRows.add(target.row)
+    selectedMaterials.add(material)
+    selectedTargets.push(target)
+  }
+
+  return {
+    targets: selectedTargets,
+    rows: [...selectedRows],
+    materials: [...selectedMaterials]
+  }
+}
+
+function selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrder, config) {
+  const advanced = config.advanced || {}
+  const lineLimit = Math.max(1, toNumber(advanced.inventoryRefillRows, 2))
+  const maxMaterialTypes = Math.max(1, Math.min(16, toNumber(advanced.inventoryMaxMaterialTypes, 16)))
+  const selectedCols = colBatch.slice(0, Math.min(lineLimit, colBatch.length))
+  const selectedMaterials = new Set()
+  const selectedTargets = []
+
+  for (const row of rowOrder) {
+    for (const col of selectedCols) {
+      const target = byColRow.get(`${col}:${row}`)
+      if (!target) continue
+
+      const material = target.blockName
+      const isKnownMaterial = selectedMaterials.has(material)
+      if (!isKnownMaterial && selectedMaterials.size >= maxMaterialTypes) continue
+
+      selectedMaterials.add(material)
+      selectedTargets.push(target)
+    }
+  }
+
+  return {
+    targets: selectedTargets,
+    cols: selectedCols,
+    materials: [...selectedMaterials]
+  }
+}
+
 function getNervRequiredItems(bot, config, targets) {
   const printer = config.printer || {}
   const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
+  const maxMaterialTypes = Math.max(1, Math.min(16, toNumber(config.advanced?.inventoryMaxMaterialTypes, 16)))
+  const useWorldState = config.advanced?.inventoryPlanUseWorldState === true
   const availableSlots = getNervAvailableSlots(bot, config, targets)
   const requiredItems = new Map()
   const { byColRow, cols, rows } = buildNervTargetGrid(targets)
@@ -1939,11 +2101,16 @@ function getNervRequiredItems(bot, config, targets) {
         inspected += 1
 
         const targetPos = new Vec3(target.position.x, target.position.y, target.position.z)
-        const blockState = bot.blockAt(targetPos)
-        if (!blockState) unloaded += 1
-        if (blockState && blockState.name !== 'air') continue
+        if (useWorldState) {
+          const blockState = bot.blockAt(targetPos)
+          if (!blockState) unloaded += 1
+          if (blockState && blockState.name !== 'air') continue
+        }
 
         const blockName = target.blockName
+        if (!requiredItems.has(blockName) && requiredItems.size >= maxMaterialTypes) {
+          return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
+        }
         requiredItems.set(blockName, (requiredItems.get(blockName) || 0) + 1)
         counted += 1
 
@@ -1967,26 +2134,42 @@ function getNervInventoryInformation(bot, requiredItems, availableSlots) {
   const remainingRequired = new Map(requiredItems)
   const dumpSlots = []
   const materialInInv = new Map()
+  const slotsByMaterial = new Map()
 
   for (const slot of availableSlots) {
     const stack = slot.stack
     if (!stack) continue
 
-    if (remainingRequired.has(stack.name)) {
-      const requiredAmount = Math.max(0, toNumber(remainingRequired.get(stack.name), 0))
-      const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[stack.name]?.stackSize, 64))
-      let requiredModulusAmount = requiredAmount - Math.floor(requiredAmount / stackSize) * stackSize
-      if (requiredModulusAmount === 0) requiredModulusAmount = stackSize
-      const stackAmount = Math.max(0, toNumber(stack.count, 0))
+    if (!remainingRequired.has(stack.name)) {
+      dumpSlots.push(slot)
+      continue
+    }
 
-      if (requiredAmount > 0 && requiredModulusAmount <= stackAmount) {
-        remainingRequired.set(stack.name, Math.max(0, requiredAmount - stackAmount))
-        materialInInv.set(stack.name, (materialInInv.get(stack.name) || 0) + stackAmount)
-        continue
+    const list = slotsByMaterial.get(stack.name) || []
+    list.push(slot)
+    slotsByMaterial.set(stack.name, list)
+  }
+
+  for (const [blockName, slots] of slotsByMaterial.entries()) {
+    let requiredAmount = Math.max(0, toNumber(remainingRequired.get(blockName), 0))
+
+    slots.sort((a, b) => {
+      const ac = Math.max(0, toNumber(a.stack?.count, 0))
+      const bc = Math.max(0, toNumber(b.stack?.count, 0))
+      return ac - bc
+    })
+
+    for (const slot of slots) {
+      const stackAmount = Math.max(0, toNumber(slot.stack?.count, 0))
+      if (requiredAmount > 0) {
+        requiredAmount = Math.max(0, requiredAmount - stackAmount)
+        materialInInv.set(blockName, (materialInInv.get(blockName) || 0) + stackAmount)
+      } else {
+        dumpSlots.push(slot)
       }
     }
 
-    dumpSlots.push(slot)
+    remainingRequired.set(blockName, requiredAmount)
   }
 
   return { dumpSlots, materialInInv, remainingRequired }
@@ -2011,6 +2194,38 @@ function buildNervInventoryPlan(bot, config, targets) {
 
   return {
     ...required,
+    dumpSlots: invInfo.dumpSlots,
+    materialInInv: invInfo.materialInInv,
+    remainingRequired: invInfo.remainingRequired,
+    restockList
+  }
+}
+
+function buildNervInventoryPlanFromRequired(bot, config, targets, requiredItems, requiredMeta = {}) {
+  const availableSlots = getNervAvailableSlots(bot, config, targets)
+  const stableRequiredItems = new Map(requiredItems)
+  const invInfo = getNervInventoryInformation(bot, stableRequiredItems, availableSlots)
+  const restockList = []
+
+  for (const [blockName, requiredAmount] of stableRequiredItems.entries()) {
+    const keptAmount = invInfo.materialInInv.get(blockName) || 0
+    const deficit = Math.max(0, requiredAmount - keptAmount)
+    if (deficit <= 0) continue
+    const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
+    restockList.unshift({
+      blockName,
+      rawAmount: deficit,
+      stacks: Math.ceil(deficit / stackSize)
+    })
+  }
+
+  return {
+    requiredItems: stableRequiredItems,
+    availableSlots,
+    inspected: toNumber(requiredMeta.inspected, 0),
+    counted: toNumber(requiredMeta.counted, 0),
+    unloaded: toNumber(requiredMeta.unloaded, 0),
+    capacitySlots: availableSlots.length,
     dumpSlots: invInfo.dumpSlots,
     materialInInv: invInfo.materialInInv,
     remainingRequired: invInfo.remainingRequired,
@@ -2159,6 +2374,56 @@ function inventoryCapacityForItem(bot, itemName) {
   return capacity
 }
 
+function countEmptyInventorySlots(bot) {
+  const inventory = bot.inventory || {}
+  const slots = Array.isArray(inventory.slots) ? inventory.slots : []
+  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
+  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : (Array.isArray(inventory.slots) ? inventory.slots.length : 46)
+  let empty = 0
+
+  for (let i = start; i < end; i += 1) {
+    if (!slots[i]) empty += 1
+  }
+
+  return empty
+}
+
+function countPartialInventorySlotsForItem(bot, itemName) {
+  const itemInfo = bot.registry.itemsByName[itemName] || {}
+  const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
+  const inventory = bot.inventory || {}
+  const slots = Array.isArray(inventory.slots) ? inventory.slots : []
+  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
+  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : (Array.isArray(inventory.slots) ? inventory.slots.length : 46)
+  let partial = 0
+
+  for (let i = start; i < end; i += 1) {
+    const slot = slots[i]
+    if (slot?.name === itemName && toNumber(slot.count, 0) < stackSize) {
+      partial += 1
+    }
+  }
+
+  return partial
+}
+
+function estimateDumpSlotsNeededForRestock(bot, restockList) {
+  let emptySlots = countEmptyInventorySlots(bot)
+  let dumpsNeeded = 0
+
+  for (const item of restockList) {
+    const stacks = Math.max(0, toNumber(item.stacks, 0))
+    if (stacks <= 0) continue
+    const partialSlots = countPartialInventorySlotsForItem(bot, item.blockName)
+    const newSlotsNeeded = Math.max(0, stacks - partialSlots)
+    const coveredByEmpty = Math.min(emptySlots, newSlotsNeeded)
+    emptySlots -= coveredByEmpty
+    dumpsNeeded += Math.max(0, newSlotsNeeded - coveredByEmpty)
+  }
+
+  return dumpsNeeded
+}
+
 async function dumpCarpetStacksForSpace(bot, config, keepNames = new Set(), maxStacks = 1) {
   const dumpStations = buildDumpStations(config)
   if (!dumpStations.length || maxStacks <= 0) return 0
@@ -2219,33 +2484,41 @@ function estimateNeededFromLookahead(targets) {
   return neededByBlock
 }
 
-async function ensureMaterialsForTargets(bot, config, targets) {
+async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   const advanced = config.advanced || {}
   if (advanced.predictiveRestock === false || !targets.length) return
 
+  const planning = options.windowed === true
+    ? {
+        targets,
+        rows: options.rows || [],
+        cols: options.cols || [],
+        materials: options.materials || [...new Set(targets.map((target) => target?.blockName).filter(Boolean))]
+      }
+    : selectInventoryPlanningTargets(targets, config)
+  const planningTargets = planning.targets
+  if (!planningTargets.length) return
+
   const maxIterations = Math.max(20, toNumber(advanced.nervInventoryMaxPlanIterations, 80))
+  const stableRequired = getNervRequiredItems(bot, config, planningTargets)
+  const stableNeededByBlock = new Map(stableRequired.requiredItems)
+  if (config.advanced?.debugPrints) {
+    const windowLabel = planning.cols?.length
+      ? `cols=${planning.cols.join(',')}`
+      : `rows=${planning.rows.join(',') || 'none'}`
+    console.log(`[NERV-INVENTORY-WINDOW] ${windowLabel} materials=${planning.materials.length}/16 targets=${planningTargets.length}/${targets.length}`)
+  }
   let safetyCounter = 0
 
   while (safetyCounter < maxIterations) {
     safetyCounter++
-    const plan = buildNervInventoryPlan(bot, config, targets)
+    const plan = buildNervInventoryPlanFromRequired(bot, config, planningTargets, stableNeededByBlock, stableRequired)
     const neededByBlock = plan.requiredItems
 
     if (!neededByBlock.size) return
 
     for (const blockName of neededByBlock.keys()) {
       unavailableMaterialCache.delete(blockName)
-    }
-
-    if (config.advanced?.debugPrints) {
-      console.log(`[NERV-INVENTORY] availableSlots=${plan.availableSlots.length} required=${formatInventoryPlanMap(plan.requiredItems)} keep=${formatInventoryPlanMap(plan.materialInInv)} dumpSlots=${plan.dumpSlots.length} restock=${formatRestockList(plan.restockList)}`)
-    }
-
-    if (advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
-      console.log(`[NERV-DUMP] Dumping ${plan.dumpSlots.length} slot(s) before restock: ${formatDumpSlots(plan.dumpSlots)}`)
-      await dumpNervInventorySlots(bot, config, plan.dumpSlots, 'nervPredumpBeforeRefill')
-      await delay(toNumber(advanced.inventoryActionDelayMs, 100))
-      continue
     }
 
     const restockList = plan.restockList.map((entry) => ({
@@ -2255,7 +2528,22 @@ async function ensureMaterialsForTargets(bot, config, targets) {
       stacks: entry.stacks
     }))
 
+    if (config.advanced?.debugPrints) {
+      console.log(`[NERV-INVENTORY] availableSlots=${plan.availableSlots.length} required=${formatInventoryPlanMap(plan.requiredItems)} keep=${formatInventoryPlanMap(plan.materialInInv)} dumpSlots=${plan.dumpSlots.length} restock=${formatRestockList(plan.restockList)}`)
+    }
+
     if (!restockList.length) return
+
+    if (advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
+      const dumpsNeeded = Math.min(plan.dumpSlots.length, estimateDumpSlotsNeededForRestock(bot, restockList))
+      if (dumpsNeeded > 0) {
+        const dumpSlots = plan.dumpSlots.slice(0, dumpsNeeded)
+        console.log(`[NERV-DUMP] Dumping ${dumpSlots.length}/${plan.dumpSlots.length} slot(s) before restock: ${formatDumpSlots(dumpSlots)}`)
+        await dumpNervInventorySlots(bot, config, dumpSlots, 'nervPredumpBeforeRefill')
+        await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+        continue
+      }
+    }
 
     let closestDist = Infinity
     let closestItem = null
@@ -2292,7 +2580,7 @@ async function ensureMaterialsForTargets(bot, config, targets) {
       const haveAfter = countInventoryItems(bot, closestItem.blockName)
       const stillNeed = Math.max(0, closestItem.needed - haveAfter)
       const remainingCapacity = inventoryCapacityForItem(bot, closestItem.blockName)
-      const retryPlan = buildNervInventoryPlan(bot, config, targets)
+      const retryPlan = buildNervInventoryPlanFromRequired(bot, config, planningTargets, stableNeededByBlock, stableRequired)
 
       if (advanced.dumpUnneededBeforeRefill !== false && retryPlan.dumpSlots.length > 0) {
         restockFailureCache.delete(closestItem.blockName)
@@ -3174,6 +3462,7 @@ async function runPrint(bot, config) {
   const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
   let resumeFrom = 0
   let resumePhase = 'printing'  // tracks which bot phase to resume after crash
+  let resumePostPrintStep = 'withdraw'
 
   if (progressEnabled) {
     const previous = readProgressState(progressFile)
@@ -3185,15 +3474,35 @@ async function runPrint(bot, config) {
 
     if (sameInput) {
       resumeFrom = Math.max(0, Math.min(orderedTargets.length, toNumber(previous.processedTargets, 0)))
-      // If the bot crashed inside repair or post_print, skip the main sweep and jump directly there
-      if (previous.phase === 'repair' || previous.phase === 'post_print') {
-        resumePhase = previous.phase
+      const previousPhase = normalizeResumePhase(previous.phase)
+      // If the bot crashed inside repair or post_print, skip the main sweep and jump directly there.
+      if (previousPhase === 'repair' || previousPhase === 'post_print') {
+        resumePhase = previousPhase
         resumeFrom = orderedTargets.length
       }
+      if (previousPhase === 'post_print') {
+        resumePostPrintStep = String(previous.postPrintStep || 'withdraw')
+      }
+      console.log(`[RESUME] Saved state phase=${previous.phase || 'printing'} state=${previous.state || 'n/a'} action=${previous.action || 'n/a'} processed=${resumeFrom}/${orderedTargets.length}.`)
     }
   }
 
   const pending = orderedTargets.slice(resumeFrom)
+  const makePostPrintContext = (extra = {}) => ({
+    sourceName: input.sourceName,
+    sourcePath: input.sourcePath,
+    sourceType: input.sourceType,
+    resumePostPrintStep,
+    savePostPrintState: (postPrintStep, action = 'post-print-active') => {
+      if (!progressEnabled) return
+      writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
+        state: 'post_print_workflow',
+        action,
+        postPrintStep
+      })
+    },
+    ...extra
+  })
 
   console.log(`[PLAN] Loaded ${input.sourceName} (${input.sourceType}) with ${orderedTargets.length} targets.`)
   if (resumeFrom > 0 && resumeFrom < orderedTargets.length) {
@@ -3242,6 +3551,12 @@ async function runPrint(bot, config) {
   // Final comprehensive scan: verify ALL targets against world state before finishing
   if (resumePhase !== 'post_print') {
     console.log('[FINAL-SCAN] Scanning entire map for final verification...')
+    if (progressEnabled) {
+      writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'printing', {
+        state: 'final_scan',
+        action: 'scan-before-repair'
+      })
+    }
     const Vec3_Final = bot.entity.position.constructor
     const fullMapErrors = []
     for (const target of orderedTargets) {
@@ -3254,10 +3569,10 @@ async function runPrint(bot, config) {
 
     // Persist phase=repair before repair pass for crash recovery
     if (progressEnabled) {
-      writeProgressState(progressFile, {
-        sourceType: input.sourceType, sourceName: input.sourceName, sourcePath: input.sourcePath,
-        totalTargets: orderedTargets.length, processedTargets: orderedTargets.length,
-        phase: 'repair', updatedAt: new Date().toISOString()
+      writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
+        state: 'repair_start',
+        action: 'repair-final-scan-errors',
+        errorCount: errorList.length
       })
     }
 
@@ -3276,6 +3591,15 @@ async function runPrint(bot, config) {
       const maxRepairPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
       for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
         console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
+        if (progressEnabled) {
+          writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
+            state: 'repair_pass',
+            action: 'repair-targets',
+            pass,
+            maxPasses: maxRepairPasses,
+            errorCount: errorList.length
+          })
+        }
         const repairResult = await repairTargetsInBatches(bot, config, errorList, placeRange, `REPAIR-PASS-${pass}`)
         placed += repairResult.placed
         already += repairResult.already
@@ -3291,6 +3615,15 @@ async function runPrint(bot, config) {
         errorList.length = 0
         errorList.push(...remainingErrors)
         console.log(`[REPAIR-PASS] pass=${pass} fullScanRemaining=${errorList.length}.`)
+        if (progressEnabled) {
+          writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
+            state: 'repair_verify',
+            action: 'full-scan-after-repair',
+            pass,
+            maxPasses: maxRepairPasses,
+            errorCount: errorList.length
+          })
+        }
         if (pass < maxRepairPasses && shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, `REPAIR-VERIFY-PASS-${pass}`)) {
           break
         }
@@ -3304,14 +3637,14 @@ async function runPrint(bot, config) {
 
     // Persist phase=post_print so crash here resumes post-print, not repair again
   if (progressEnabled) {
-    writeProgressState(progressFile, {
-      sourceType: input.sourceType, sourceName: input.sourceName, sourcePath: input.sourcePath,
-      totalTargets: orderedTargets.length, processedTargets: orderedTargets.length,
-      phase: 'post_print', updatedAt: new Date().toISOString()
+    writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
+      state: 'post_print_workflow',
+      action: 'run-post-print',
+      postPrintStep: resumePostPrintStep
     })
   }
 
-  await runPostPrintWorkflow(bot, config, { sourceName: input.sourceName, sourcePath: input.sourcePath, sourceType: input.sourceType })
+  await runPostPrintWorkflow(bot, config, makePostPrintContext())
     await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
 
     if (files.moveToFinishedFolder) {
@@ -3353,14 +3686,14 @@ async function runPrint(bot, config) {
     console.log('[TEST] postPrintTestOnly=true, skipping carpet placement and running post-print workflow only.')
     // Persist phase=post_print so crash here resumes post-print, not repair again
   if (progressEnabled) {
-    writeProgressState(progressFile, {
-      sourceType: input.sourceType, sourceName: input.sourceName, sourcePath: input.sourcePath,
-      totalTargets: orderedTargets.length, processedTargets: orderedTargets.length,
-      phase: 'post_print', updatedAt: new Date().toISOString()
+    writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
+      state: 'post_print_workflow',
+      action: 'post-print-test-only',
+      postPrintStep: resumePostPrintStep
     })
   }
 
-  await runPostPrintWorkflow(bot, config, { sourceName: input.sourceName, sourcePath: input.sourcePath, sourceType: input.sourceType })
+  await runPostPrintWorkflow(bot, config, makePostPrintContext())
     await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
     return {
       sourceType: input.sourceType,
@@ -3428,33 +3761,20 @@ async function runPrint(bot, config) {
   let processedInRun = 0
   const errorList = []
 
-  const saveProgress = () => {
+  const saveProgress = (phase = 'printing', details = {}) => {
     if (!progressEnabled) return
     const processedTargets = Math.min(orderedTargets.length, resumeFrom + processedInRun)
-    writeProgressState(progressFile, {
-      sourceType: input.sourceType,
-      sourceName: input.sourceName,
-      sourcePath: input.sourcePath,
-      totalTargets: orderedTargets.length,
-      processedTargets,
-      phase: 'printing',
-      updatedAt: new Date().toISOString()
-    })
+    writeProgressSnapshot(progressFile, input, orderedTargets.length, processedTargets, phase, details)
   }
 
   if (progressEnabled) {
-    saveProgress()
+    saveProgress('printing', { state: 'printing_start', action: 'resume-ready' })
   }
 
 
   for (let i = 0; i < colTraversal.length; i += Math.max(1, linesPerRun)) {
     const colBatch = colTraversal.slice(i, i + Math.max(1, linesPerRun))
     const rowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
-
-    const lookaheadStart = Math.min(orderedTargets.length, resumeFrom + processedInRun)
-    const lookaheadTargets = orderedTargets.slice(lookaheadStart)
-    await ensureMaterialsForTargets(bot, config, lookaheadTargets)
-
     const batchTargets = []
     for (const row of rowOrder) {
       for (const col of colBatch) {
@@ -3462,6 +3782,29 @@ async function runPrint(bot, config) {
         if (target) batchTargets.push(target)
       }
     }
+    const inventoryWindow = selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrder, config)
+
+    const lookaheadStart = Math.min(orderedTargets.length, resumeFrom + processedInRun)
+    console.log(`[NERV-INVENTORY-WINDOW] cols=${inventoryWindow.cols.join(',') || 'none'} targets=${inventoryWindow.targets.length}/${batchTargets.length} materials=${inventoryWindow.materials.length}/16 batchCols=${colBatch.join(',')}`)
+    saveProgress('printing', {
+      state: 'inventory_restock',
+      action: 'ensure-materials',
+      lookaheadStart,
+      inventoryTargets: inventoryWindow.targets.length,
+      inventoryCols: inventoryWindow.cols.join(','),
+      colBatch: colBatch.join(',')
+    })
+    await ensureMaterialsForTargets(bot, config, inventoryWindow.targets, {
+      windowed: true,
+      cols: inventoryWindow.cols,
+      materials: inventoryWindow.materials
+    })
+    saveProgress('printing', {
+      state: 'printing_batch',
+      action: 'place-batch',
+      colBatch: colBatch.join(','),
+      batchIndex: Math.floor(i / Math.max(1, linesPerRun)) + 1
+    })
 
     if (printer.fastTraversalEnabled === true) {
       const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'fixed').toLowerCase()
@@ -3478,7 +3821,14 @@ async function runPrint(bot, config) {
         console.log(`[NERV-SCANNER-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing}`)
       }
       if (progressEnabled) {
-        saveProgress()
+        saveProgress('printing', {
+          state: 'printing_batch',
+          action: 'batch-complete',
+          colBatch: colBatch.join(','),
+          placed,
+          already,
+          skipped
+        })
       }
     } else {
       const firstTarget = rowOrder
@@ -3552,13 +3902,24 @@ async function runPrint(bot, config) {
 
           processedInRun += 1
           if (progressEnabled && (processedInRun % progressSaveEvery === 0 || resumeFrom + processedInRun >= orderedTargets.length)) {
-            saveProgress()
+            saveProgress('printing', {
+              state: 'printing_batch',
+              action: 'target-progress',
+              placed,
+              already,
+              skipped
+            })
           }
         }
       }
     }
 
     // LineEnd: scan the completed column batch for errors
+    saveProgress('printing', {
+      state: 'printing_lineend_check',
+      action: 'verify-completed-batch',
+      colBatch: colBatch.join(',')
+    })
     const Vec3_LineEnd = bot.entity.position.constructor
     const errorListKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
     for (const col of colBatch) {
@@ -3588,14 +3949,10 @@ async function runPrint(bot, config) {
   if (errorList.length && errorAction === 'repair') {
     if (shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, 'REPAIR')) {
       if (progressEnabled) {
-        writeProgressState(progressFile, {
-          sourceType: input.sourceType,
-          sourceName: input.sourceName,
-          sourcePath: input.sourcePath,
-          totalTargets: orderedTargets.length,
-          processedTargets: orderedTargets.length,
-          phase: 'repair',
-          updatedAt: new Date().toISOString()
+        writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
+          state: 'repair_aborted_safety',
+          action: 'manual-check-needed',
+          errorCount: errorList.length
         })
       }
       console.log('[REPAIR-PASS] Repair skipped by safety guard; progress remains in repair phase for a safe retry.')
@@ -3607,20 +3964,25 @@ async function runPrint(bot, config) {
       }
     }
     if (progressEnabled) {
-      writeProgressState(progressFile, {
-        sourceType: input.sourceType,
-        sourceName: input.sourceName,
-        sourcePath: input.sourcePath,
-        totalTargets: orderedTargets.length,
-        processedTargets: orderedTargets.length,
-        phase: 'repair',
-        updatedAt: new Date().toISOString()
+      writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
+        state: 'repair_start',
+        action: 'repair-lineend-errors',
+        errorCount: errorList.length
       })
     }
 
     const maxRepairPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
     for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
       console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
+      if (progressEnabled) {
+        writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
+          state: 'repair_pass',
+          action: 'repair-targets',
+          pass,
+          maxPasses: maxRepairPasses,
+          errorCount: errorList.length
+        })
+      }
       const repairResult = await repairTargetsInBatches(bot, config, errorList, placeRange, `REPAIR-PASS-${pass}`)
       placed += repairResult.placed
       already += repairResult.already
@@ -3636,6 +3998,15 @@ async function runPrint(bot, config) {
       errorList.length = 0
       errorList.push(...remainingErrors)
       console.log(`[REPAIR-PASS] pass=${pass} fullScanRemaining=${errorList.length}.`)
+      if (progressEnabled) {
+        writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
+          state: 'repair_verify',
+          action: 'full-scan-after-repair',
+          pass,
+          maxPasses: maxRepairPasses,
+          errorCount: errorList.length
+        })
+      }
       if (pass < maxRepairPasses && shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, `REPAIR-VERIFY-PASS-${pass}`)) {
         break
       }
@@ -3646,14 +4017,14 @@ async function runPrint(bot, config) {
 
   // Persist phase=post_print so crash here resumes post-print, not repair again
   if (progressEnabled) {
-    writeProgressState(progressFile, {
-      sourceType: input.sourceType, sourceName: input.sourceName, sourcePath: input.sourcePath,
-      totalTargets: orderedTargets.length, processedTargets: orderedTargets.length,
-      phase: 'post_print', updatedAt: new Date().toISOString()
+    writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
+      state: 'post_print_workflow',
+      action: 'run-post-print',
+      postPrintStep: resumePostPrintStep
     })
   }
 
-  await runPostPrintWorkflow(bot, config, { sourceName: input.sourceName, sourcePath: input.sourcePath, sourceType: input.sourceType })
+  await runPostPrintWorkflow(bot, config, makePostPrintContext())
 
   await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
 
@@ -3702,6 +4073,12 @@ function createBot(config) {
 
 function hasCliFlag(flag) {
   return process.argv.slice(2).includes(flag)
+}
+
+function getCliValue(name) {
+  const prefix = `${name}=`
+  const entry = process.argv.slice(2).find((arg) => arg.startsWith(prefix))
+  return entry ? entry.slice(prefix.length) : null
 }
 
 async function runDumpTest(bot, config) {
@@ -4496,6 +4873,20 @@ function formatDumpSlots(dumpSlots) {
     .join(', ')
 }
 
+function selectFirstLogicalRows(targets, rowLimit, northToSouth) {
+  const limit = Math.max(0, toNumber(rowLimit, 0))
+  if (limit <= 0) {
+    return { targets, rows: [...new Set(targets.map((target) => target.row))].sort((a, b) => a - b) }
+  }
+
+  const rows = [...new Set(targets.map((target) => target.row))].sort((a, b) => northToSouth ? a - b : b - a)
+  const selectedRows = new Set(rows.slice(0, limit))
+  return {
+    targets: targets.filter((target) => selectedRows.has(target.row)),
+    rows: [...selectedRows]
+  }
+}
+
 async function runInventoryPlanTest(bot, config) {
   const input = await loadTargets(config)
   const calibratedTargets = calibrateTargetsForWorld(bot, input.targets, config)
@@ -4503,6 +4894,10 @@ async function runInventoryPlanTest(bot, config) {
   const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const northToSouth = printer.northToSouth !== false
   const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
+  const rowLimit = Math.max(0, toNumber(config.advanced?.inventoryCycleTestRows, 0))
+  const selected = selectFirstLogicalRows(orderedTargets, rowLimit, northToSouth)
+  const effective = selectInventoryPlanningTargets(selected.targets, config)
+  const planTargets = effective.targets
 
   if (typeof bot.waitForChunksToLoad === 'function') {
     try {
@@ -4517,18 +4912,18 @@ async function runInventoryPlanTest(bot, config) {
     await delay(800)
   }
 
-  if (!orderedTargets.length) {
+  if (!planTargets.length) {
     console.log('[TEST-INVENTORY-PLAN] No targets loaded.')
     return
   }
 
-  const plan = buildNervInventoryPlan(bot, config, orderedTargets)
+  const plan = buildNervInventoryPlan(bot, config, planTargets)
   const inventoryItems = bot.inventory.items()
     .filter((entry) => String(entry?.name || '').endsWith('_carpet'))
     .map((entry) => `slot${entry.slot}:${entry.name}x${entry.count}`)
     .join(', ') || 'none'
 
-  console.log(`[TEST-INVENTORY-PLAN] Loaded ${input.sourceName}; targets=${orderedTargets.length} linesPerRun=${linesPerRun}.`)
+  console.log(`[TEST-INVENTORY-PLAN] Loaded ${input.sourceName}; selectedTargets=${selected.targets.length}/${orderedTargets.length} planTargets=${planTargets.length} linesPerRun=${linesPerRun} selectedRows=${selected.rows.join(',') || 'all'} refillRows=${effective.rows.join(',') || 'none'} materials=${effective.materials.length}/16.`)
   console.log(`[TEST-INVENTORY-PLAN] availableSlots=${plan.availableSlots.length} inspected=${plan.inspected} countedMissing=${plan.counted} unloaded=${plan.unloaded}`)
   console.log(`[TEST-INVENTORY-PLAN] inventoryCarpets=${inventoryItems}`)
   console.log(`[TEST-INVENTORY-PLAN] required=${formatInventoryPlanMap(plan.requiredItems)}`)
@@ -4545,6 +4940,10 @@ async function runInventoryCycleTest(bot, config) {
   const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const northToSouth = printer.northToSouth !== false
   const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
+  const rowLimit = Math.max(0, toNumber(config.advanced?.inventoryCycleTestRows, 0))
+  const selected = selectFirstLogicalRows(orderedTargets, rowLimit, northToSouth)
+  const effective = selectInventoryPlanningTargets(selected.targets, config)
+  const cycleTargets = effective.targets
   const waitAfterMs = Math.max(0, toNumber(config.advanced?.inventoryCycleTestWaitAfterMs, 5000))
 
   if (typeof bot.waitForChunksToLoad === 'function') {
@@ -4560,21 +4959,21 @@ async function runInventoryCycleTest(bot, config) {
     await delay(800)
   }
 
-  if (!orderedTargets.length) {
+  if (!cycleTargets.length) {
     console.log('[TEST-INVENTORY-CYCLE] No targets loaded.')
     return
   }
 
-  const beforePlan = buildNervInventoryPlan(bot, config, orderedTargets)
-  console.log(`[TEST-INVENTORY-CYCLE] Loaded ${input.sourceName}; targets=${orderedTargets.length} linesPerRun=${linesPerRun}.`)
+  const beforePlan = buildNervInventoryPlan(bot, config, cycleTargets)
+  console.log(`[TEST-INVENTORY-CYCLE] Loaded ${input.sourceName}; selectedTargets=${selected.targets.length}/${orderedTargets.length} cycleTargets=${cycleTargets.length} linesPerRun=${linesPerRun} selectedRows=${selected.rows.join(',') || 'all'} refillRows=${effective.rows.join(',') || 'none'} materials=${effective.materials.length}/16.`)
   console.log(`[TEST-INVENTORY-CYCLE] before required=${formatInventoryPlanMap(beforePlan.requiredItems)}`)
   console.log(`[TEST-INVENTORY-CYCLE] before keep=${formatInventoryPlanMap(beforePlan.materialInInv)}`)
   console.log(`[TEST-INVENTORY-CYCLE] before dumpSlots=${beforePlan.dumpSlots.length}: ${formatDumpSlots(beforePlan.dumpSlots)}`)
   console.log(`[TEST-INVENTORY-CYCLE] before restock=${formatRestockList(beforePlan.restockList)}`)
 
-  await ensureMaterialsForTargets(bot, config, orderedTargets)
+  await ensureMaterialsForTargets(bot, config, cycleTargets)
 
-  const afterPlan = buildNervInventoryPlan(bot, config, orderedTargets)
+  const afterPlan = buildNervInventoryPlan(bot, config, cycleTargets)
   console.log(`[TEST-INVENTORY-CYCLE] after required=${formatInventoryPlanMap(afterPlan.requiredItems)}`)
   console.log(`[TEST-INVENTORY-CYCLE] after keep=${formatInventoryPlanMap(afterPlan.materialInInv)}`)
   console.log(`[TEST-INVENTORY-CYCLE] after dumpSlots=${afterPlan.dumpSlots.length}: ${formatDumpSlots(afterPlan.dumpSlots)}`)
@@ -4984,6 +5383,7 @@ function runSingleSession(config, sessionNumber) {
     bot.on('end', (reason) => {
       const text = reason || 'disconnected'
       console.log(`[END] ${text}`)
+      markProgressInterrupted(config, text, sessionNumber)
       settle(text)
     })
   })
@@ -5023,6 +5423,10 @@ async function start() {
   }
 
   if (hasCliFlag('--test-inventory-plan')) {
+    const inventoryRows = getCliValue('--inventory-rows')
+    if (inventoryRows != null) {
+      config.advanced = { ...(config.advanced || {}), inventoryCycleTestRows: Math.max(0, toNumber(inventoryRows, 0)) }
+    }
     console.log('[TEST-INVENTORY-PLAN] Running isolated NERV-style inventory plan test only.')
     await runSingleInventoryPlanTestSession(config)
     setTimeout(() => process.exit(0), 100)
@@ -5030,6 +5434,10 @@ async function start() {
   }
 
   if (hasCliFlag('--test-inventory-cycle')) {
+    const inventoryRows = getCliValue('--inventory-rows')
+    if (inventoryRows != null) {
+      config.advanced = { ...(config.advanced || {}), inventoryCycleTestRows: Math.max(0, toNumber(inventoryRows, 0)) }
+    }
     console.log('[TEST-INVENTORY-CYCLE] Running isolated NERV-style inventory dump/restock cycle only.')
     await runSingleInventoryCycleTestSession(config)
     setTimeout(() => process.exit(0), 100)
