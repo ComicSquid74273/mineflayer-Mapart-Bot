@@ -293,6 +293,7 @@ function createDefaultConfig() {
       dumpReaimEveryStacks: 0,
       repairTestWaitAfterMs: 5000,
       repairTestMaxPasses: 3,
+      repairSprintMode: 'always',
       repairGoalRange: 3.25,
       repairTargetSettleMs: 0,
       repairMoveTimeoutMs: 30000,
@@ -3119,7 +3120,7 @@ async function repairTargets(bot, config, targets, placeRange) {
   let already = 0
   let skipped = 0
 
-  bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
+  bot.setControlState('sprint', shouldSprintDuringRepair(config))
 
   while (remaining.length > 0) {
     const botPos = bot.entity.position
@@ -3272,6 +3273,11 @@ function classifyRepairTargets(bot, config, targets) {
   return { already, missing, occupied }
 }
 
+function shouldSprintDuringRepair(config) {
+  const mode = String(config.advanced?.repairSprintMode || 'always').toLowerCase()
+  return mode !== 'off' && mode !== 'false' && mode !== 'never'
+}
+
 async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRange, label = 'REPAIR-MIXED') {
   if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
 
@@ -3365,7 +3371,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   })()
 
   try {
-    bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
+    bot.setControlState('sprint', shouldSprintDuringRepair(config))
 
     while (processed.size < targets.length) {
       if (Date.now() - lastLogAt >= progressLogMs) {
@@ -3438,7 +3444,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
             result = await placeTarget(bot, config, target, true)
           } finally {
             stopRepairActive = false
-            bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
+            bot.setControlState('sprint', shouldSprintDuringRepair(config))
           }
         } else {
           result = await placeNervScannerTarget(bot, config, target)
