@@ -3,6 +3,9 @@
     "host": "127.0.0.1",
     "port": 54321,
     "username": "MapartBot",
+    "usernames": [
+      "MapartBot"
+    ],
     "auth": "offline",
     "version": "1.21.8",
     "profilesFolder": "./auth-cache",
@@ -10,15 +13,58 @@
     "checkTimeoutInterval": 60000,
     "reconnect": {
       "enabled": true,
-      "delayMs": 9500,
-      "maxAttempts": 10
+      "delayMs": 15000,
+      "maxAttempts": 25
+    }
+  },
+  "connection": {
+    "active": "local",
+    "profiles": {
+      "local": {
+        "bot": {
+          "host": "127.0.0.1",
+          "port": 54321,
+          "auth": "offline",
+          "version": "1.21.8",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "normal",
+          "checkTimeoutInterval": 60000,
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 15000,
+            "maxAttempts": 25
+          }
+        }
+      },
+      "6b6t": {
+        "bot": {
+          "host": "alt.6b6t.org",
+          "port": 25565,
+          "auth": "microsoft",
+          "version": "auto",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "short",
+          "checkTimeoutInterval": 90000,
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 30000,
+            "maxAttempts": 50
+          }
+        },
+        "multiUser": {
+          "joinStaggerMs": 15000,
+          "startStaggerMs": 6000,
+          "staleStateMs": 60000,
+          "heartbeatMs": 4000
+        }
+      }
     }
   },
   "files": {
     "inputMode": "nbt",
     "planFile": "./mapart-plan.json",
     "machineConfigProfile": "carpet",
-    "machineConfigFile": "./nerv-printer-config/_configs/carpet-printer-config.json",
+    "machineConfigFile": "./nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json",
     "resumeProgress": true,
     "progressFile": "./logs/nerv-printer-progress.json",
     "progressSaveEvery": 10,
@@ -38,29 +84,38 @@
       "z": -1
     },
     "linesPerRun": 3,
-    "placeRange": 4,
+    "placeRange": 5,
     "minPlaceDistance": 0.8,
     "ignoredBlocks": [],
-    "placeDelayMs": 1,
+    "placeDelayMs": 0,
     "rotate": false,
     "northToSouth": true,
     "mapFillSquareSize": 1,
-    "sprintMode": "always",
+    "sprintMode": "off",
     "fastTraversalEnabled": true,
-    "fastTraversalTickMs": 40,
-    "maxPlacementsPerTick": 4
+    "fastTraversalTickMs": 20,
+    "fastTraversalCheckpointEveryRows": 8,
+    "fastTraversalCatchupPasses": 2,
+    "fastTraversalCatchupStallMs": 4000,
+    "maxPlacementsPerTick": 10
   },
   "advanced": {
-    "preRestockDelayMs": 10,
-    "inventoryActionDelayMs": 10,
-    "postRestockDelayMs": 10,
-    "restockFailureCooldownMs": 10,
+    "preRestockDelayMs": 80,
+    "inventoryActionDelayMs": 35,
+    "postRestockDelayMs": 120,
+    "restockFailureCooldownMs": 250,
     "predictiveRestock": true,
-    "predictiveRestockMaxPullsPerBlock": 5,
-    "predictiveLookaheadRows": 128,
     "dumpUnneededBeforeRefill": true,
+    "inventoryRefillRows": 2,
+    "inventoryMaxMaterialTypes": 16,
+    "inventoryPlanUseWorldState": false,
     "sneakOnDispenserOnly": true,
     "resetChestWaitMs": 500,
+    "rescanEnabled": true,
+    "rescanAfterPrinting": true,
+    "rescanRepairMissingBlocks": true,
+    "rescanBreakMisplacedCarpets": true,
+    "rescanVerifySupport": true,
     "postPrintWorkflowEnabled": true,
     "postPrintFillMapEnabled": true,
     "postPrintUseCartographyEnabled": true,
@@ -75,14 +130,60 @@
     "postPrintCenterWaitMs": 20000,
     "postPrintInteractionDelayMs": 200,
     "postPrintMapSettleDelayMs": 200,
-    "dumpAimSettleMs": 50,
+    "dumpAimSettleMs": 150,
     "dumpYawInvert": false,
     "dumpPitchInvert": false,
+    "dumpTestStationWaitMs": 7000,
+    "dumpTestTossAtEachStation": true,
+    "dumpPathThinkTimeoutMs": 5000,
+    "dumpAlreadyNearRange": 4,
+    "dumpGoalRange": 2,
+    "multiDumpLockStaleMs": 45000,
+    "dumpReaimEveryStacks": 2,
+    "movingPlaceTestTargetCount": 32,
+    "movingPlaceTestCheckpointEveryRows": 8,
+    "movingPlaceTestWaitAfterMs": 5000,
+    "nervScannerTestLineGroups": 2,
+    "nervScannerTestWaitAfterMs": 5000,
+    "nervWorkloadTestLineGroups": 2,
+    "nervWorkloadTestWaitAfterMs": 5000,
+    "scannerPlaceDelayMs": 6,
+    "scannerMaxCatchupPlacements": 10,
+    "scannerWorkloadPollMs": 6,
+    "scannerWorkloadLogEveryMs": 1000,
+    "scannerLineEndSettleMs": 4500,
+    "scannerAdaptiveSlowdown": true,
+    "scannerAdaptiveMissingThreshold": 8,
+    "scannerAdaptiveRecoverThreshold": 2,
+    "scannerAdaptiveSettleStepMs": 750,
+    "scannerAdaptiveMaxSettleMs": 9000,
+    "scannerAdaptiveMinSettleMs": 2500,
+    "scannerAdaptivePlaceDelayStepMs": 2,
+    "scannerAdaptiveMaxPlaceDelayMs": 18,
+    "scannerAdaptiveMinPlaceDelayMs": 6,
+    "scannerRetryCooldownMs": 35,
+    "scannerPreSwapDelayMs": 25,
+    "scannerPostSwapDelayMs": 45,
+    "scannerWorkloadMode": "time",
+    "inventoryCycleTestWaitAfterMs": 5000,
+    "inventoryCycleTestRows": 2,
+    "repairTestWaitAfterMs": 5000,
+    "repairTestMaxPasses": 3,
+    "repairSprintMode": "always",
+    "repairGoalRange": 3.25,
+    "repairTargetSettleMs": 0,
+    "repairMoveTimeoutMs": 30000,
+    "repairProgressLogMs": 5000,
+    "repairFallbackToStopPlace": true,
+    "repairVerifySettleMs": 180,
+    "repairMaxMismatchRatio": 0.25,
+    "repairMaxMismatchCount": 512,
+    "useMapCornerYForNbtCarpets": true,
+    "repairBatchSize": 256,
+    "repairRestockMode": "fast",
     "postBuildDelayMs": 0,
-    "preSwapDelayMs": 10,
-    "postSwapDelayMs": 10,
-    "retryInteractTimeoutMs": 400,
-    "checkpointBuffer": 0.2,
+    "retryInteractTimeoutMs": 800,
+    "checkpointBuffer": 0.35,
     "breakCarpetAboveReset": false,
     "debugPrints": false
   },
@@ -93,17 +194,30 @@
   "anchorTranslation": {
     "enabled": true,
     "sourceAnchor": {
-      "x": -450,
-      "y": 0,
-      "z": -962
+        "x": -706,
+        "y": -9,
+        "z": -962
     },
     "targetAnchor": {
-      "x": -450,
-      "y": 0,
+      "x": -706,
+      "y": -9,
       "z": -962
     }
+
   },
   "multiUser": {
-    "enabled": false
+    "enabled": true,
+    "mode": "file",
+    "syncFolder": "./logs/nerv-printer-sync",
+    "requireAllReady": true,
+    "recoveryMarginBlocks": 20,
+    "recoveryDelayMs": 2000,
+    "staleStateMs": 45000,
+    "heartbeatMs": 5000,
+    "resumeExistingJob": true,
+    "startAllOnMasterReady": true,
+    "joinStaggerMs": 12000,
+    "startStaggerMs": 5000,
+    "launchFromSingleProcess": true
   }
 }
