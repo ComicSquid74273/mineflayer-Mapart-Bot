@@ -203,6 +203,16 @@ function createDefaultConfig() {
       scannerPostSwapDelayMs: 0,
       scannerWorkloadMode: 'fixed',
       inventoryCycleTestWaitAfterMs: 5000,
+      repairTestWaitAfterMs: 5000,
+      repairTestMaxPasses: 3,
+      repairGoalRange: 3.25,
+      repairTargetSettleMs: 0,
+      repairVerifySettleMs: 120,
+      repairMaxMismatchRatio: 0.25,
+      repairMaxMismatchCount: 512,
+      useMapCornerYForNbtCarpets: true,
+      repairBatchSize: 256,
+      repairRestockMode: 'fast',
       postBuildDelayMs: 0,
       preSwapDelayMs: 100,
       postSwapDelayMs: 100,
@@ -731,7 +741,9 @@ function targetsFromNbt(nbtData, config) {
     const normalizedLocalX = toNumber(localPos[0], 0) - minLocalX
     const normalizedLocalZ = toNumber(localPos[2], 0) - minLocalZ
     const x = corner.x + normalizedLocalX + offsets.x
-    const y = corner.y + (toNumber(localPos[1], 0) - minLocalY) + offsets.y
+    const y = config.advanced?.useMapCornerYForNbtCarpets !== false
+      ? corner.y + offsets.y
+      : corner.y + (toNumber(localPos[1], 0) - minLocalY) + offsets.y
     const z = corner.z + normalizedLocalZ + offsets.z
     const row = normalizedLocalZ
     const col = normalizedLocalX
@@ -2309,21 +2321,118 @@ async function ensureMaterialsForTargets(bot, config, targets) {
   }
 }
 
+function getRepairRestockPlan(bot, targets) {
+  const neededByBlock = estimateNeededFromLookahead(targets)
+  const missing = []
+
+  for (const [blockName, needed] of neededByBlock.entries()) {
+    const neededCount = Math.max(0, toNumber(needed, 0))
+    const have = countInventoryItems(bot, blockName)
+    const deficit = Math.max(0, neededCount - have)
+    if (deficit <= 0) continue
+
+    const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
+    missing.push({
+      blockName,
+      needed: neededCount,
+      have,
+      deficit,
+      stacks: Math.ceil(deficit / stackSize)
+    })
+  }
+
+  return { neededByBlock, missing }
+}
+
+async function ensureRepairMaterialsForTargets(bot, config, targets) {
+  const advanced = config.advanced || {}
+  if (advanced.predictiveRestock === false || !targets.length) return
+
+  const maxIterations = Math.max(10, toNumber(advanced.repairRestockMaxIterations, 24))
+  let safetyCounter = 0
+
+  while (safetyCounter < maxIterations) {
+    safetyCounter += 1
+    const plan = getRepairRestockPlan(bot, targets)
+
+    if (!plan.missing.length) {
+      if (advanced.debugPrints) {
+        console.log(`[REPAIR-RESTOCK] Inventory already covers repair batch: ${formatInventoryPlanMap(plan.neededByBlock)}`)
+      }
+      return
+    }
+
+    for (const item of plan.missing) {
+      unavailableMaterialCache.delete(item.blockName)
+    }
+
+    let closestItem = null
+    let closestDist = Infinity
+    const failureCooldownMs = Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))
+
+    for (const item of plan.missing) {
+      if (restockFailureCache.has(item.blockName) && Date.now() - restockFailureCache.get(item.blockName) < failureCooldownMs) {
+        continue
+      }
+
+      const groups = getMaterialChestGroupsForRefill(bot, config, item.blockName)
+      if (!groups || !groups.length || !groups[0].length) continue
+
+      const nearestChest = groups[0][0]
+      const dist = horizontalDist2(bot, nearestChest)
+      if (dist < closestDist) {
+        closestDist = dist
+        closestItem = item
+      }
+    }
+
+    if (!closestItem) {
+      console.log(`[REPAIR-RESTOCK-WARN] No available chest found for missing repair material(s): ${plan.missing.map((entry) => `${entry.blockName}x${entry.deficit}`).join(', ')}`)
+      return
+    }
+
+    if (!inventoryHasRoomForItem(bot, closestItem.blockName)) {
+      const dumpable = getDumpableCarpetStacks(bot, plan.neededByBlock).slice(0, 1)
+      if (dumpable.length > 0) {
+        console.log(`[REPAIR-DUMP] Freeing 1 slot before repair restock: ${dumpable[0].name}x${dumpable[0].count}`)
+        await dumpCarpetStacks(bot, config, dumpable, 'repairPredumpBeforeRefill')
+        await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+        continue
+      }
+
+      console.log(`[REPAIR-RESTOCK-WARN] No inventory space for ${closestItem.blockName}; repair will continue with current inventory.`)
+      return
+    }
+
+    console.log(`[REPAIR-RESTOCK] material=${closestItem.blockName} have=${closestItem.have} need=${closestItem.needed} deficit=${closestItem.deficit} dist=${Math.round(Math.sqrt(closestDist))}`)
+    const restocked = await restockMaterial(bot, config, closestItem.blockName, closestItem.stacks, plan.neededByBlock)
+
+    if (!restocked) {
+      const haveAfter = countInventoryItems(bot, closestItem.blockName)
+      if (haveAfter >= closestItem.needed) return
+
+      if (config.errorHandling?.logErrors !== false) {
+        console.log(`[REPAIR-RESTOCK-WARN] Could not fully restock ${closestItem.blockName}; have=${haveAfter} need=${closestItem.needed}.`)
+      }
+      await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+    }
+  }
+
+  if (config.errorHandling?.logErrors !== false) {
+    console.log(`[REPAIR-RESTOCK-WARN] Fast repair restock hit safety limit (${maxIterations}); continuing with current inventory.`)
+  }
+}
+
 async function dumpUnneededCarpets(bot, config, neededByBlock) {
   const dumpable = getDumpableCarpetStacks(bot, neededByBlock)
   return await dumpCarpetStacks(bot, config, dumpable, 'dumpedStacks')
 }
 
-async function placeTarget(bot, config, target, isRepairPass = false) {
-  const printer = config.printer || {}
-  const errors = config.errorHandling || {}
+function resolveTargetPlacementPosition(bot, target, config) {
   const Vec3 = bot.entity.position.constructor
-  const noWaitForBlockUpdate = isRepairPass === 'noWait'
-
   let targetPos = new Vec3(target.position.x, target.position.y, target.position.z)
+  let shiftedDown = false
 
-  // Some exported NBT files are one block above the actual printable layer.
-  // If support is missing at targetY but present one block below, shift placement down.
   const initialSupport = bot.blockAt(targetPos.offset(0, -1, 0))
   if (!initialSupport || initialSupport.name === 'air') {
     const lowerTarget = targetPos.offset(0, -1, 0)
@@ -2333,11 +2442,23 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
 
     if (lowerSupport && lowerSupport.name !== 'air' && lowerIsPlaceable) {
       targetPos = lowerTarget
+      shiftedDown = true
       if (config.advanced?.debugPrints) {
         console.log(`[Y-AUTO] Shifted target down by 1 at ${target.position.x} ${target.position.y} ${target.position.z}`)
       }
     }
   }
+
+  return { targetPos, shiftedDown }
+}
+
+async function placeTarget(bot, config, target, isRepairPass = false) {
+  const printer = config.printer || {}
+  const errors = config.errorHandling || {}
+  const Vec3 = bot.entity.position.constructor
+  const noWaitForBlockUpdate = isRepairPass === true || isRepairPass === 'noWait'
+
+  const { targetPos } = resolveTargetPlacementPosition(bot, target, config)
 
   const blockAtTarget = bot.blockAt(targetPos)
 
@@ -2364,6 +2485,9 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   const support = bot.blockAt(targetPos.offset(0, -1, 0))
   if (!support || support.name === 'air') {
     return { state: 'skip', reason: 'missing-support' }
+  }
+  if (isRepairPass && String(support.name || '').endsWith('_carpet')) {
+    return { state: 'skip', reason: `support-is-carpet-possible-wrong-y-${support.name}` }
   }
 
   const botBlockX = Math.floor(bot.entity.position.x)
@@ -2480,115 +2604,190 @@ async function repairTargets(bot, config, targets, placeRange) {
   if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
 
   const printer = config.printer || {}
-  const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
-  const northToSouth = printer.northToSouth !== false
-  const tickMs = Math.max(10, toNumber(printer.fastTraversalTickMs, 40))
-  const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
-  const orderedTargets = orderTargetsLineByLine(targets, linesPerRun, northToSouth)
-
-  const byColRow = new Map()
-  const cols = new Set()
-  const rows = new Set()
-  for (const target of orderedTargets) {
-    cols.add(target.col)
-    rows.add(target.row)
-    byColRow.set(`${target.col}:${target.row}`, target)
-  }
-
-  const sortedCols = [...cols].sort((a, b) => a - b)
-  const sortedRowsAsc = [...rows].sort((a, b) => a - b)
-
+  const repairGoalRange = Math.max(0.5, toNumber(config.advanced?.repairGoalRange, Math.max(0.75, placeRange - 1.5)))
+  const settleMs = Math.max(0, toNumber(config.advanced?.repairTargetSettleMs, 20))
+  const remaining = [...targets]
   let placed = 0
   let already = 0
   let skipped = 0
-  let startOnNorthSide = northToSouth
 
-  const Vec3 = bot.entity.position.constructor
+  bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
 
-  for (let i = 0; i < sortedCols.length; i += linesPerRun) {
-    const colBatch = sortedCols.slice(i, i + linesPerRun)
-    const rowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
+  while (remaining.length > 0) {
+    const botPos = bot.entity.position
+    let bestIndex = 0
+    let bestDist = Number.POSITIVE_INFINITY
 
-    const batchTargets = []
-    for (const row of rowOrder) {
-      for (const col of colBatch) {
-        const t = byColRow.get(`${col}:${row}`)
-        if (t) batchTargets.push(t)
+    for (let i = 0; i < remaining.length; i += 1) {
+      const pos = remaining[i].position
+      const dx = botPos.x - (pos.x + 0.5)
+      const dz = botPos.z - (pos.z + 0.5)
+      const dist2 = dx * dx + dz * dz
+      if (dist2 < bestDist) {
+        bestDist = dist2
+        bestIndex = i
       }
     }
 
-    if (!batchTargets.length) {
-      startOnNorthSide = !startOnNorthSide
-      continue
-    }
-
-    // Build sprint checkpoints every 8 rows
-    const checkpoints = []
-    const checkpointInterval = 8
-    for (let r = 0; r < rowOrder.length; r += checkpointInterval) {
-      const row = rowOrder[r]
-      const midCol = colBatch[Math.floor(colBatch.length / 2)]
-      const t = byColRow.get(`${midCol}:${row}`) || batchTargets.find(bt => bt.row === row)
-      if (t) checkpoints.push(t.position)
-    }
-    checkpoints.push(batchTargets[batchTargets.length - 1].position)
-
-    let batchActive = true
-    const processedTargets = new Set()
-
-    // Concurrent placement loop — runs while bot sprints through checkpoints
-    const placementLoop = (async () => {
-      while (batchActive) {
-        const botPos = bot.entity.position
-        let placementsThisTick = 0
-
-        const candidates = batchTargets.filter(t =>
-          !processedTargets.has(t) &&
-          botPos.distanceTo(new Vec3(t.position.x + 0.5, t.position.y + 0.5, t.position.z + 0.5)) <= placeRange
-        )
-
-        candidates.sort((a, b) => {
-          const da = botPos.distanceTo(new Vec3(a.position.x + 0.5, a.position.y + 0.5, a.position.z + 0.5))
-          const db = botPos.distanceTo(new Vec3(b.position.x + 0.5, b.position.y + 0.5, b.position.z + 0.5))
-          return da - db
-        })
-
-        for (const target of candidates) {
-          if (placementsThisTick >= maxPerTick) break
-          processedTargets.add(target)
-          placementsThisTick++
-          try {
-            const result = await placeTarget(bot, config, target, true)
-            if (result.state === 'placed') placed++
-            else if (result.state === 'already') already++
-            else skipped++
-          } catch (err) {
-            skipped++
-            if (config.errorHandling?.logErrors !== false) {
-              console.log(`[REPAIR-FAST-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
-            }
-          }
-        }
-
-        await delay(tickMs)
-      }
-    })()
-
+    const [target] = remaining.splice(bestIndex, 1)
     try {
-      for (const cp of checkpoints) {
-        if (!batchActive) break
-        await bot.pathfinder.goto(new GoalNear(cp.x, cp.y, cp.z, 1))
+      if (Math.sqrt(bestDist) > Math.max(1, placeRange - 0.25)) {
+        await bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, repairGoalRange))
+      }
+
+      const result = await placeTarget(bot, config, target, true)
+      if (result.state === 'placed') placed += 1
+      else if (result.state === 'already') already += 1
+      else {
+        skipped += 1
+        if (config.errorHandling?.logErrors !== false) {
+          console.log(`[REPAIR-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+        }
       }
     } catch (err) {
+      skipped += 1
       if (config.errorHandling?.logErrors !== false) {
-        console.log(`[REPAIR-MOVE-ERR] Traversal interrupted: ${err?.message || err}`)
+        console.log(`[REPAIR-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
       }
-    } finally {
-      batchActive = false
-      await placementLoop
     }
 
-    startOnNorthSide = !startOnNorthSide
+    if (settleMs > 0) await delay(settleMs)
+  }
+
+  return { placed, already, skipped }
+}
+
+function scanPlacementErrors(bot, targets, options = {}) {
+  const Vec3 = bot.entity.position.constructor
+  const errors = []
+  let unloaded = 0
+  const logPrefix = options.logPrefix || 'SCAN'
+  const logErrors = options.logErrors === true
+  const maxLogs = Math.max(0, toNumber(options.maxLogs, 50))
+  const includeUnloaded = options.includeUnloaded === true
+
+  for (const target of targets) {
+    const { targetPos, shiftedDown } = resolveTargetPlacementPosition(bot, target, options.config || {})
+    const actual = bot.blockAt(targetPos)
+    if (!actual) {
+      unloaded += 1
+      if (!includeUnloaded) continue
+    }
+    if (actual?.name === target.blockName) continue
+
+    const reason = (!actual || actual.name === 'air') ? 'missing' : `wrong-${actual.name}`
+    const resolvedTarget = shiftedDown
+      ? { ...target, position: { x: targetPos.x, y: targetPos.y, z: targetPos.z } }
+      : target
+    errors.push({ target: resolvedTarget, reason, actualName: actual?.name || 'air' })
+
+    if (logErrors && errors.length <= maxLogs) {
+      const yNote = shiftedDown ? `, resolvedY=${targetPos.y}` : ''
+      console.log(`[${logPrefix}-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason}, expected=${target.blockName}${yNote})`)
+    }
+  }
+
+  if (logErrors && errors.length > maxLogs) {
+    console.log(`[${logPrefix}] ${errors.length - maxLogs} additional mismatch(es) not printed.`)
+  }
+  if (unloaded > 0) {
+    console.log(`[${logPrefix}] unloaded=${unloaded} ${includeUnloaded ? 'included-as-missing' : 'skipped'}.`)
+  }
+
+  return errors
+}
+
+function shouldAbortRepairForMismatchCount(config, mismatchCount, totalTargets, label = 'REPAIR') {
+  const advanced = config.advanced || {}
+  const maxCount = Math.max(1, toNumber(advanced.repairMaxMismatchCount, 512))
+  const maxRatio = Math.max(0, toNumber(advanced.repairMaxMismatchRatio, 0.25))
+  const ratio = totalTargets > 0 ? mismatchCount / totalTargets : 0
+  const tooMany = mismatchCount > maxCount && ratio > maxRatio
+
+  if (tooMany) {
+    console.log(`[${label}-ABORT] mismatchCount=${mismatchCount}/${totalTargets} (${(ratio * 100).toFixed(1)}%) exceeds repair safety limit. This usually means wrong Y/layer, unloaded chunks, or a reset area, so repair is skipped to avoid damaging the platform.`)
+  }
+
+  return tooMany
+}
+
+function takeNearestRepairBatch(bot, targets, batchSize) {
+  const maxBatch = Math.max(1, toNumber(batchSize, 256))
+  const remaining = [...targets]
+  const batch = []
+  let cursor = bot.entity.position
+
+  while (remaining.length > 0 && batch.length < maxBatch) {
+    let bestIndex = 0
+    let bestDist = Number.POSITIVE_INFINITY
+
+    for (let i = 0; i < remaining.length; i += 1) {
+      const pos = remaining[i].position
+      const dx = cursor.x - (pos.x + 0.5)
+      const dz = cursor.z - (pos.z + 0.5)
+      const dist2 = dx * dx + dz * dz
+      if (dist2 < bestDist) {
+        bestDist = dist2
+        bestIndex = i
+      }
+    }
+
+    const [target] = remaining.splice(bestIndex, 1)
+    batch.push(target)
+    cursor = { x: target.position.x + 0.5, z: target.position.z + 0.5 }
+  }
+
+  return { batch, remaining }
+}
+
+async function repairTargetsInBatches(bot, config, targets, placeRange, label = 'REPAIR') {
+  const advanced = config.advanced || {}
+  const batchSize = Math.max(1, toNumber(advanced.repairBatchSize, 256))
+  let remaining = [...targets]
+  let placed = 0
+  let already = 0
+  let skipped = 0
+  let batchNumber = 0
+  const maxBatches = Math.max(
+    1,
+    Math.ceil(Math.max(1, targets.length) / batchSize) * Math.max(1, toNumber(advanced.repairTestMaxPasses, 3))
+  )
+
+  while (remaining.length > 0 && batchNumber < maxBatches) {
+    batchNumber += 1
+    const selection = takeNearestRepairBatch(bot, remaining, batchSize)
+    const batch = selection.batch
+    remaining = selection.remaining
+
+    console.log(`[${label}-BATCH] batch=${batchNumber} size=${batch.length} remainingAfterBatch=${remaining.length}`)
+    if (String(advanced.repairRestockMode || 'fast').toLowerCase() === 'nerv') {
+      await ensureMaterialsForTargets(bot, config, batch)
+    } else {
+      await ensureRepairMaterialsForTargets(bot, config, batch)
+    }
+
+    const result = await repairTargets(bot, config, batch, placeRange)
+    placed += result.placed
+    already += result.already
+    skipped += result.skipped
+
+    await delay(toNumber(advanced.repairVerifySettleMs, 300))
+    const stillWrong = scanPlacementErrors(bot, batch, {
+      config,
+      logPrefix: `${label}-VERIFY-BATCH-${batchNumber}`,
+      logErrors: config.errorHandling?.logErrors !== false,
+      maxLogs: toNumber(advanced.repairTestMaxErrorLogs, 80)
+    }).map((entry) => entry.target)
+
+    if (stillWrong.length > 0) {
+      remaining.push(...stillWrong)
+      console.log(`[${label}-BATCH] batch=${batchNumber} unresolved=${stillWrong.length}; queued for another pass.`)
+    }
+  }
+
+  if (remaining.length > 0) {
+    skipped += remaining.length
+    console.log(`[${label}-BATCH] stopped with ${remaining.length} unresolved target(s) after ${batchNumber}/${maxBatches} batch attempt(s).`)
   }
 
   return { placed, already, skipped }
@@ -3065,12 +3264,37 @@ async function runPrint(bot, config) {
     // Repair pass: fix any missed or broken blocks
     const errorAction = String(config.errorHandling?.errorAction || 'repair').toLowerCase()
     if (errorList.length && errorAction === 'repair') {
-      console.log(`[REPAIR-PASS] Starting repair pass for ${errorList.length} error(s).`)
-      await ensureMaterialsForTargets(bot, config, errorList)
-      const repairResult = await repairTargets(bot, config, errorList, placeRange)
-      placed += repairResult.placed
-      already += repairResult.already
-      skipped += repairResult.skipped
+      if (shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, 'REPAIR')) {
+        console.log('[REPAIR-PASS] Repair skipped by safety guard; leaving phase as repair for the next run after alignment/chunks are fixed.')
+        return {
+          sourceType: input.sourceType,
+          sourcePath: input.sourcePath,
+          sourceName: input.sourceName,
+          didWork: true
+        }
+      }
+      const maxRepairPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
+      for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
+        console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
+        const repairResult = await repairTargetsInBatches(bot, config, errorList, placeRange, `REPAIR-PASS-${pass}`)
+        placed += repairResult.placed
+        already += repairResult.already
+        skipped += repairResult.skipped
+        await delay(toNumber(config.advanced?.repairVerifySettleMs, 300))
+
+        const remainingErrors = scanPlacementErrors(bot, orderedTargets, {
+          config,
+          logPrefix: `REPAIR-VERIFY-PASS-${pass}`,
+          logErrors: config.errorHandling?.logErrors !== false,
+          maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+        }).map((entry) => entry.target)
+        errorList.length = 0
+        errorList.push(...remainingErrors)
+        console.log(`[REPAIR-PASS] pass=${pass} fullScanRemaining=${errorList.length}.`)
+        if (pass < maxRepairPasses && shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, `REPAIR-VERIFY-PASS-${pass}`)) {
+          break
+        }
+      }
     }
   } else {
     console.log('[RESUME] Skipping final scan and repair (crashed during post_print). Going to post-print workflow.')
@@ -3362,12 +3586,60 @@ async function runPrint(bot, config) {
   // Repair pass: fix collected errors if enabled
   const errorAction = String(config.errorHandling?.errorAction || 'repair').toLowerCase()
   if (errorList.length && errorAction === 'repair') {
-    console.log(`[REPAIR-PASS] Starting repair pass for ${errorList.length} error(s).`)
-    await ensureMaterialsForTargets(bot, config, errorList)
-    const repairResult = await repairTargets(bot, config, errorList, placeRange)
-    placed += repairResult.placed
-    already += repairResult.already
-    skipped += repairResult.skipped
+    if (shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, 'REPAIR')) {
+      if (progressEnabled) {
+        writeProgressState(progressFile, {
+          sourceType: input.sourceType,
+          sourceName: input.sourceName,
+          sourcePath: input.sourcePath,
+          totalTargets: orderedTargets.length,
+          processedTargets: orderedTargets.length,
+          phase: 'repair',
+          updatedAt: new Date().toISOString()
+        })
+      }
+      console.log('[REPAIR-PASS] Repair skipped by safety guard; progress remains in repair phase for a safe retry.')
+      return {
+        sourceType: input.sourceType,
+        sourcePath: input.sourcePath,
+        sourceName: input.sourceName,
+        didWork: true
+      }
+    }
+    if (progressEnabled) {
+      writeProgressState(progressFile, {
+        sourceType: input.sourceType,
+        sourceName: input.sourceName,
+        sourcePath: input.sourcePath,
+        totalTargets: orderedTargets.length,
+        processedTargets: orderedTargets.length,
+        phase: 'repair',
+        updatedAt: new Date().toISOString()
+      })
+    }
+
+    const maxRepairPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
+    for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
+      console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
+      const repairResult = await repairTargetsInBatches(bot, config, errorList, placeRange, `REPAIR-PASS-${pass}`)
+      placed += repairResult.placed
+      already += repairResult.already
+      skipped += repairResult.skipped
+      await delay(toNumber(config.advanced?.repairVerifySettleMs, 300))
+
+      const remainingErrors = scanPlacementErrors(bot, orderedTargets, {
+        config,
+        logPrefix: `REPAIR-VERIFY-PASS-${pass}`,
+        logErrors: config.errorHandling?.logErrors !== false,
+        maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+      }).map((entry) => entry.target)
+      errorList.length = 0
+      errorList.push(...remainingErrors)
+      console.log(`[REPAIR-PASS] pass=${pass} fullScanRemaining=${errorList.length}.`)
+      if (pass < maxRepairPasses && shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, `REPAIR-VERIFY-PASS-${pass}`)) {
+        break
+      }
+    }
   }
 
   console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
@@ -4315,6 +4587,91 @@ async function runInventoryCycleTest(bot, config) {
   }
 }
 
+async function runRepairTest(bot, config) {
+  const input = await loadTargets(config)
+  const calibratedTargets = calibrateTargetsForWorld(bot, input.targets, config)
+  const printer = config.printer || {}
+  const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
+  const northToSouth = printer.northToSouth !== false
+  const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const maxPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
+  const waitAfterMs = Math.max(0, toNumber(config.advanced?.repairTestWaitAfterMs, 5000))
+
+  if (typeof bot.waitForChunksToLoad === 'function') {
+    try {
+      await Promise.race([
+        bot.waitForChunksToLoad(),
+        delay(4000)
+      ])
+    } catch {
+      // Continue with the blocks currently visible to the client.
+    }
+  } else {
+    await delay(800)
+  }
+
+  if (!orderedTargets.length) {
+    console.log('[TEST-REPAIR] No targets loaded.')
+    return
+  }
+
+  console.log(`[TEST-REPAIR] Loaded ${input.sourceName}; targets=${orderedTargets.length} linesPerRun=${linesPerRun} maxPasses=${maxPasses}.`)
+  let errors = scanPlacementErrors(bot, orderedTargets, {
+    config,
+    logPrefix: 'TEST-REPAIR-BEFORE',
+    logErrors: config.errorHandling?.logErrors !== false,
+    maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+  })
+  console.log(`[TEST-REPAIR] before mismatches=${errors.length}.`)
+  if (shouldAbortRepairForMismatchCount(config, errors.length, orderedTargets.length, 'TEST-REPAIR')) {
+    if (waitAfterMs > 0) {
+      console.log(`[TEST-REPAIR] Safety abort. Waiting ${waitAfterMs}ms before logout.`)
+      await delay(waitAfterMs)
+    }
+    return
+  }
+
+  let placed = 0
+  let already = 0
+  let skipped = 0
+
+  for (let pass = 1; pass <= maxPasses && errors.length > 0; pass += 1) {
+    const repairTargetsOnly = errors.map((entry) => entry.target)
+    console.log(`[TEST-REPAIR] pass=${pass}/${maxPasses} repairing=${repairTargetsOnly.length}.`)
+    const result = await repairTargetsInBatches(bot, config, repairTargetsOnly, placeRange, `TEST-REPAIR-PASS-${pass}`)
+    placed += result.placed
+    already += result.already
+    skipped += result.skipped
+
+    await delay(toNumber(config.advanced?.repairVerifySettleMs, 300))
+    errors = scanPlacementErrors(bot, orderedTargets, {
+      config,
+      logPrefix: `TEST-REPAIR-AFTER-PASS-${pass}`,
+      logErrors: config.errorHandling?.logErrors !== false,
+      maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+    })
+    console.log(`[TEST-REPAIR] pass=${pass} fullScanRemaining=${errors.length}.`)
+    if (pass < maxPasses && shouldAbortRepairForMismatchCount(config, errors.length, orderedTargets.length, `TEST-REPAIR-AFTER-PASS-${pass}`)) {
+      break
+    }
+  }
+
+  const finalErrors = scanPlacementErrors(bot, orderedTargets, {
+    config,
+    logPrefix: 'TEST-REPAIR-FINAL',
+    logErrors: config.errorHandling?.logErrors !== false,
+    maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+  })
+
+  console.log(`[TEST-REPAIR] Done. placed=${placed} already=${already} skipped=${skipped} remaining=${finalErrors.length}.`)
+
+  if (waitAfterMs > 0) {
+    console.log(`[TEST-REPAIR] Waiting ${waitAfterMs}ms before logout.`)
+    await delay(waitAfterMs)
+  }
+}
+
 function runSingleInventoryPlanTestSession(config) {
   return new Promise((resolve) => {
     const bot = createBot(config)
@@ -4387,6 +4744,56 @@ function runSingleInventoryCycleTestSession(config) {
         console.log('[TEST-INVENTORY-CYCLE-ERROR]', err?.message || err)
       } finally {
         bot.quit('inventory cycle test complete')
+        settle()
+      }
+    })
+
+    bot.on('kicked', (reason) => {
+      const text = typeof reason === 'string' ? reason : JSON.stringify(reason)
+      console.log(`[KICKED] ${text}`)
+    })
+
+    bot.on('error', (err) => {
+      console.log('[ERROR]', err?.message || String(err))
+    })
+
+    bot.on('end', () => {
+      settle()
+    })
+  })
+}
+
+function runSingleRepairTestSession(config) {
+  return new Promise((resolve) => {
+    const bot = createBot(config)
+    bot.loadPlugin(pathfinder)
+
+    let settled = false
+    const settle = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+
+    bot.once('spawn', async () => {
+      const printer = config.printer || {}
+      const allowJump = printer.allowJump !== false
+
+      console.log('[TEST-REPAIR] Connected.')
+
+      const movements = new Movements(bot)
+      movements.canDig = false
+      movements.allow1by1towers = false
+      movements.allowParkour = allowJump
+      bot.pathfinder.setMovements(movements)
+
+      try {
+        await delay(toNumber(config.printer?.startDelayMs, 1500))
+        await runRepairTest(bot, config)
+      } catch (err) {
+        console.log('[TEST-REPAIR-ERROR]', err?.message || err)
+      } finally {
+        bot.quit('repair test complete')
         settle()
       }
     })
@@ -4625,6 +5032,13 @@ async function start() {
   if (hasCliFlag('--test-inventory-cycle')) {
     console.log('[TEST-INVENTORY-CYCLE] Running isolated NERV-style inventory dump/restock cycle only.')
     await runSingleInventoryCycleTestSession(config)
+    setTimeout(() => process.exit(0), 100)
+    return
+  }
+
+  if (hasCliFlag('--test-repair')) {
+    console.log('[TEST-REPAIR] Running isolated repair scan/fix/verify cycle only.')
+    await runSingleRepairTestSession(config)
     setTimeout(() => process.exit(0), 100)
     return
   }
