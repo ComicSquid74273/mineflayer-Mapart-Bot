@@ -11,7 +11,9 @@
     "test:dump": "node nerv-printer.js --test-dump",
     "test:moving-place": "node nerv-printer.js --test-moving-place",
     "test:nerv-scanner": "node nerv-printer.js --test-nerv-scanner",
+    "test:nerv-workload": "node nerv-printer.js --test-nerv-workload",
     "test:inventory-plan": "node nerv-printer.js --test-inventory-plan",
+    "test:inventory-cycle": "node nerv-printer.js --test-inventory-cycle",
     "start:broadcast": "set ENABLE_QUOTE_BROADCAST=true&& node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

@@ -192,8 +192,17 @@ function createDefaultConfig() {
       movingPlaceTestWaitAfterMs: 5000,
       nervScannerTestLineGroups: 2,
       nervScannerTestWaitAfterMs: 5000,
+      nervWorkloadTestLineGroups: 2,
+      nervWorkloadTestWaitAfterMs: 5000,
+      scannerPlaceDelayMs: 10,
+      scannerMaxCatchupPlacements: 12,
+      scannerWorkloadPollMs: 5,
+      scannerWorkloadLogEveryMs: 1000,
+      scannerRetryCooldownMs: 30,
       scannerPreSwapDelayMs: 0,
       scannerPostSwapDelayMs: 0,
+      scannerWorkloadMode: 'fixed',
+      inventoryCycleTestWaitAfterMs: 5000,
       postBuildDelayMs: 0,
       preSwapDelayMs: 100,
       postSwapDelayMs: 100,
@@ -255,6 +264,13 @@ function toOpenPos(entry) {
     y: Number(openPos.y),
     z: Number(openPos.z)
   }
+}
+
+function toMaterialSpot(entry) {
+  const blockPos = toBlockPos(entry)
+  if (!blockPos) return null
+  const accessPosition = toOpenPos(entry)
+  return accessPosition ? { ...blockPos, accessPosition } : blockPos
 }
 
 function toPoint3(value) {
@@ -333,7 +349,10 @@ function applyAnchorTranslation(config) {
   if (machine.materialDict && typeof machine.materialDict === 'object') {
     for (const material of Object.keys(machine.materialDict)) {
       const spots = Array.isArray(machine.materialDict[material]) ? machine.materialDict[material] : []
-      machine.materialDict[material] = spots.map((pos) => translatePoint(pos, delta))
+      machine.materialDict[material] = spots.map((pos) => ({
+        ...translatePoint(pos, delta),
+        accessPosition: translatePoint(pos.accessPosition, delta)
+      }))
     }
   }
 
@@ -477,7 +496,7 @@ function importNervFolderConfig(imported, baseConfig) {
 
   for (const key of Object.keys(sourceDict)) {
     const normalizedName = String(key).replace(/^minecraft:/, '')
-    const spots = Array.isArray(sourceDict[key]) ? sourceDict[key].map(toBlockPos).filter(Boolean) : []
+    const spots = Array.isArray(sourceDict[key]) ? sourceDict[key].map(toMaterialSpot).filter(Boolean) : []
     if (spots.length) {
       materialDict[normalizedName] = spots
     }
@@ -973,14 +992,24 @@ function getMaterialChestPositions(config, blockName) {
   if (!Array.isArray(value)) return []
 
   return value
-    .filter((entry) => Number.isFinite(entry?.x) && Number.isFinite(entry?.y) && Number.isFinite(entry?.z))
-    .map((entry) => ({ x: Number(entry.x), y: Number(entry.y), z: Number(entry.z) }))
+    .map((entry) => {
+      const pos = toBlockPos(entry)
+      if (!pos) return null
+      const accessPosition = toOpenPos(entry)
+      return accessPosition ? { ...pos, accessPosition } : pos
+    })
+    .filter(Boolean)
+}
+
+function chestTravelPoint(pos) {
+  return pos?.accessPosition || pos
 }
 
 function horizontalDist2(bot, pos) {
-  if (!Number.isFinite(pos?.x) || !Number.isFinite(pos?.z)) return Number.POSITIVE_INFINITY
-  const dx = bot.entity.position.x - (Number(pos.x) + 0.5)
-  const dz = bot.entity.position.z - (Number(pos.z) + 0.5)
+  const travel = chestTravelPoint(pos)
+  if (!Number.isFinite(travel?.x) || !Number.isFinite(travel?.z)) return Number.POSITIVE_INFINITY
+  const dx = bot.entity.position.x - (Number(travel.x) + 0.5)
+  const dz = bot.entity.position.z - (Number(travel.z) + 0.5)
   return dx * dx + dz * dz
 }
 
@@ -989,13 +1018,14 @@ function groupChestPositionsByRegion(spots) {
   const attachDist2 = 20 * 20
 
   for (const spot of spots) {
+    const spotTravel = chestTravelPoint(spot)
     let bestIndex = -1
     let bestDist = Number.POSITIVE_INFINITY
 
     for (let i = 0; i < groups.length; i += 1) {
       const g = groups[i]
-      const dx = Number(spot.x) - g.cx
-      const dz = Number(spot.z) - g.cz
+      const dx = Number(spotTravel.x) - g.cx
+      const dz = Number(spotTravel.z) - g.cz
       const dist2 = dx * dx + dz * dz
       if (dist2 < bestDist) {
         bestDist = dist2
@@ -1007,12 +1037,12 @@ function groupChestPositionsByRegion(spots) {
       const g = groups[bestIndex]
       g.spots.push(spot)
       const n = g.spots.length
-      g.cx = ((g.cx * (n - 1)) + Number(spot.x)) / n
-      g.cz = ((g.cz * (n - 1)) + Number(spot.z)) / n
+      g.cx = ((g.cx * (n - 1)) + Number(spotTravel.x)) / n
+      g.cz = ((g.cz * (n - 1)) + Number(spotTravel.z)) / n
     } else {
       groups.push({
-        cx: Number(spot.x),
-        cz: Number(spot.z),
+        cx: Number(spotTravel.x),
+        cz: Number(spotTravel.z),
         spots: [spot]
       })
     }
@@ -1081,9 +1111,12 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
   const itemInfo = bot.registry.itemsByName[blockName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
-  // requestedPulls = number of stacks wanted. Convert to item count for precise pull tracking.
-  const desiredItemCount = Math.max(stackSize, Math.max(1, toNumber(requestedPulls, 1)) * stackSize)
+  const requestedStackCount = Math.max(1, toNumber(requestedPulls, 1))
+  const desiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
+    ? Math.max(stackSize, toNumber(neededByBlock.get(blockName), requestedStackCount * stackSize))
+    : Math.max(stackSize, requestedStackCount * stackSize)
   const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
+  const haveBeforeRestock = countInventoryItems(bot, blockName)
 
   if (!inventoryHasRoomForItem(bot, blockName)) {
     const dumped = await dumpUnneededCarpets(bot, config, keepPlan)
@@ -1102,7 +1135,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
     for (const spot of group) {
       let container = null
       try {
-        container = await openContainerAt(bot, spot)
+        const travel = chestTravelPoint(spot)
+        if (config.errorHandling?.logErrors !== false) {
+          console.log(`[RESTOCK-CHEST] ${blockName}: chest=${spot.x},${spot.y},${spot.z} open=${travel?.x ?? spot.x},${travel?.y ?? spot.y},${travel?.z ?? spot.z} dist=${Math.round(Math.sqrt(horizontalDist2(bot, spot)))}`)
+        }
+        container = await openContainerAt(bot, spot, spot.accessPosition)
         await delay(toNumber(advanced.preRestockDelayMs, 200))
 
         // Count ALL of the target item in this chest — including partial stacks.
@@ -1131,37 +1168,41 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
         // Pull in increments until we get what we need from this chest.
         // Handles fragmented chests (many small stacks) correctly.
+        let plannedHaveAfterPulls = haveAtStart
         const targetCount = haveAtStart + willPullTotal
         let attempts = 0
+        let stoppedForInventoryFull = false
         const maxAttempts = chestSlots.length + 8
-        while (countInventoryItems(bot, blockName) < targetCount && attempts < maxAttempts) {
+        while (plannedHaveAfterPulls < targetCount && attempts < maxAttempts) {
           attempts++
-          const amountStillNeeded = targetCount - countInventoryItems(bot, blockName)
+          const haveBeforePull = countInventoryItems(bot, blockName)
+          const amountStillNeeded = targetCount - plannedHaveAfterPulls
           const pullAmount = Math.min(stackSize, amountStillNeeded)
           try {
             await container.withdraw(itemId, null, pullAmount)
+            plannedHaveAfterPulls += pullAmount
             await delay(toNumber(advanced.inventoryActionDelayMs, 80))
+            const haveAfterPull = countInventoryItems(bot, blockName)
+            if (haveAfterPull <= haveBeforePull && config.errorHandling?.logErrors !== false) {
+              console.log(`[RESTOCK-WARN] ${blockName} inventory update pending: before=${haveBeforePull} after=${haveAfterPull} requested=${pullAmount} planned=${plannedHaveAfterPulls}/${targetCount}`)
+            }
           } catch (err) {
             const message = String(err?.message || err).toLowerCase()
             const inventoryFull = message.includes('no free') ||
               message.includes('inventory full') ||
+              message.includes('inventory is full') ||
               message.includes('free room') ||
               message.includes('no space')
 
             if (inventoryFull) {
               if (config.errorHandling?.logErrors !== false) {
-                console.log(`[RESTOCK-WARN] Inventory full while pulling ${blockName}. Dumping and retrying.`)
+                console.log(`[RESTOCK-WARN] Inventory full while pulling ${blockName}; stopping this chest.`)
               }
-              try { container.close() } catch { }
-              container = null
-              await dumpUnneededCarpets(bot, config, keepPlan)
-              await delay(toNumber(advanced.postRestockDelayMs, 300))
-              container = await openContainerAt(bot, spot)
-              await delay(toNumber(advanced.preRestockDelayMs, 200))
-              continue
+              stoppedForInventoryFull = true
+              break
             }
-            if (config.advanced?.debugPrints) {
-              console.log(`[RESTOCK-DEBUG] withdraw error for ${blockName}: ${err?.message || err}`)
+            if (config.errorHandling?.logErrors !== false) {
+              console.log(`[RESTOCK-WARN] withdraw error for ${blockName}: ${err?.message || err}`)
             }
             break
           }
@@ -1169,8 +1210,15 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
         await delay(toNumber(advanced.postRestockDelayMs, 300))
 
-        const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
-        if (inventoryItem) {
+        if (stoppedForInventoryFull) {
+          restockFailureCache.set(blockName, Date.now())
+          const haveNow = countInventoryItems(bot, blockName)
+          console.log(`[RESTOCK-WARN] Stopping ${blockName} restock because inventory is full: have=${haveNow} target=${desiredItemCount}.`)
+          return false
+        }
+
+        if (countInventoryItems(bot, blockName) >= desiredItemCount) {
+          const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
           await bot.equip(inventoryItem, 'hand')
           restockFailureCache.delete(blockName)
           unavailableMaterialCache.delete(blockName)
@@ -1186,6 +1234,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         }
       }
     }
+  }
+
+  const haveAfterRestock = countInventoryItems(bot, blockName)
+  if (haveAfterRestock > haveBeforeRestock) {
+    console.log(`[RESTOCK-WARN] Partial restock for ${blockName}: have=${haveAfterRestock} target=${desiredItemCount}.`)
   }
 
   restockFailureCache.set(blockName, Date.now())
@@ -1731,9 +1784,20 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
 }
 
 function countInventoryItems(bot, itemName) {
-  return bot.inventory.items()
-    .filter((entry) => entry.name === itemName)
-    .reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+  const inventory = bot.inventory || {}
+  const slots = Array.isArray(inventory.slots) ? inventory.slots : []
+  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
+  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : Math.min(slots.length, 45)
+  let count = 0
+
+  for (let slotIndex = start; slotIndex < end; slotIndex += 1) {
+    const stack = slots[slotIndex]
+    if (stack?.name === itemName) {
+      count += toNumber(stack.count, 0)
+    }
+  }
+
+  return count
 }
 
 function getBuildMaterialSlotCapacity(bot) {
@@ -2035,6 +2099,17 @@ async function dumpCarpetStacks(bot, config, stacks, reasonLabel = 'dumpedStacks
   return dumped
 }
 
+async function dumpNervInventorySlots(bot, config, dumpSlots, reasonLabel = 'nervPredump') {
+  const stacks = []
+  for (const slot of dumpSlots) {
+    const stack = bot.inventory.slots[slot.slotIndex]
+    if (!stack) continue
+    stacks.push(stack)
+  }
+
+  return await dumpCarpetStacks(bot, config, stacks, reasonLabel)
+}
+
 function inventoryHasRoomForItem(bot, itemName) {
   const itemInfo = bot.registry.itemsByName[itemName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
@@ -2049,6 +2124,27 @@ function inventoryHasRoomForItem(bot, itemName) {
   }
 
   return false
+}
+
+function inventoryCapacityForItem(bot, itemName) {
+  const itemInfo = bot.registry.itemsByName[itemName] || {}
+  const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
+  const inventory = bot.inventory || {}
+  const slots = Array.isArray(inventory.slots) ? inventory.slots : []
+  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
+  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : (Array.isArray(inventory.slots) ? inventory.slots.length : 46)
+  let capacity = 0
+
+  for (let i = start; i < end; i += 1) {
+    const slot = slots[i]
+    if (!slot) {
+      capacity += stackSize
+    } else if (slot.name === itemName) {
+      capacity += Math.max(0, stackSize - toNumber(slot.count, 0))
+    }
+  }
+
+  return capacity
 }
 
 async function dumpCarpetStacksForSpace(bot, config, keepNames = new Set(), maxStacks = 1) {
@@ -2115,40 +2211,40 @@ async function ensureMaterialsForTargets(bot, config, targets) {
   const advanced = config.advanced || {}
   if (advanced.predictiveRestock === false || !targets.length) return
 
-  // Use full 36-slot capacity as the target (Java Nerv-Printer behavior):
-  // predict assuming a fully clean inventory, then dump trash first, then refill.
-  const capacityOverride = advanced.dumpUnneededBeforeRefill !== false ? 36 : null
-  const neededByBlock = estimateNeededFromTargetsLimitedByCapacity(targets, bot, capacityOverride)
-  if (!neededByBlock.size) return
-
-  for (const blockName of neededByBlock.keys()) {
-    unavailableMaterialCache.delete(blockName)
-  }
-
-  // Dump carpets not in the future plan BEFORE restocking (frees slots first)
-  if (advanced.dumpUnneededBeforeRefill !== false) {
-    const dumpable = getDumpableCarpetStacks(bot, neededByBlock)
-    if (dumpable.length > 0) {
-      if (config.advanced?.debugPrints) console.log(`[PREDUMP] Dumping ${dumpable.length} unneeded stacks before restocking.`)
-      await dumpCarpetStacks(bot, config, dumpable, 'predumpBeforeRefill')
-    }
-  }
-
-  const configMaxPulls = toNumber(advanced.predictiveRestockMaxPullsPerBlock, 36)
-  const maxPulls = configMaxPulls < 6 ? 36 : configMaxPulls
-  let restockList = Array.from(neededByBlock.entries()).map(([blockName, needed]) => {
-    const have = countInventoryItems(bot, blockName)
-    const deficit = Math.max(0, needed - have)
-    return { blockName, needed, deficit }
-  }).filter((entry) => entry.deficit > 0)
-
-  if (!restockList.length) return
-
-  const maxIterations = restockList.length * 10
+  const maxIterations = Math.max(20, toNumber(advanced.nervInventoryMaxPlanIterations, 80))
   let safetyCounter = 0
 
-  while (restockList.length > 0 && safetyCounter < maxIterations) {
+  while (safetyCounter < maxIterations) {
     safetyCounter++
+    const plan = buildNervInventoryPlan(bot, config, targets)
+    const neededByBlock = plan.requiredItems
+
+    if (!neededByBlock.size) return
+
+    for (const blockName of neededByBlock.keys()) {
+      unavailableMaterialCache.delete(blockName)
+    }
+
+    if (config.advanced?.debugPrints) {
+      console.log(`[NERV-INVENTORY] availableSlots=${plan.availableSlots.length} required=${formatInventoryPlanMap(plan.requiredItems)} keep=${formatInventoryPlanMap(plan.materialInInv)} dumpSlots=${plan.dumpSlots.length} restock=${formatRestockList(plan.restockList)}`)
+    }
+
+    if (advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
+      console.log(`[NERV-DUMP] Dumping ${plan.dumpSlots.length} slot(s) before restock: ${formatDumpSlots(plan.dumpSlots)}`)
+      await dumpNervInventorySlots(bot, config, plan.dumpSlots, 'nervPredumpBeforeRefill')
+      await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+      continue
+    }
+
+    const restockList = plan.restockList.map((entry) => ({
+      blockName: entry.blockName,
+      needed: neededByBlock.get(entry.blockName) || entry.rawAmount,
+      rawAmount: entry.rawAmount,
+      stacks: entry.stacks
+    }))
+
+    if (!restockList.length) return
+
     let closestDist = Infinity
     let closestItem = null
 
@@ -2172,27 +2268,44 @@ async function ensureMaterialsForTargets(bot, config, targets) {
     if (!closestItem) break
 
     const haveBefore = countInventoryItems(bot, closestItem.blockName)
-    const pullsNeeded = Math.min(Math.ceil((closestItem.needed - haveBefore) / 64), maxPulls)
+    const pullsNeeded = Math.max(0, toNumber(closestItem.stacks, 0))
     
-    if (pullsNeeded <= 0) {
-      restockList = restockList.filter(i => i.blockName !== closestItem.blockName)
-      continue
-    }
+    if (pullsNeeded <= 0) continue
 
-    console.log(`[GREEDY-RESTOCK] Closest material=${closestItem.blockName} dist=${Math.round(Math.sqrt(closestDist))} pullsRequested=${pullsNeeded}`)
+    console.log(`[NERV-RESTOCK] Closest material=${closestItem.blockName} dist=${Math.round(Math.sqrt(closestDist))} pullsRequested=${pullsNeeded} rawAmount=${closestItem.rawAmount}`)
 
     const restocked = await restockMaterial(bot, config, closestItem.blockName, pullsNeeded, neededByBlock)
 
     if (!restocked) {
-      restockList = restockList.filter(i => i.blockName !== closestItem.blockName)
-    } else {
       const haveAfter = countInventoryItems(bot, closestItem.blockName)
-      if (haveAfter >= closestItem.needed) {
-        restockList = restockList.filter(i => i.blockName !== closestItem.blockName)
-      } else if (haveAfter <= haveBefore && restocked) {
-        restockList = restockList.filter(i => i.blockName !== closestItem.blockName)
+      const stillNeed = Math.max(0, closestItem.needed - haveAfter)
+      const remainingCapacity = inventoryCapacityForItem(bot, closestItem.blockName)
+      const retryPlan = buildNervInventoryPlan(bot, config, targets)
+
+      if (advanced.dumpUnneededBeforeRefill !== false && retryPlan.dumpSlots.length > 0) {
+        restockFailureCache.delete(closestItem.blockName)
+        unavailableMaterialCache.delete(closestItem.blockName)
+        console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} needs ${stillNeed} more but capacity is ${remainingCapacity}; dumping from fresh plan before retry.`)
+        continue
       }
+
+      if (stillNeed > remainingCapacity) {
+        console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} still needs ${stillNeed}, but inventory can only accept ${remainingCapacity}. Stopping refill cycle to avoid cycling chests.`)
+        return
+      }
+
+      if (haveAfter <= haveBefore && config.errorHandling?.logErrors !== false) {
+        console.log(`[NERV-RESTOCK-WARN] Could not restock ${closestItem.blockName}; replanning next material.`)
+      }
+      await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+      continue
     }
+
+    await delay(toNumber(advanced.postRestockDelayMs, 300))
+  }
+
+  if (config.errorHandling?.logErrors !== false) {
+    console.log(`[NERV-RESTOCK-WARN] Refill planner hit safety limit (${maxIterations}); continuing with current inventory.`)
   }
 }
 
@@ -2685,6 +2798,154 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   return { placed, already, skipped, seen: seen.size, missing }
 }
 
+async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide) {
+  if (!batchTargets.length) {
+    return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
+  }
+
+  const printer = config.printer || {}
+  const advanced = config.advanced || {}
+  const placeDelayMs = Math.max(1, toNumber(advanced.scannerPlaceDelayMs, toNumber(printer.placeDelayMs, 10)))
+  const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 12))
+  const pollMs = Math.max(1, toNumber(advanced.scannerWorkloadPollMs, Math.min(10, placeDelayMs)))
+  const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
+  const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
+
+  const minX = Math.min(...batchTargets.map((target) => target.position.x))
+  const minY = Math.min(...batchTargets.map((target) => target.position.y))
+  const minZ = Math.min(...batchTargets.map((target) => target.position.z))
+  const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
+  const cp1 = { x: minX + 0.5, y: minY, z: minZ + 0.5 }
+  const cp2 = { x: minX + 0.5, y: minY, z: maxZ + 0.5 }
+  const checkpoints = startOnNorthSide
+    ? [{ position: cp1, action: '' }, { position: cp2, action: 'lineEnd' }]
+    : [{ position: cp2, action: '' }, { position: cp1, action: 'lineEnd' }]
+
+  const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
+  let active = true
+  let currentGoal = checkpoints[0].position
+  let currentAction = checkpoints[0].action
+  let lastTickTime = Date.now()
+  let placed = 0
+  let already = 0
+  let skipped = 0
+  let hardStops = 0
+  let rawAllowedTotal = 0
+  let cappedTotal = 0
+  let maxAllowedSeen = 0
+  const seen = new Set()
+  const pendingUntil = new Map()
+
+  const placementLoop = (async () => {
+    while (active) {
+      const now = Date.now()
+      const rawAllowed = Math.floor((now - lastTickTime) / placeDelayMs)
+
+      if (rawAllowed <= 0) {
+        await delay(pollMs)
+        continue
+      }
+
+      lastTickTime += rawAllowed * placeDelayMs
+      rawAllowedTotal += rawAllowed
+      const allowed = Math.min(rawAllowed, maxCatchup)
+      cappedTotal += Math.max(0, rawAllowed - allowed)
+      maxAllowedSeen = Math.max(maxAllowedSeen, rawAllowed)
+
+      const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
+      if (allowPlacement) {
+        const burstExcluded = new Set(seen)
+        for (const [key, until] of pendingUntil.entries()) {
+          if (until > now) burstExcluded.add(key)
+          else pendingUntil.delete(key)
+        }
+
+        for (let i = 0; i < allowed; i += 1) {
+          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded)
+          if (!target) break
+
+          const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+          const neededSwap = String(bot.heldItem?.name || '') !== target.blockName
+          burstExcluded.add(key)
+
+          try {
+            const result = await placeNervScannerTarget(bot, config, target)
+            if (result.state === 'placed') {
+              placed += 1
+              seen.add(key)
+              pendingUntil.set(key, Date.now() + retryCooldownMs)
+            } else if (result.state === 'already') {
+              already += 1
+              seen.add(key)
+              pendingUntil.delete(key)
+            } else {
+              skipped += 1
+              if (config.errorHandling?.logErrors !== false) {
+                console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+              }
+
+              if (String(result.reason || '').startsWith('missing-item-')) {
+                hardStops += 1
+                lastTickTime = Date.now()
+                break
+              }
+            }
+          } catch (err) {
+            skipped += 1
+            hardStops += 1
+            if (config.errorHandling?.logErrors !== false) {
+              console.log(`[NERV-WORKLOAD-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+            }
+            lastTickTime = Date.now()
+            break
+          }
+
+          if (neededSwap) {
+            hardStops += 1
+            lastTickTime = Date.now()
+            break
+          }
+        }
+      }
+
+      await delay(pollMs)
+    }
+  })()
+
+  try {
+    for (const checkpoint of checkpoints) {
+      currentGoal = checkpoint.position
+      currentAction = checkpoint.action
+      const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
+      const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
+      bot.setControlState('sprint', shouldSprint)
+      await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+    }
+  } finally {
+    active = false
+    await placementLoop
+  }
+
+  const Vec3 = bot.entity.position.constructor
+  let missing = 0
+  for (const target of batchTargets) {
+    const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
+    if (actual?.name !== target.blockName) missing += 1
+  }
+
+  return {
+    placed,
+    already,
+    skipped,
+    seen: seen.size,
+    missing,
+    hardStops,
+    rawAllowed: rawAllowedTotal,
+    capped: cappedTotal,
+    maxAllowed: maxAllowedSeen
+  }
+}
+
 async function runPrint(bot, config) {
   const files = config.files || {}
   const printer = config.printer || {}
@@ -2966,11 +3227,8 @@ async function runPrint(bot, config) {
     const colBatch = colTraversal.slice(i, i + Math.max(1, linesPerRun))
     const rowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
 
-    const lookaheadRows = Math.max(1, toNumber(config.advanced?.predictiveLookaheadRows, 128))
-    const lookaheadCount = Math.max(1, lookaheadRows * Math.max(1, linesPerRun))
     const lookaheadStart = Math.min(orderedTargets.length, resumeFrom + processedInRun)
-    const lookaheadEnd = Math.min(orderedTargets.length, lookaheadStart + lookaheadCount)
-    const lookaheadTargets = orderedTargets.slice(lookaheadStart, lookaheadEnd)
+    const lookaheadTargets = orderedTargets.slice(lookaheadStart)
     await ensureMaterialsForTargets(bot, config, lookaheadTargets)
 
     const batchTargets = []
@@ -2982,12 +3240,19 @@ async function runPrint(bot, config) {
     }
 
     if (printer.fastTraversalEnabled === true) {
-      const result = await runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide)
+      const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'fixed').toLowerCase()
+      const result = scannerWorkloadMode === 'time'
+        ? await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide)
+        : await runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide)
       placed += result.placed
       already += result.already
       skipped += result.skipped
       processedInRun += batchTargets.length
-      console.log(`[NERV-SCANNER-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing}`)
+      if (scannerWorkloadMode === 'time') {
+        console.log(`[NERV-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
+      } else {
+        console.log(`[NERV-SCANNER-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing}`)
+      }
       if (progressEnabled) {
         saveProgress()
       }
@@ -3425,11 +3690,11 @@ function runSingleMovingPlaceTestSession(config) {
   })
 }
 
-function buildNervScannerCheckpoints(targets, config) {
+function buildNervScannerCheckpoints(targets, config, maxGroupsOverride = null) {
   const printer = config.printer || {}
   const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const northToSouth = printer.northToSouth !== false
-  const maxGroups = Math.max(1, toNumber(config.advanced?.nervScannerTestLineGroups, 2))
+  const maxGroups = Math.max(1, toNumber(maxGroupsOverride ?? config.advanced?.nervScannerTestLineGroups, 2))
 
   const cols = [...new Set(targets.map((target) => target.col))].sort((a, b) => a - b)
   const checkpoints = []
@@ -3651,6 +3916,190 @@ async function runNervScannerTest(bot, config) {
   }
 }
 
+async function runNervWorkloadTest(bot, config) {
+  const printer = config.printer || {}
+  const advanced = config.advanced || {}
+  const input = await loadTargets(config)
+  const calibratedTargets = calibrateTargetsForWorld(bot, input.targets, config)
+  const maxGroups = Math.max(1, toNumber(advanced.nervWorkloadTestLineGroups, 2))
+  const checkpoints = buildNervScannerCheckpoints(calibratedTargets, config, maxGroups)
+  const testTargets = [...new Map(checkpoints.flatMap((cp) => cp.targets).map((target) => [`${target.position.x}:${target.position.y}:${target.position.z}`, target])).values()]
+  const targetByXZ = new Map(testTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
+  const placeDelayMs = Math.max(1, toNumber(advanced.scannerPlaceDelayMs, toNumber(printer.placeDelayMs, 10)))
+  const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 12))
+  const pollMs = Math.max(1, toNumber(advanced.scannerWorkloadPollMs, Math.min(10, placeDelayMs)))
+  const logEveryMs = Math.max(0, toNumber(advanced.scannerWorkloadLogEveryMs, 1000))
+  const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
+  const waitAfterMs = Math.max(0, toNumber(advanced.nervWorkloadTestWaitAfterMs, 5000))
+
+  if (!checkpoints.length || !testTargets.length) {
+    console.log('[TEST-NERV-WORKLOAD] No test checkpoints/targets loaded.')
+    return
+  }
+
+  console.log(`[TEST-NERV-WORKLOAD] Loaded ${input.sourceName}; checkpoints=${checkpoints.length} targets=${testTargets.length} placeDelayMs=${placeDelayMs} maxCatchup=${maxCatchup}.`)
+  await ensureMaterialsForTargets(bot, config, testTargets)
+
+  let active = true
+  let currentGoal = checkpoints[0].position
+  let currentAction = checkpoints[0].action
+  let lastTickTime = Date.now()
+  let lastLogAt = Date.now()
+  let placed = 0
+  let already = 0
+  let skipped = 0
+  let confirmed = 0
+  let retried = 0
+  let hardStops = 0
+  let noCandidateBursts = 0
+  let rawAllowedTotal = 0
+  let cappedTotal = 0
+  let maxAllowedSeen = 0
+  const confirmedKeys = new Set()
+  const pendingUntil = new Map()
+
+  const targetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
+
+  const placementLoop = (async () => {
+    while (active) {
+      const now = Date.now()
+      const elapsed = now - lastTickTime
+      const rawAllowed = Math.floor(elapsed / placeDelayMs)
+
+      if (rawAllowed <= 0) {
+        await delay(pollMs)
+        continue
+      }
+
+      lastTickTime += rawAllowed * placeDelayMs
+      rawAllowedTotal += rawAllowed
+      const allowed = Math.min(rawAllowed, maxCatchup)
+      cappedTotal += Math.max(0, rawAllowed - allowed)
+      maxAllowedSeen = Math.max(maxAllowedSeen, rawAllowed)
+
+      let placedThisBurst = 0
+      let skippedThisBurst = 0
+      let hardStopThisBurst = false
+      const burstExcluded = new Set(confirmedKeys)
+
+      for (const [key, until] of pendingUntil.entries()) {
+        if (until > now) burstExcluded.add(key)
+        else pendingUntil.delete(key)
+      }
+
+      const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
+      if (allowPlacement) {
+        for (let i = 0; i < allowed; i += 1) {
+          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded)
+          if (!target) {
+            noCandidateBursts += i === 0 ? 1 : 0
+            break
+          }
+
+          const key = targetKey(target)
+          const neededSwap = String(bot.heldItem?.name || '') !== target.blockName
+          burstExcluded.add(key)
+
+          try {
+            const result = await placeNervScannerTarget(bot, config, target)
+            const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
+
+            if (actual?.name === target.blockName) {
+              if (!confirmedKeys.has(key)) confirmed += 1
+              confirmedKeys.add(key)
+              pendingUntil.delete(key)
+            } else if (result.state === 'placed') {
+              pendingUntil.set(key, Date.now() + retryCooldownMs)
+            }
+
+            if (result.state === 'placed') {
+              placed += 1
+              placedThisBurst += 1
+              if (pendingUntil.has(key)) retried += 1
+            } else if (result.state === 'already') {
+              already += 1
+              if (!confirmedKeys.has(key)) confirmed += 1
+              confirmedKeys.add(key)
+            } else {
+              skipped += 1
+              skippedThisBurst += 1
+              if (config.errorHandling?.logErrors !== false) {
+                console.log(`[TEST-NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+              }
+
+              if (String(result.reason || '').startsWith('missing-item-')) {
+                hardStops += 1
+                hardStopThisBurst = true
+                break
+              }
+            }
+          } catch (err) {
+            skipped += 1
+            skippedThisBurst += 1
+            hardStops += 1
+            hardStopThisBurst = true
+            if (config.errorHandling?.logErrors !== false) {
+              console.log(`[TEST-NERV-WORKLOAD-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+            }
+            break
+          }
+
+          if (neededSwap) {
+            lastTickTime = Date.now()
+            hardStopThisBurst = true
+            break
+          }
+        }
+      }
+
+      if (logEveryMs > 0 && Date.now() - lastLogAt >= logEveryMs) {
+        console.log(`[TEST-NERV-WORKLOAD] elapsed=${elapsed}ms allowed=${allowed}/${rawAllowed} placedBurst=${placedThisBurst} skippedBurst=${skippedThisBurst} hardStop=${hardStopThisBurst} confirmed=${confirmedKeys.size}/${testTargets.length} cappedDebt=${cappedTotal}`)
+        lastLogAt = Date.now()
+      }
+
+      await delay(pollMs)
+    }
+  })()
+
+  try {
+    for (let i = 0; i < checkpoints.length; i += 1) {
+      const checkpoint = checkpoints[i]
+      currentGoal = checkpoint.position
+      currentAction = checkpoint.action
+      const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
+      const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
+      bot.setControlState('sprint', shouldSprint)
+
+      console.log(`[TEST-NERV-WORKLOAD] Checkpoint ${i + 1}/${checkpoints.length}: ${checkpoint.position.x} ${checkpoint.position.y} ${checkpoint.position.z} action=${checkpoint.action || 'walk'}`)
+      await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))))
+
+      if (checkpoint.action === 'lineEnd') {
+        let missing = 0
+        for (const target of checkpoint.targets) {
+          const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
+          if (actual?.name !== target.blockName) missing += 1
+        }
+        console.log(`[TEST-NERV-WORKLOAD] lineEnd missing=${missing}/${checkpoint.targets.length}`)
+      }
+    }
+  } finally {
+    active = false
+    await placementLoop
+  }
+
+  let missing = 0
+  for (const target of testTargets) {
+    const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
+    if (actual?.name !== target.blockName) missing += 1
+  }
+
+  console.log(`[TEST-NERV-WORKLOAD] Done. placed=${placed} already=${already} skipped=${skipped} confirmed=${confirmedKeys.size}/${testTargets.length} missing=${missing} hardStops=${hardStops} noCandidateBursts=${noCandidateBursts} rawAllowed=${rawAllowedTotal} capped=${cappedTotal} maxAllowed=${maxAllowedSeen}`)
+  if (waitAfterMs > 0) {
+    console.log(`[TEST-NERV-WORKLOAD] Waiting ${waitAfterMs}ms before logout.`)
+    await delay(waitAfterMs)
+  }
+}
+
 function runSingleNervScannerTestSession(config) {
   return new Promise((resolve) => {
     const bot = createBot(config)
@@ -3682,6 +4131,56 @@ function runSingleNervScannerTestSession(config) {
         console.log('[TEST-NERV-SCANNER-ERROR]', err?.message || err)
       } finally {
         bot.quit('nerv scanner test complete')
+        settle()
+      }
+    })
+
+    bot.on('kicked', (reason) => {
+      const text = typeof reason === 'string' ? reason : JSON.stringify(reason)
+      console.log(`[KICKED] ${text}`)
+    })
+
+    bot.on('error', (err) => {
+      console.log('[ERROR]', err?.message || String(err))
+    })
+
+    bot.on('end', () => {
+      settle()
+    })
+  })
+}
+
+function runSingleNervWorkloadTestSession(config) {
+  return new Promise((resolve) => {
+    const bot = createBot(config)
+    bot.loadPlugin(pathfinder)
+
+    let settled = false
+    const settle = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+
+    bot.once('spawn', async () => {
+      const printer = config.printer || {}
+      const allowJump = printer.allowJump !== false
+
+      console.log('[TEST-NERV-WORKLOAD] Connected.')
+
+      const movements = new Movements(bot)
+      movements.canDig = false
+      movements.allow1by1towers = false
+      movements.allowParkour = allowJump
+      bot.pathfinder.setMovements(movements)
+
+      try {
+        await delay(toNumber(printer.startDelayMs, 1500))
+        await runNervWorkloadTest(bot, config)
+      } catch (err) {
+        console.log('[TEST-NERV-WORKLOAD-ERROR]', err?.message || err)
+      } finally {
+        bot.quit('nerv workload test complete')
         settle()
       }
     })
@@ -3767,6 +4266,55 @@ async function runInventoryPlanTest(bot, config) {
   console.log('[TEST-INVENTORY-PLAN] Dry run only. No items were dumped or restocked.')
 }
 
+async function runInventoryCycleTest(bot, config) {
+  const input = await loadTargets(config)
+  const calibratedTargets = calibrateTargetsForWorld(bot, input.targets, config)
+  const printer = config.printer || {}
+  const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
+  const northToSouth = printer.northToSouth !== false
+  const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
+  const waitAfterMs = Math.max(0, toNumber(config.advanced?.inventoryCycleTestWaitAfterMs, 5000))
+
+  if (typeof bot.waitForChunksToLoad === 'function') {
+    try {
+      await Promise.race([
+        bot.waitForChunksToLoad(),
+        delay(4000)
+      ])
+    } catch {
+      // Continue with the blocks currently available to the client.
+    }
+  } else {
+    await delay(800)
+  }
+
+  if (!orderedTargets.length) {
+    console.log('[TEST-INVENTORY-CYCLE] No targets loaded.')
+    return
+  }
+
+  const beforePlan = buildNervInventoryPlan(bot, config, orderedTargets)
+  console.log(`[TEST-INVENTORY-CYCLE] Loaded ${input.sourceName}; targets=${orderedTargets.length} linesPerRun=${linesPerRun}.`)
+  console.log(`[TEST-INVENTORY-CYCLE] before required=${formatInventoryPlanMap(beforePlan.requiredItems)}`)
+  console.log(`[TEST-INVENTORY-CYCLE] before keep=${formatInventoryPlanMap(beforePlan.materialInInv)}`)
+  console.log(`[TEST-INVENTORY-CYCLE] before dumpSlots=${beforePlan.dumpSlots.length}: ${formatDumpSlots(beforePlan.dumpSlots)}`)
+  console.log(`[TEST-INVENTORY-CYCLE] before restock=${formatRestockList(beforePlan.restockList)}`)
+
+  await ensureMaterialsForTargets(bot, config, orderedTargets)
+
+  const afterPlan = buildNervInventoryPlan(bot, config, orderedTargets)
+  console.log(`[TEST-INVENTORY-CYCLE] after required=${formatInventoryPlanMap(afterPlan.requiredItems)}`)
+  console.log(`[TEST-INVENTORY-CYCLE] after keep=${formatInventoryPlanMap(afterPlan.materialInInv)}`)
+  console.log(`[TEST-INVENTORY-CYCLE] after dumpSlots=${afterPlan.dumpSlots.length}: ${formatDumpSlots(afterPlan.dumpSlots)}`)
+  console.log(`[TEST-INVENTORY-CYCLE] after restock=${formatRestockList(afterPlan.restockList)}`)
+  console.log('[TEST-INVENTORY-CYCLE] Done. No placement was attempted.')
+
+  if (waitAfterMs > 0) {
+    console.log(`[TEST-INVENTORY-CYCLE] Waiting ${waitAfterMs}ms before logout.`)
+    await delay(waitAfterMs)
+  }
+}
+
 function runSingleInventoryPlanTestSession(config) {
   return new Promise((resolve) => {
     const bot = createBot(config)
@@ -3789,6 +4337,56 @@ function runSingleInventoryPlanTestSession(config) {
         console.log('[TEST-INVENTORY-PLAN-ERROR]', err?.message || err)
       } finally {
         bot.quit('inventory plan test complete')
+        settle()
+      }
+    })
+
+    bot.on('kicked', (reason) => {
+      const text = typeof reason === 'string' ? reason : JSON.stringify(reason)
+      console.log(`[KICKED] ${text}`)
+    })
+
+    bot.on('error', (err) => {
+      console.log('[ERROR]', err?.message || String(err))
+    })
+
+    bot.on('end', () => {
+      settle()
+    })
+  })
+}
+
+function runSingleInventoryCycleTestSession(config) {
+  return new Promise((resolve) => {
+    const bot = createBot(config)
+    bot.loadPlugin(pathfinder)
+
+    let settled = false
+    const settle = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+
+    bot.once('spawn', async () => {
+      const printer = config.printer || {}
+      const allowJump = printer.allowJump !== false
+
+      console.log('[TEST-INVENTORY-CYCLE] Connected.')
+
+      const movements = new Movements(bot)
+      movements.canDig = false
+      movements.allow1by1towers = false
+      movements.allowParkour = allowJump
+      bot.pathfinder.setMovements(movements)
+
+      try {
+        await delay(toNumber(config.printer?.startDelayMs, 1500))
+        await runInventoryCycleTest(bot, config)
+      } catch (err) {
+        console.log('[TEST-INVENTORY-CYCLE-ERROR]', err?.message || err)
+      } finally {
+        bot.quit('inventory cycle test complete')
         settle()
       }
     })
@@ -4010,9 +4608,23 @@ async function start() {
     return
   }
 
+  if (hasCliFlag('--test-nerv-workload')) {
+    console.log('[TEST-NERV-WORKLOAD] Running isolated NERV-style time workload placement test only.')
+    await runSingleNervWorkloadTestSession(config)
+    setTimeout(() => process.exit(0), 100)
+    return
+  }
+
   if (hasCliFlag('--test-inventory-plan')) {
     console.log('[TEST-INVENTORY-PLAN] Running isolated NERV-style inventory plan test only.')
     await runSingleInventoryPlanTestSession(config)
+    setTimeout(() => process.exit(0), 100)
+    return
+  }
+
+  if (hasCliFlag('--test-inventory-cycle')) {
+    console.log('[TEST-INVENTORY-CYCLE] Running isolated NERV-style inventory dump/restock cycle only.')
+    await runSingleInventoryCycleTestSession(config)
     setTimeout(() => process.exit(0), 100)
     return
   }
