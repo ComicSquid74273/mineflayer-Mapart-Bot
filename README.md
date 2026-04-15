@@ -93,99 +93,271 @@ Do not duplicate machine coordinates in local config when imported carpet config
 
 ## 3. Complete Local Config Reference
 
-All fields below are from `nerv-printer-config.json`.
+All fields below are from `nerv-printer-config.json`. Values shown are the current working config values in this repo, not universal defaults.
+
+Tuning rule of thumb:
+
+1. For skipped blocks while printing, start with `scannerLineEndSettleMs`, `scannerPlaceDelayMs`, `scannerAdaptive*`, and `checkpointBuffer`.
+2. For inventory/refill/dump issues, start with `inventoryRefillRows`, `dumpUnneededBeforeRefill`, `inventoryMaxMaterialTypes`, and the restock delays.
+3. For repair behavior, start with `repairSprintMode`, `repairBatchSize`, `repairMoveTimeoutMs`, and `repairTestMaxPasses`.
+4. For multibot stability, start with `multiUser.heartbeatMs`, `multiUser.staleStateMs`, and per-bot `joinDelayMs` / `startDelayMs`.
 
 ### 3.1 `bot`
 
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `bot.host` | string | `127.0.0.1` | Server host/IP |
-| `bot.port` | number | `25565` | Minecraft server port |
-| `bot.username` | string | `MapartBot` | Bot account name |
-| `bot.auth` | string | `offline` | Typical values: `offline`, `microsoft` |
-| `bot.version` | string | `1.21.8` | Exact MC version, or `auto` |
-| `bot.profilesFolder` | string | `./auth-cache` | Session/auth cache location |
-| `bot.viewDistance` | string | `tiny` | Mineflayer view setting, common values: `tiny`, `short`, `normal`, `far` |
-| `bot.checkTimeoutInterval` | number | `60000` | Client timeout interval in ms |
-| `bot.reconnect.enabled` | boolean | `false` | Enables reconnect loop after disconnect |
-| `bot.reconnect.delayMs` | number | `9500` | Wait before reconnect attempt |
-| `bot.reconnect.maxAttempts` | number | `5` | Maximum total sessions before stop |
+Connection and Mineflayer session settings.
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `bot.host` | `127.0.0.1` | Server host/IP. | Use LAN/server IP for remote server. |
+| `bot.port` | `54321` | Minecraft server port. | Must match server/proxy port. |
+| `bot.username` | `MapartBot` | Base username. In multibot, entries in `multiUser.bots` override this per worker. | Keep unique names for online/offline server. |
+| `bot.auth` | `offline` | `offline`, `microsoft`. | Use `offline` for local/offline test server. |
+| `bot.version` | `1.21.8` | Exact MC version or sometimes `auto`. | Exact version is safer with Mineflayer. |
+| `bot.profilesFolder` | `./auth-cache` | Auth/session cache folder. | Only relevant for authenticated accounts. |
+| `bot.viewDistance` | `normal` | `tiny`, `short`, `normal`, `far`. | Higher can help chunk visibility but uses more resources. |
+| `bot.checkTimeoutInterval` | `60000` | Mineflayer timeout interval in ms. | Leave unless disconnect detection is weird. |
+| `bot.reconnect.enabled` | `true` | Reconnect after disconnect/kick/end. | Keep `true` for autonomous multibot. |
+| `bot.reconnect.delayMs` | `15000` | Delay before reconnect attempt. | Higher is safer on public servers that dislike fast reconnects. |
+| `bot.reconnect.maxAttempts` | `25` | Max reconnect sessions. | Higher keeps long autonomous runs alive through restarts/kicks. |
 
 ### 3.2 `files`
 
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `files.inputMode` | string | `auto` | `auto`, `json`, `nbt` |
-| `files.planFile` | string | `./mapart-plan.json` | JSON input plan path |
-| `files.nbtFolder` | string | `./nerv-printer-config` | Folder scanned for `.nbt` |
-| `files.resumeProgress` | boolean | `true` | Resume from progress file |
-| `files.progressFile` | string | `./logs/nerv-printer-progress.json` | Checkpoint file path |
-| `files.progressSaveEvery` | number | `64` | Save every N processed targets |
-| `files.moveToFinishedFolder` | boolean | `false` | Move consumed input file after job |
-| `files.finishedFolder` | string | `./nerv-printer-config/_finished_maps` | Destination folder when moving file |
-| `files.disableOnFinished` | boolean | `true` | Logs finished state when done |
+Input files, progress files, and finished-file handling.
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `files.inputMode` | `nbt` | `auto`, `json`, `nbt`. | Use `nbt` for NERV map files. |
+| `files.planFile` | `./mapart-plan.json` | JSON plan path. | Used only for JSON mode. |
+| `files.machineConfigProfile` | `carpet` | Imported machine profile name. | Keep `carpet` for carpet printer layout. |
+| `files.machineConfigFile` | `./nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json` | Machine/platform/chest coordinate file. | Do not put speed tuning here. |
+| `files.resumeProgress` | `true` | Resume from progress JSON after crash/reconnect. | Keep `true` for autonomous runs. |
+| `files.progressFile` | `./logs/nerv-printer-progress.json` | Single-bot progress path. Multibot creates per-bot progress files. | Usually do not edit manually. |
+| `files.progressSaveEvery` | `10` | Save every N targets in non-fast paths. | Lower is safer for crash recovery; higher is less disk chatter. |
+| `files.moveToFinishedFolder` | `true` | Move completed input file after successful job. | Master only in multibot. |
+| `files.finishedFolder` | `./finished-maps` | Destination for finished input files. | Ensure folder is writable. |
+| `files.disableOnFinished` | `true` | Logs finished/disabled state after job. | Keep `true`; it does not stop the process by itself in reconnect flow. |
 
 ### 3.3 `printer`
 
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `printer.startOnSpawn` | boolean | `true` | Auto-start print after spawn |
-| `printer.startDelayMs` | number | `1500` | Delay before starting print |
-| `printer.startCornerMode` | string | `mapCorner` | `mapCorner` or `nearest` |
-| `printer.allowJump` | boolean | `true` | `false` prevents jump input and disables parkour paths |
-| `printer.placeWhileSprinting` | boolean | `false` | If `true`, avoids row-anchor stops when targets are already in place range |
-| `printer.printOffset.x` | number | `0` | Global X shift |
-| `printer.printOffset.y` | number | `0` | Global Y shift |
-| `printer.printOffset.z` | number | `-1` | Global Z shift |
-| `printer.linesPerRun` | number | `3` | Number of columns processed per batch |
-| `printer.placeRange` | number | `4` | GoalNear radius for placement movement |
-| `printer.minPlaceDistance` | number | `0.8` | Reserved currently |
-| `printer.ignoredBlocks` | string[] | `[]` | Carpet block names to skip |
-| `printer.placeDelayMs` | number | `50` | Delay after each successful place |
-| `printer.rotate` | boolean | `true` | Look-at target before place |
-| `printer.northToSouth` | boolean | `true` | Controls row traversal direction |
-| `printer.mapFillSquareSize` | number | `1` | Reserved currently |
-| `printer.sprintMode` | string | `notPlacing` | Current meaningful value: `always` enables continuous sprint toggle |
-| `printer.fastTraversalEnabled` | boolean | `false` | Enables non-stop continuous placement logic |
-| `printer.fastTraversalTickMs` | number | `40` | Background scanner tick interval (ms) for continuous placement |
-| `printer.maxPlacementsPerTick` | number | `1` | Maximum blocks placed simultaneously per scanner tick limit |
+Print movement, placement, and row/batch behavior.
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `printer.startOnSpawn` | `true` | Auto-start after spawn. | Set `false` for manual/debug idle. |
+| `printer.startDelayMs` | `1500` | Wait after spawn before starting. | Increase if chunks/login are slow. |
+| `printer.allowJump` | `false` | Enables jump/parkour pathing if `true`. | Keep `false` on flat printer platforms. |
+| `printer.placeWhileSprinting` | `true` | Allows placing during movement. | Keep `true` for NERV-style continuous placement. |
+| `printer.postPrintTestOnly` | `false` | Skip printing and run post-print workflow only. | Useful only for post-print testing. |
+| `printer.printOffset.x/y/z` | `0,0,-1` | Shift all print targets. | Wrong offset causes full-map misalignment. |
+| `printer.linesPerRun` | `3` | Width of one print run in map columns/lines. | Higher is faster but can skip more; `3` is stable. |
+| `printer.placeRange` | `5` | Placement scan/range radius. | Higher sees more targets; too high can pick awkward targets. |
+| `printer.minPlaceDistance` | `0.8` | Avoid placing too close to feet. | Increase if bot glitches into carpets; lower if it misses near targets. |
+| `printer.ignoredBlocks` | `[]` | Block names to skip, e.g. `["air"]` or carpet names. | Usually empty. |
+| `printer.placeDelayMs` | `0` | Delay after standard `placeTarget` placements. | Fast workload uses `advanced.scannerPlaceDelayMs`. |
+| `printer.rotate` | `false` | Rotate/look before placement in slower paths. | `false` is faster for packet/generic placement. |
+| `printer.northToSouth` | `true` | Initial row direction. | Flip only if map traversal starts wrong side. |
+| `printer.mapFillSquareSize` | `1` | Map fill stepping scale. | Leave `1`. |
+| `printer.sprintMode` | `off` | `off`, `notPlacing`, `always`. Controls print movement sprint. | `off` is slower/safer; repair has separate `repairSprintMode`. |
+| `printer.fastTraversalEnabled` | `true` | Uses scanner/workload placement while moving. | Must be `true` for current NERV-style print. |
+| `printer.fastTraversalTickMs` | `20` | Fixed scanner loop interval. | Lower is faster CPU/placement pressure; higher is calmer. |
+| `printer.fastTraversalCheckpointEveryRows` | `8` | Legacy fast traversal checkpoint grouping. | Mostly legacy; leave unless using older fast path. |
+| `printer.fastTraversalCatchupPasses` | `2` | Legacy catch-up pass count. | Not the adaptive workload catch-up; leave. |
+| `printer.fastTraversalCatchupStallMs` | `4000` | Fallback/settle time used by traversal logic. | Similar spirit to line-end settle. |
+| `printer.maxPlacementsPerTick` | `10` | Max placement attempts per scan tick in fixed mode/repair fallback. | Lower if server drops packets; higher if CPU/server can handle it. |
 
 ### 3.4 `advanced`
 
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `advanced.preRestockDelayMs` | number | `500` | Delay before chest withdraw |
-| `advanced.inventoryActionDelayMs` | number | `100` | Delay around inventory actions |
-| `advanced.postRestockDelayMs` | number | `500` | Delay after chest withdraw |
-| `advanced.predictiveRestock` | boolean | `true` | Pre-check row materials and restock before placement |
-| `advanced.predictiveRestockMaxPullsPerBlock` | number | `4` | Max chest pulls per block type during pre-check |
-| `advanced.predictiveLookaheadRows` | number | `128` | Rows ahead used to estimate upcoming material demand |
-| `advanced.postPrintWorkflowEnabled` | boolean | `true` | Master switch for post-print flow (map chest -> map fill -> cartography -> finished chest -> reset) |
-| `advanced.postPrintFillMapEnabled` | boolean | `true` | Activates map and runs map-fill walk before cartography |
-| `advanced.postPrintUseCartographyEnabled` | boolean | `true` | Uses cartography table with filled map + glass pane |
-| `advanced.postPrintStoreFinishedMapEnabled` | boolean | `true` | Deposits produced filled maps into finished map chest |
-| `advanced.postPrintResetEnabled` | boolean | `true` | Interacts with reset chest/block after post-print steps |
-| `advanced.postPrintInteractionDelayMs` | number | `200` | Delay around post-print interactions |
-| `advanced.postBuildDelayMs` | number | `0` | Delay before finish actions |
-| `advanced.preSwapDelayMs` | number | `100` | Delay before equipping |
-| `advanced.postSwapDelayMs` | number | `100` | Delay after equipping |
-| `advanced.retryInteractTimeoutMs` | number | `4000` | Reserved currently |
-| `advanced.checkpointBuffer` | number | `0.2` | Reserved currently |
-| `advanced.breakCarpetAboveReset` | boolean | `false` | Reserved currently |
-| `advanced.debugPrints` | boolean | `false` | Enables detailed debug logs |
+Advanced is grouped by behavior because this section has many tuning knobs.
+
+#### 3.4.1 Inventory, Restock, And Dump
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `advanced.preRestockDelayMs` | `80` | Delay before restock interaction. | Increase if chest opens before bot is ready. |
+| `advanced.inventoryActionDelayMs` | `35` | Delay between inventory clicks/actions. | Increase if item transfers are unreliable. |
+| `advanced.postRestockDelayMs` | `120` | Delay after restock. | Increase if inventory update arrives late. |
+| `advanced.restockFailureCooldownMs` | `250` | Cooldown after failed material restock. | Increase if bot loops too fast on empty chests. |
+| `advanced.predictiveRestock` | `true` | Plan inventory before placement window. | Keep `true`; prevents mid-row emergency refill. |
+| `advanced.dumpUnneededBeforeRefill` | `true` | Dump residue/unneeded carpets before refill. | Keep `true` for map changes and residue cleanup. |
+| `advanced.inventoryRefillRows` | `2` | Number of logical `linesPerRun` groups planned for inventory. | `2` means enough for roughly two print chunks. |
+| `advanced.inventoryMaxMaterialTypes` | `16` | Max carpet colors allowed in inventory plan. | `16` matches Minecraft carpet colors. |
+| `advanced.inventoryPlanUseWorldState` | `false` | Use live world state when planning required items. | Usually `false`; live scans can be expensive/incomplete. |
+| `advanced.sneakOnDispenserOnly` | `true` | Sneak only when placing against dispensers. | Keep `true`; avoids unnecessary slowdown. |
+
+#### 3.4.2 Reset, Rescan, And Post-Print
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `advanced.resetChestWaitMs` | `500` | Wait around reset chest interaction. | Increase if reset interaction is flaky. |
+| `advanced.rescanEnabled` | `true` | Enables rescan/repair support features. | Keep `true` for autonomous accuracy. |
+| `advanced.rescanAfterPrinting` | `true` | Scan after printing. | Keep `true`; finds skipped blocks. |
+| `advanced.rescanRepairMissingBlocks` | `true` | Repair air/missing blocks. | Keep `true`. |
+| `advanced.rescanBreakMisplacedCarpets` | `true` | Break wrong carpets and replace. | Set `false` only if you never want destructive repair. |
+| `advanced.rescanVerifySupport` | `true` | Check support/platform before repair. | Keep `true` to avoid unsafe placement. |
+| `advanced.postPrintWorkflowEnabled` | `true` | Master switch for post-print workflow. | Master only in multibot. |
+| `advanced.postPrintFillMapEnabled` | `true` | Fill/activate map after printing. | Disable to stop after carpet print. |
+| `advanced.postPrintUseCartographyEnabled` | `true` | Use cartography table/glass pane. | Disable if manually locking/copying maps. |
+| `advanced.postPrintStoreFinishedMapEnabled` | `true` | Store final map in finished chest. | Disable for manual collection. |
+| `advanced.postPrintResetEnabled` | `true` | Run reset after post-print. | Disable if reset machine is not configured. |
+| `advanced.postPrintXpRefillEnabled` | `true` | Refill/handle XP for post-print actions. | Useful when cartography/rename needs XP. |
+| `advanced.postPrintRenameMapEnabled` | `true` | Rename map during post-print. | Disable if anvil/name flow is not wanted. |
+| `advanced.postPrintMinXpLevel` | `2` | Minimum XP before refill behavior. | Raise if rename costs more. |
+| `advanced.postPrintTargetXpLevel` | `3` | Desired XP target after refill. | Raise for repeated post-print actions. |
+| `advanced.postPrintSkipResetInteraction` | `false` | Skip reset interaction while keeping workflow. | Useful for testing post-print without resetting. |
+| `advanced.postPrintWalkToCenter` | `true` | Walk to map center during fill. | Disable if fill path is handled externally. |
+| `advanced.postPrintCenterWaitMs` | `20000` | Wait at center during map fill. | Increase if map fill is incomplete. |
+| `advanced.postPrintInteractionDelayMs` | `200` | Delay around post-print clicks. | Increase for laggy servers. |
+| `advanced.postPrintMapSettleDelayMs` | `200` | Wait after map actions. | Increase if map item updates late. |
+
+#### 3.4.3 Dump Station
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `advanced.dumpAimSettleMs` | `150` | Wait after aiming at dump station. | Increase if toss direction is inconsistent. |
+| `advanced.dumpYawInvert` | `false` | Invert configured dump yaw. | Only change if yaw is mirrored. |
+| `advanced.dumpPitchInvert` | `false` | Invert configured dump pitch. | Only change if pitch is mirrored. |
+| `advanced.dumpTestStationWaitMs` | `7000` | Wait at each station in dump test. | Test-only. |
+| `advanced.dumpTestTossAtEachStation` | `true` | Toss test item at every dump station. | Test-only. |
+| `advanced.dumpPathThinkTimeoutMs` | `5000` | Pathfinder think timeout for dump station. | Increase if dump path fails. |
+| `advanced.dumpAlreadyNearRange` | `4` | If within this range, do not path exactly to dump position. | Higher avoids getting stuck at dump. |
+| `advanced.dumpGoalRange` | `2` | Goal radius for dump path. | Higher is more forgiving; too high may aim badly. |
+| `advanced.multiDumpLockStaleMs` | `45000` | Multibot dump lock stale timeout. | Prevents bots dumping at same time forever. |
+| `advanced.dumpReaimEveryStacks` | `2` | Re-aim after N tossed stacks; `0` disables. | Set `1` or `2` if toss aim drifts. |
+
+#### 3.4.4 Isolated Tests
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `advanced.movingPlaceTestTargetCount` | `32` | Target count for moving-place test. | Used by `npm run test:moving-place`. |
+| `advanced.movingPlaceTestCheckpointEveryRows` | `8` | Test checkpoint spacing. | Test-only. |
+| `advanced.movingPlaceTestWaitAfterMs` | `5000` | Wait before logout after moving-place test. | Test-only. |
+| `advanced.nervScannerTestLineGroups` | `2` | Number of line groups for scanner test. | Test-only. |
+| `advanced.nervScannerTestWaitAfterMs` | `5000` | Wait after scanner test. | Test-only. |
+| `advanced.nervWorkloadTestLineGroups` | `2` | Number of line groups for workload test. | Test-only. |
+| `advanced.nervWorkloadTestWaitAfterMs` | `5000` | Wait after workload test. | Test-only. |
+| `advanced.inventoryCycleTestWaitAfterMs` | `5000` | Wait after inventory cycle test. | Test-only. |
+| `advanced.inventoryCycleTestRows` | `2` | Rows/chunks selected for inventory cycle test. | Test-only. |
+| `advanced.repairTestWaitAfterMs` | `5000` | Wait after repair test. | Test-only. |
+| `advanced.repairTestMaxPasses` | `3` | Max passes in repair test and live repair. | Increase if repair needs more passes. |
+
+#### 3.4.5 Scanner / Time Workload Printing
+
+These are the main knobs for skipped blocks while printing.
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `advanced.scannerPlaceDelayMs` | `6` | Time-based workload placement delay. Lower means faster. | Increase to `8` or `10` if packets are dropped/skips remain. |
+| `advanced.scannerMaxCatchupPlacements` | `10` | Max placements allowed in one workload burst. | Lower to `8` if server dislikes bursts. |
+| `advanced.scannerWorkloadPollMs` | `6` | Poll interval for time workload. | Lower is more responsive but more CPU. |
+| `advanced.scannerWorkloadLogEveryMs` | `1000` | Test workload progress log interval. | Mostly test/debug. |
+| `advanced.scannerLineEndSettleMs` | `4500` | Wait at line end while placement loop continues. | Increase if `missing` remains high; decrease if stable and too slow. |
+| `advanced.scannerAdaptiveSlowdown` | `true` | Automatically slows down when a batch misses too much. | Keep `true` for multibot tuning. |
+| `advanced.scannerAdaptiveMissingThreshold` | `8` | Missing count that triggers slowdown. | Lower reacts faster; higher tolerates skips. |
+| `advanced.scannerAdaptiveRecoverThreshold` | `2` | Missing count that allows speed recovery. | Lower makes recovery stricter. |
+| `advanced.scannerAdaptiveSettleStepMs` | `750` | Amount to add/subtract from line-end settle. | Use `500` for gentler tuning, `1000` for faster reaction. |
+| `advanced.scannerAdaptiveMaxSettleMs` | `9000` | Max adaptive line-end wait. | Raise only if server is very laggy. |
+| `advanced.scannerAdaptiveMinSettleMs` | `2500` | Min adaptive line-end wait. | Lower for speed, higher for accuracy. |
+| `advanced.scannerAdaptivePlaceDelayStepMs` | `2` | Amount to add/subtract from place delay. | Keep small; placement delay is sensitive. |
+| `advanced.scannerAdaptiveMaxPlaceDelayMs` | `18` | Max adaptive placement delay. | Raise if server is dropping many packets. |
+| `advanced.scannerAdaptiveMinPlaceDelayMs` | `6` | Min adaptive placement delay. | Keep at least `6` on servers with lag. |
+| `advanced.scannerRetryCooldownMs` | `35` | Delay before retrying an unconfirmed placement. | Increase if duplicate/too-fast retries happen. |
+| `advanced.scannerPreSwapDelayMs` | `25` | Delay before item swap in scanner placement. | Increase if held item updates late. |
+| `advanced.scannerPostSwapDelayMs` | `45` | Delay after item swap in scanner placement. | Increase if `missing-item-*` appears despite inventory. |
+| `advanced.scannerWorkloadMode` | `time` | `time` or `fixed`. | Use `time` for lag-aware workload; `fixed` is older scanner tick mode. |
+
+Important workload logs:
+
+```text
+[NERV-WORKLOAD-BATCH] placed=... seen=... missing=... hardStops=... rawAllowed=... capped=...
+[NERV-WORKLOAD-ADAPT-SLOW] missing=... placeDelayMs=... lineEndSettleMs=...
+[NERV-WORKLOAD-ADAPT-RECOVER] missing=... placeDelayMs=... lineEndSettleMs=...
+```
+
+`missing` is the number to drive tuning. `hardStops` often means item swaps or placement errors interrupted bursts.
+
+#### 3.4.6 Repair
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `advanced.repairSprintMode` | `always` | `always`, `off`, or other non-off values. | `always` repairs air while moving quickly. |
+| `advanced.repairGoalRange` | `3.25` | Pathing radius for stop-place repair. | Lower is more exact; higher avoids stuck pathing. |
+| `advanced.repairTargetSettleMs` | `0` | Wait between stop-place repair targets. | Increase if repair clicks are too fast. |
+| `advanced.repairMoveTimeoutMs` | `30000` | Max movement time during repair before warning/fallback. | Increase for long paths from chests. |
+| `advanced.repairProgressLogMs` | `5000` | Progress log interval during repair. | Lower for more visibility. |
+| `advanced.repairFallbackToStopPlace` | `true` | If moving repair stalls, fallback to stop-place. | Keep `true`; prevents idle repair. |
+| `advanced.repairVerifySettleMs` | `180` | Wait before verifying repaired batch. | Increase if server updates blocks late. |
+| `advanced.repairMaxMismatchRatio` | `0.25` | Warning threshold only; no hard abort. | Logs warning above 25 percent mismatches. |
+| `advanced.repairMaxMismatchCount` | `512` | Warning count threshold only; no hard abort. | Logs warning when both count and ratio are high. |
+| `advanced.useMapCornerYForNbtCarpets` | `true` | Use machine/map-corner Y for NBT carpets. | Keep `true` for this platform. |
+| `advanced.repairBatchSize` | `256` | Number of repair targets per batch. | Lower for cautious repair; higher for fewer restocks. |
+| `advanced.repairRestockMode` | `fast` | `fast`, `nerv`. | `fast` uses repair-focused restock; `nerv` uses normal material planner. |
+
+Repair behavior:
+
+1. Air/missing blocks are repaired while walking/sprinting.
+2. Wrong/occupied blocks use stop-and-fix.
+3. High mismatch count logs warnings, but autonomous mode continues.
+
+#### 3.4.7 Miscellaneous
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `advanced.postBuildDelayMs` | `0` | Delay after build before post-print. | Usually `0`. |
+| `advanced.retryInteractTimeoutMs` | `800` | Timeout for retrying interactions. | Increase if chest/block interactions are delayed. |
+| `advanced.checkpointBuffer` | `0.35` | Goal radius around print checkpoints. | Higher reaches line end faster; lower is more exact. |
+| `advanced.breakCarpetAboveReset` | `false` | Break carpet above reset area if configured. | Leave `false` unless reset needs clearing. |
+| `advanced.debugPrints` | `false` | Extra verbose logs. | Use briefly; logs get noisy. |
 
 ### 3.5 `errorHandling`
 
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `errorHandling.logErrors` | boolean | `true` | Print move/place/skip details |
-| `errorHandling.errorAction` | string | `repair` | `repair` digs wrong carpet and retries; any other value behaves as ignore/skip |
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `errorHandling.logErrors` | `true` | Logs placement, repair, move, and skip details. | Keep `true` while tuning. |
+| `errorHandling.errorAction` | `repair` | `repair` enables final repair passes. Other values skip repair. | Keep `repair` for autonomous accuracy. |
 
 ### 3.6 `multiUser`
 
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `multiUser.enabled` | boolean | `false` | Currently ignored in single-bot implementation |
+File-based master/slave coordination. No in-game DM/chat system is required.
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `multiUser.enabled` | `true` | Enables multibot launcher/coordination. | Set `false` for single bot. |
+| `multiUser.mode` | `file` | Currently `file`. | Uses JSON files in `syncFolder`. |
+| `multiUser.syncFolder` | `./logs/nerv-printer-sync` | Folder for master/slave state files. | Can delete for a fresh coordination state. |
+| `multiUser.requireAllReady` | `true` | Master waits for slaves before starting. | Keep `true` to avoid uneven starts. |
+| `multiUser.recoveryMarginBlocks` | `20` | Distance margin for recovery/stale logic. | Reserved/coordination hint. |
+| `multiUser.recoveryDelayMs` | `2000` | Delay before recovery actions. | Reserved/coordination hint. |
+| `multiUser.staleStateMs` | `45000` | State older than this is considered stale. | Increase if bots lag/reconnect slowly. |
+| `multiUser.heartbeatMs` | `5000` | State heartbeat write interval. | Lower detects stale faster; higher writes less. |
+| `multiUser.resumeExistingJob` | `true` | Reuse existing job/progress after restart. | Keep `true` for autonomous recovery. |
+| `multiUser.startAllOnMasterReady` | `true` | Start all workers when master releases job. | Keep `true`. |
+| `multiUser.joinStaggerMs` | `12000` | Default join spacing. | Increase to avoid server anti-bot/DDOS warnings. |
+| `multiUser.startStaggerMs` | `5000` | Default print start spacing. | Increase if startup causes lag spikes. |
+| `multiUser.launchFromSingleProcess` | `true` | One Node process launches all configured bots. | Current supported mode. |
+
+Each entry in `multiUser.bots`:
+
+| Key | Meaning | Options / Hint |
+|---|---|---|
+| `multiUser.bots[].name` | Minecraft username for that bot. | Must be unique. |
+| `multiUser.bots[].role` | `master` or `slave`. | Master performs post-print workflow after slaves finish. |
+| `multiUser.bots[].enabled` | Include this bot in plan. | Set `false` to temporarily remove a bot. |
+| `multiUser.bots[].joinDelayMs` | Delay before this bot joins. | Stagger joins to avoid server warnings. |
+| `multiUser.bots[].startDelayMs` | Extra delay before this bot starts work. | Stagger starts to reduce lag. |
+
+Intervals are assigned automatically across the 128 map columns. With 3 bots, current plan is roughly:
+
+```text
+MapartBot  -> columns 0-41
+MapartBot1 -> columns 42-84
+MapartBot2 -> columns 85-127
+```
+
+Verify without connecting:
+
+```bash
+npm run test:multi-user-plan
+```
 
 ### 3.7 `anchorTranslation` Diamond Block
 
@@ -201,15 +373,11 @@ The bot computes:
 
 Then applies that delta to all machine coordinates loaded from the carpet config (map corner, dump stations, utility blocks, material chests, and material dict chest positions).
 
-| Key | Type | Default | Allowed / Notes |
-|---|---|---:|---|
-| `anchorTranslation.enabled` | boolean | `true` | Disable to use raw imported coordinates with no shift |
-| `anchorTranslation.sourceAnchor.x` | number | `-450` | Reference machine anchor X |
-| `anchorTranslation.sourceAnchor.y` | number | `0` | Reference machine anchor Y |
-| `anchorTranslation.sourceAnchor.z` | number | `-962` | Reference machine anchor Z |
-| `anchorTranslation.targetAnchor.x` | number | `-450` | New machine anchor X |
-| `anchorTranslation.targetAnchor.y` | number | `0` | New machine anchor Y |
-| `anchorTranslation.targetAnchor.z` | number | `-962` | New machine anchor Z |
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `anchorTranslation.enabled` | `true` | Enable coordinate translation from source to target anchor. | Keep `true` when relocating imported machine layout. |
+| `anchorTranslation.sourceAnchor.x/y/z` | `-706,-9,-962` | Anchor of the source/reference machine layout. | Do not change unless the imported machine config source changed. |
+| `anchorTranslation.targetAnchor.x/y/z` | `-706,-9,-962` | Anchor of your current machine location. | Change this to move the whole machine coordinate set. |
 
 For same-layout relocation, keep `sourceAnchor` fixed to your base machine anchor and only change `targetAnchor`.
 
@@ -292,12 +460,18 @@ Useful tags:
 4. `[RESUME]` resumed checkpoint position
 5. `[PROBE]` startup support score
 6. `[START]` nearest-corner start decision
-7. `[SKIP]` skipped placements
-8. `[PLACE-ERROR]` placement failures
-9. `[RETRY-PASS]` unresolved targets after primary sweep
-10. `[DONE]` placed/already/skipped summary
-11. `[SESSION]` end status and retryability for reconnect loop
-12. `[RECONNECT]` reconnect loop decisions (retry/wait/stop)
+7. `[NERV-WORKLOAD-BATCH]` time workload placement result for one row/chunk
+8. `[NERV-WORKLOAD-ADAPT-SLOW]` adaptive slowdown after too many missing targets
+9. `[NERV-WORKLOAD-ADAPT-RECOVER]` adaptive speed recovery after stable batches
+10. `[NERV-SCANNER-SKIP]` skipped scanner placement and reason
+11. `[NERV-DUMP]` dump plan and tossed slots
+12. `[NERV-RESTOCK]` restock material choice
+13. `[RESTOCK-PULL]` chest pull result
+14. `[REPAIR-PASS]` repair pass summary
+15. `[REPAIR-WARN]` repair warning that does not hard-stop autonomous mode
+16. `[MULTI-*]` multibot plan, worker, ready, stale, and recovery messages
+17. `[SESSION]` end status and retryability for reconnect loop
+18. `[RECONNECT]` reconnect loop decisions (retry/wait/stop)
 
 ## 9. Scripts
 
@@ -324,60 +498,85 @@ From `package.json`:
     "checkTimeoutInterval": 60000
   },
   "files": {
-    "inputMode": "auto",
+    "inputMode": "nbt",
     "planFile": "./mapart-plan.json",
-    "nbtFolder": "./nerv-printer-config",
+    "machineConfigProfile": "carpet",
+    "machineConfigFile": "./nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json",
     "resumeProgress": true,
     "progressFile": "./logs/nerv-printer-progress.json",
-    "progressSaveEvery": 64,
-    "moveToFinishedFolder": false,
+    "progressSaveEvery": 10,
+    "moveToFinishedFolder": true,
     "finishedFolder": "./finished-maps",
     "disableOnFinished": true
   },
   "printer": {
     "startOnSpawn": true,
     "startDelayMs": 1500,
-    "startCornerMode": "mapCorner",
     "allowJump": false,
     "placeWhileSprinting": true,
+    "postPrintTestOnly": false,
     "printOffset": { "x": 0, "y": 0, "z": -1 },
-    "linesPerRun": 4,
-    "placeRange": 4,
+    "linesPerRun": 3,
+    "placeRange": 5,
     "minPlaceDistance": 0.8,
     "ignoredBlocks": [],
-    "placeDelayMs": 1,
+    "placeDelayMs": 0,
     "rotate": false,
     "northToSouth": true,
     "mapFillSquareSize": 1,
-    "sprintMode": "always"
+    "sprintMode": "off",
+    "fastTraversalEnabled": true,
+    "fastTraversalTickMs": 20,
+    "maxPlacementsPerTick": 10
   },
   "advanced": {
-    "preRestockDelayMs": 10,
-    "inventoryActionDelayMs": 10,
-    "postRestockDelayMs": 10,
+    "preRestockDelayMs": 80,
+    "inventoryActionDelayMs": 35,
+    "postRestockDelayMs": 120,
     "predictiveRestock": true,
-    "predictiveRestockMaxPullsPerBlock": 4,
-    "predictiveLookaheadRows": 128,
+    "dumpUnneededBeforeRefill": true,
+    "inventoryRefillRows": 2,
+    "inventoryMaxMaterialTypes": 16,
     "postPrintWorkflowEnabled": true,
     "postPrintFillMapEnabled": true,
     "postPrintUseCartographyEnabled": true,
     "postPrintStoreFinishedMapEnabled": true,
     "postPrintResetEnabled": true,
     "postPrintInteractionDelayMs": 200,
-    "postBuildDelayMs": 0,
-    "preSwapDelayMs": 10,
-    "postSwapDelayMs": 10,
-    "retryInteractTimeoutMs": 4000,
-    "checkpointBuffer": 0.2,
-    "breakCarpetAboveReset": false,
-    "debugPrints": false
+    "dumpAlreadyNearRange": 4,
+    "dumpGoalRange": 2,
+    "scannerWorkloadMode": "time",
+    "scannerPlaceDelayMs": 6,
+    "scannerMaxCatchupPlacements": 10,
+    "scannerLineEndSettleMs": 4500,
+    "scannerAdaptiveSlowdown": true,
+    "scannerAdaptiveMissingThreshold": 8,
+    "scannerAdaptiveMinPlaceDelayMs": 6,
+    "repairSprintMode": "always",
+    "repairBatchSize": 256,
+    "repairRestockMode": "fast",
+    "retryInteractTimeoutMs": 800,
+    "checkpointBuffer": 0.35
   },
   "errorHandling": {
     "logErrors": true,
-    "errorAction": "Ignore"
+    "errorAction": "repair"
   },
   "multiUser": {
-    "enabled": false
+    "enabled": true,
+    "mode": "file",
+    "syncFolder": "./logs/nerv-printer-sync",
+    "requireAllReady": true,
+    "staleStateMs": 45000,
+    "heartbeatMs": 5000,
+    "resumeExistingJob": true,
+    "joinStaggerMs": 12000,
+    "startStaggerMs": 5000
+  },
+  "anchorTranslation": {
+    "enabled": true,
+    "sourceAnchor": { "x": -706, "y": -9, "z": -962 },
+    "targetAnchor": { "x": -706, "y": -9, "z": -962 }
   }
 }
 ```

@@ -6,6 +6,18 @@ const { AsyncLocalStorage } = require('async_hooks')
 const mineflayer = require('mineflayer')
 const nbt = require('prismarine-nbt')
 const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder')
+const { createPlacementWorkload } = require('./nerv-printer/placement/workload')
+
+const placementWorkload = createPlacementWorkload({
+  toNumber,
+  delay,
+  GoalNear,
+  estimateNeededFromLookahead,
+  restockMaterial,
+  countInventoryItems,
+  findNervScannerCandidate,
+  placeNervScannerTarget
+})
 
 const CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config.json')
 const DEFAULT_IMPORTED_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'carpet-printer-config.json')
@@ -280,6 +292,16 @@ function createDefaultConfig() {
       scannerMaxCatchupPlacements: 12,
       scannerWorkloadPollMs: 5,
       scannerWorkloadLogEveryMs: 1000,
+      scannerLineEndSettleMs: 2500,
+      scannerAdaptiveSlowdown: true,
+      scannerAdaptiveMissingThreshold: 32,
+      scannerAdaptiveRecoverThreshold: 6,
+      scannerAdaptiveSettleStepMs: 1000,
+      scannerAdaptiveMaxSettleMs: 7000,
+      scannerAdaptiveMinSettleMs: 1500,
+      scannerAdaptivePlaceDelayStepMs: 2,
+      scannerAdaptiveMaxPlaceDelayMs: 16,
+      scannerAdaptiveMinPlaceDelayMs: 6,
       scannerRetryCooldownMs: 30,
       scannerPreSwapDelayMs: 0,
       scannerPostSwapDelayMs: 0,
@@ -3206,7 +3228,7 @@ function scanPlacementErrors(bot, targets, options = {}) {
   return errors
 }
 
-function shouldAbortRepairForMismatchCount(config, mismatchCount, totalTargets, label = 'REPAIR') {
+function logRepairMismatchWarning(config, mismatchCount, totalTargets, label = 'REPAIR') {
   const advanced = config.advanced || {}
   const maxCount = Math.max(1, toNumber(advanced.repairMaxMismatchCount, 512))
   const maxRatio = Math.max(0, toNumber(advanced.repairMaxMismatchRatio, 0.25))
@@ -3214,10 +3236,46 @@ function shouldAbortRepairForMismatchCount(config, mismatchCount, totalTargets, 
   const tooMany = mismatchCount > maxCount && ratio > maxRatio
 
   if (tooMany) {
-    console.log(`[${label}-ABORT] mismatchCount=${mismatchCount}/${totalTargets} (${(ratio * 100).toFixed(1)}%) exceeds repair safety limit. This usually means wrong Y/layer, unloaded chunks, or a reset area, so repair is skipped to avoid damaging the platform.`)
+    console.log(`[${label}-WARN] mismatchCount=${mismatchCount}/${totalTargets} (${(ratio * 100).toFixed(1)}%) exceeds repair warning limit; autonomous repair will continue.`)
   }
 
   return tooMany
+}
+
+function summarizeRepairMismatchReasons(bot, config, targets) {
+  const summary = { missing: 0, occupied: 0, already: 0, unloaded: 0, total: 0 }
+  const Vec3 = bot.entity.position.constructor
+
+  for (const target of targets) {
+    const { targetPos } = resolveTargetPlacementPosition(bot, target, config)
+    const actual = bot.blockAt(new Vec3(targetPos.x, targetPos.y, targetPos.z))
+    if (actual?.name === target.blockName) {
+      summary.already += 1
+      continue
+    }
+    if (!actual) {
+      summary.unloaded += 1
+      summary.missing += 1
+    } else if (actual.name === 'air') {
+      summary.missing += 1
+    } else {
+      summary.occupied += 1
+    }
+    summary.total += 1
+  }
+
+  return summary
+}
+
+function logRepairMismatchWarningForTargets(bot, config, targets, totalTargets, label = 'REPAIR') {
+  const mismatchCount = targets.length
+  const overWarningLimit = logRepairMismatchWarning(config, mismatchCount, totalTargets, label)
+  if (!overWarningLimit) return false
+
+  const summary = summarizeRepairMismatchReasons(bot, config, targets)
+  const wrongRatio = summary.total > 0 ? summary.occupied / summary.total : 0
+  console.log(`[${label}-WARN-DETAIL] missing=${summary.missing} occupied=${summary.occupied} unloaded=${summary.unloaded} wrongRatio=${(wrongRatio * 100).toFixed(1)}%; continuing repair.`)
+  return true
 }
 
 function takeNearestRepairBatch(bot, targets, batchSize) {
@@ -3850,10 +3908,17 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
           try {
             const result = await placeNervScannerTarget(bot, config, target)
+            const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
+
+            if (actual?.name === target.blockName) {
+              seen.add(key)
+              pendingUntil.delete(key)
+            } else if (result.state === 'placed') {
+              pendingUntil.set(key, Date.now() + retryCooldownMs)
+            }
+
             if (result.state === 'placed') {
               placed += 1
-              seen.add(key)
-              pendingUntil.set(key, Date.now() + retryCooldownMs)
             } else if (result.state === 'already') {
               already += 1
               seen.add(key)
@@ -4121,15 +4186,7 @@ async function runPrint(bot, config) {
     // Repair pass: fix any missed or broken blocks
     const errorAction = String(config.errorHandling?.errorAction || 'repair').toLowerCase()
     if (errorList.length && errorAction === 'repair') {
-      if (shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, 'REPAIR')) {
-        console.log('[REPAIR-PASS] Repair skipped by safety guard; leaving phase as repair for the next run after alignment/chunks are fixed.')
-        return {
-          sourceType: input.sourceType,
-          sourcePath: input.sourcePath,
-          sourceName: input.sourceName,
-          didWork: true
-        }
-      }
+      logRepairMismatchWarningForTargets(bot, config, errorList, orderedTargets.length, 'REPAIR')
       const maxRepairPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
       for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
         console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
@@ -4166,8 +4223,8 @@ async function runPrint(bot, config) {
             errorCount: errorList.length
           })
         }
-        if (pass < maxRepairPasses && shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, `REPAIR-VERIFY-PASS-${pass}`)) {
-          break
+        if (pass < maxRepairPasses) {
+          logRepairMismatchWarningForTargets(bot, config, errorList, orderedTargets.length, `REPAIR-VERIFY-PASS-${pass}`)
         }
       }
     }
@@ -4416,8 +4473,8 @@ async function runPrint(bot, config) {
       if (printer.fastTraversalEnabled === true) {
         const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'fixed').toLowerCase()
         const result = scannerWorkloadMode === 'time'
-          ? await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide)
-          : await runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide)
+          ? await placementWorkload.runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide)
+          : await placementWorkload.runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide)
         placed += result.placed
         already += result.already
         skipped += result.skipped
@@ -4555,22 +4612,7 @@ async function runPrint(bot, config) {
   // Repair pass: fix collected errors if enabled
   const errorAction = String(config.errorHandling?.errorAction || 'repair').toLowerCase()
   if (errorList.length && errorAction === 'repair') {
-    if (shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, 'REPAIR')) {
-      if (progressEnabled) {
-        writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
-          state: 'repair_aborted_safety',
-          action: 'manual-check-needed',
-          errorCount: errorList.length
-        })
-      }
-      console.log('[REPAIR-PASS] Repair skipped by safety guard; progress remains in repair phase for a safe retry.')
-      return {
-        sourceType: input.sourceType,
-        sourcePath: input.sourcePath,
-        sourceName: input.sourceName,
-        didWork: true
-      }
-    }
+    logRepairMismatchWarningForTargets(bot, config, errorList, orderedTargets.length, 'REPAIR')
     if (progressEnabled) {
       writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
         state: 'repair_start',
@@ -4615,8 +4657,8 @@ async function runPrint(bot, config) {
           errorCount: errorList.length
         })
       }
-      if (pass < maxRepairPasses && shouldAbortRepairForMismatchCount(config, errorList.length, orderedTargets.length, `REPAIR-VERIFY-PASS-${pass}`)) {
-        break
+      if (pass < maxRepairPasses) {
+        logRepairMismatchWarningForTargets(bot, config, errorList, orderedTargets.length, `REPAIR-VERIFY-PASS-${pass}`)
       }
     }
   }
@@ -6019,13 +6061,7 @@ async function runRepairTest(bot, config) {
     maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
   })
   console.log(`[TEST-REPAIR] before mismatches=${errors.length}.`)
-  if (shouldAbortRepairForMismatchCount(config, errors.length, orderedTargets.length, 'TEST-REPAIR')) {
-    if (waitAfterMs > 0) {
-      console.log(`[TEST-REPAIR] Safety abort. Waiting ${waitAfterMs}ms before logout.`)
-      await delay(waitAfterMs)
-    }
-    return
-  }
+  logRepairMismatchWarning(config, errors.length, orderedTargets.length, 'TEST-REPAIR')
 
   let placed = 0
   let already = 0
@@ -6047,8 +6083,8 @@ async function runRepairTest(bot, config) {
       maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
     })
     console.log(`[TEST-REPAIR] pass=${pass} fullScanRemaining=${errors.length}.`)
-    if (pass < maxPasses && shouldAbortRepairForMismatchCount(config, errors.length, orderedTargets.length, `TEST-REPAIR-AFTER-PASS-${pass}`)) {
-      break
+    if (pass < maxPasses) {
+      logRepairMismatchWarning(config, errors.length, orderedTargets.length, `TEST-REPAIR-AFTER-PASS-${pass}`)
     }
   }
 
