@@ -8,6 +8,8 @@
     "clean:install": "npm run clean && npm install",
     "start": "node index.js",
     "start:nerv": "node nerv-printer.js",
+    "start:nerv:local": "node nerv-printer.js --connection=local",
+    "start:nerv:6b6t": "node nerv-printer.js --connection=6b6t",
     "test:dump": "node nerv-printer.js --test-dump",
     "test:moving-place": "node nerv-printer.js --test-moving-place",
     "test:nerv-scanner": "node nerv-printer.js --test-nerv-scanner",

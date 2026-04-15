@@ -204,6 +204,7 @@ function createDefaultConfig() {
       host: '127.0.0.1',
       port: 25565,
       username: 'MapartBot',
+      usernames: ['MapartBot'],
       auth: 'offline',
       version: '1.21.8',
       profilesFolder: './auth-cache',
@@ -213,6 +214,43 @@ function createDefaultConfig() {
         enabled: false,
         delayMs: 9500,
         maxAttempts: 5
+      }
+    },
+    connection: {
+      active: 'local',
+      profiles: {
+        local: {
+          bot: {
+            host: '127.0.0.1',
+            port: 54321,
+            auth: 'offline',
+            version: '1.21.8',
+            profilesFolder: './auth-cache',
+            viewDistance: 'short',
+            checkTimeoutInterval: 90000,
+            reconnect: {
+              enabled: true,
+              delayMs: 15000,
+              maxAttempts: 25
+            }
+          }
+        },
+        '6b6t': {
+          bot: {
+            host: 'alt.6b6t.org',
+            port: 25565,
+            auth: 'microsoft',
+            version: 'auto',
+            profilesFolder: './auth-cache',
+            viewDistance: 'short',
+            checkTimeoutInterval: 90000,
+            reconnect: {
+              enabled: true,
+              delayMs: 30000,
+              maxAttempts: 50
+            }
+          }
+        }
       }
     },
     files: {
@@ -655,6 +693,14 @@ function mergeUserConfig(base, loaded, options = {}) {
     ...base,
     ...loaded,
     bot: { ...base.bot, ...(loaded.bot || {}) },
+    connection: {
+      ...base.connection,
+      ...(loaded.connection || {}),
+      profiles: {
+        ...(base.connection?.profiles || {}),
+        ...(loaded.connection?.profiles || {})
+      }
+    },
     files: { ...base.files, ...(loaded.files || {}) },
     printer: { ...base.printer, ...(loaded.printer || {}) },
     advanced: { ...base.advanced, ...(loaded.advanced || {}) },
@@ -695,6 +741,78 @@ function mergeUserConfig(base, loaded, options = {}) {
   return merged
 }
 
+function getSelectedConnectionProfileName(config) {
+  return (
+    getCliValue('--connection') ||
+    getCliValue('--server') ||
+    process.env.NERV_CONNECTION ||
+    config.connection?.active ||
+    config.connectionProfile ||
+    'local'
+  )
+}
+
+function mergeConnectionProfileConfig(config, profile) {
+  if (profile.bot) {
+    config.bot = {
+      ...(config.bot || {}),
+      ...profile.bot,
+      reconnect: {
+        ...(config.bot?.reconnect || {}),
+        ...(profile.bot.reconnect || {})
+      }
+    }
+  }
+
+  if (profile.multiUser) {
+    config.multiUser = {
+      ...(config.multiUser || {}),
+      ...profile.multiUser,
+      bots: Array.isArray(profile.multiUser.bots)
+        ? profile.multiUser.bots
+        : (config.multiUser?.bots || [])
+    }
+  }
+
+  if (profile.printer) {
+    config.printer = {
+      ...(config.printer || {}),
+      ...profile.printer,
+      printOffset: {
+        ...(config.printer?.printOffset || {}),
+        ...(profile.printer.printOffset || {})
+      }
+    }
+  }
+
+  if (profile.advanced) {
+    config.advanced = {
+      ...(config.advanced || {}),
+      ...profile.advanced
+    }
+  }
+}
+
+function applyConnectionProfile(config) {
+  const name = String(getSelectedConnectionProfileName(config) || '').trim()
+  const profiles = config.connection?.profiles || {}
+  const profile = profiles[name]
+
+  if (!profile) {
+    const available = Object.keys(profiles).join(', ') || 'none'
+    throw new Error(`Unknown connection profile "${name}". Available profiles: ${available}`)
+  }
+
+  mergeConnectionProfileConfig(config, profile)
+  config.connection = {
+    ...(config.connection || {}),
+    active: name,
+    selected: name
+  }
+  console.log(`[CONFIG] Connection profile: ${name}`)
+  return config
+}
+
 function loadConfig() {
   const base = createDefaultConfig()
 
@@ -721,6 +839,7 @@ function loadConfig() {
       const loaded = readJson(CONFIG_FILE)
       const config = mergeUserConfig(importedConfig, loaded, { applyMachine: false, allowMapCornerOnly: false })
       applyAnchorTranslation(config)
+      applyConnectionProfile(config)
       console.log('[CONFIG] Loaded nerv-printer-config.json (non-machine overrides only).')
       console.log('[CONFIG] Machine/platform/chest settings remain sourced from machine config file.')
       return config
@@ -728,6 +847,7 @@ function loadConfig() {
 
     const config = importedConfig
     applyAnchorTranslation(config)
+    applyConnectionProfile(config)
     console.log('[CONFIG] Using machine config only (no local overrides found).')
     return config
   }
@@ -736,6 +856,7 @@ function loadConfig() {
     const loaded = readJson(CONFIG_FILE)
     const config = mergeUserConfig(base, loaded)
     applyAnchorTranslation(config)
+    applyConnectionProfile(config)
 
     if (!config?.bot) {
       throw new Error('Invalid config: missing bot section.')
@@ -4769,25 +4890,63 @@ function sanitizeSyncName(name) {
   return String(name || '').replace(/[^a-zA-Z0-9._-]/g, '_')
 }
 
-function getEnabledMultiBots(config) {
-  const multi = config.multiUser || {}
-  const configured = Array.isArray(multi.bots) ? multi.bots : []
-  const bots = configured
-    .filter((entry) => entry && entry.enabled !== false)
-    .map((entry, index) => ({
-      name: String(entry.name || entry.username || `MapartBot_${index}`).trim(),
+function normalizeSimpleBotEntry(entry, index, multi) {
+  if (typeof entry === 'string') {
+    return {
+      name: entry.trim(),
+      role: index === 0 ? 'master' : 'slave',
+      enabled: true,
+      joinDelayMs: index * toNumber(multi.joinStaggerMs, 8000),
+      startDelayMs: index * toNumber(multi.startStaggerMs, 3000),
+      raw: entry
+    }
+  }
+
+  if (entry && typeof entry === 'object') {
+    return {
+      name: String(entry.name || entry.username || '').trim(),
       role: String(entry.role || (index === 0 ? 'master' : 'slave')).toLowerCase(),
+      enabled: entry.enabled !== false,
       joinDelayMs: Math.max(0, toNumber(entry.joinDelayMs, index * toNumber(multi.joinStaggerMs, 8000))),
       startDelayMs: Math.max(0, toNumber(entry.startDelayMs, index * toNumber(multi.startStaggerMs, 3000))),
       raw: entry
-    }))
-    .filter((entry) => entry.name)
+    }
+  }
+
+  return null
+}
+
+function getEnabledMultiBots(config) {
+  const multi = config.multiUser || {}
+  const simpleRoster = Array.isArray(config.bot?.usernames) && config.bot.usernames.length
+    ? config.bot.usernames
+    : null
+  const configured = simpleRoster || (Array.isArray(multi.bots) ? multi.bots : [])
+  const bots = configured
+    .map((entry, index) => normalizeSimpleBotEntry(entry, index, multi))
+    .filter((entry) => entry && entry.enabled !== false && entry.name)
 
   if (!bots.some((entry) => entry.role === 'master') && bots.length) {
     bots[0].role = 'master'
   }
 
   return bots
+}
+
+function shouldRunMultiUser(config) {
+  if (config.multiUser?.enabled === false) return false
+  return getEnabledMultiBots(config).length > 1
+}
+
+function applySingleBotRoster(config) {
+  const bots = getEnabledMultiBots(config)
+  if (bots.length === 1) {
+    config.bot = {
+      ...(config.bot || {}),
+      username: bots[0].name
+    }
+  }
+  return config
 }
 
 function computeWorkerIntervals(workerCount, width = 128) {
@@ -6284,12 +6443,13 @@ function logStartupSummary(config, reconnect) {
   const bot = config.bot || {}
   const files = config.files || {}
   const printer = config.printer || {}
+  const connection = config.connection || {}
   const offset = printer.printOffset || {}
   const anchor = config.anchorTranslation || {}
   const delta = anchor.appliedDelta || { x: 0, y: 0, z: 0 }
 
   console.log(
-    `[STARTUP] host=${bot.host || '127.0.0.1'} port=${toNumber(bot.port, 25565)} inputMode=${String(files.inputMode || 'auto')}`
+    `[STARTUP] connection=${connection.selected || connection.active || 'default'} host=${bot.host || '127.0.0.1'} port=${toNumber(bot.port, 25565)} inputMode=${String(files.inputMode || 'auto')}`
   )
   console.log(
     `[STARTUP] allowJump=${printer.allowJump !== false} offset=(${toNumber(offset.x, 0)},${toNumber(offset.y, 0)},${toNumber(offset.z, -1)}) resume=${files.resumeProgress !== false}`
@@ -6543,7 +6703,9 @@ async function start() {
     return
   }
 
-  if (config.multiUser?.enabled) {
+  applySingleBotRoster(config)
+
+  if (shouldRunMultiUser(config)) {
     await runMultiUserLive(config, reconnect)
     return
   }

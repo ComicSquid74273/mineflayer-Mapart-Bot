@@ -35,6 +35,18 @@ npm install
 npm run start:nerv
 ```
 
+For 6b6t:
+
+```bash
+npm run start:nerv:6b6t
+```
+
+For localhost explicitly:
+
+```bash
+npm run start:nerv:local
+```
+
 6. Check logs:
 
 - `logs/nerv-printer.log`
@@ -110,7 +122,8 @@ Connection and Mineflayer session settings.
 |---|---:|---|---|
 | `bot.host` | `127.0.0.1` | Server host/IP. | Use LAN/server IP for remote server. |
 | `bot.port` | `54321` | Minecraft server port. | Must match server/proxy port. |
-| `bot.username` | `MapartBot` | Base username. In multibot, entries in `multiUser.bots` override this per worker. | Keep unique names for online/offline server. |
+| `bot.username` | `MapartBot` | Single/default username. | For one bot, change this or the first `bot.usernames` entry. |
+| `bot.usernames` | `["MapartBot"]` | Simple roster. One name runs one bot; 2+ names automatically use multibot. | This is the easiest place to enter accounts. |
 | `bot.auth` | `offline` | `offline`, `microsoft`. | Use `offline` for local/offline test server. |
 | `bot.version` | `1.21.8` | Exact MC version or sometimes `auto`. | Exact version is safer with Mineflayer. |
 | `bot.profilesFolder` | `./auth-cache` | Auth/session cache folder. | Only relevant for authenticated accounts. |
@@ -119,6 +132,51 @@ Connection and Mineflayer session settings.
 | `bot.reconnect.enabled` | `true` | Reconnect after disconnect/kick/end. | Keep `true` for autonomous multibot. |
 | `bot.reconnect.delayMs` | `15000` | Delay before reconnect attempt. | Higher is safer on public servers that dislike fast reconnects. |
 | `bot.reconnect.maxAttempts` | `25` | Max reconnect sessions. | Higher keeps long autonomous runs alive through restarts/kicks. |
+
+### 3.1.1 `connection`
+
+Named connection profiles. The selected profile overrides `bot` connection fields after normal config loading, so you can switch between localhost and 6b6t without editing the main bot block.
+
+Selection order:
+
+1. CLI: `--connection=6b6t` or `--server=6b6t`
+2. Environment: `NERV_CONNECTION=6b6t`
+3. Config: `connection.active`
+
+Available scripts:
+
+```bash
+npm run start:nerv:local
+npm run start:nerv:6b6t
+```
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `connection.active` | `local` | Default profile when no CLI/env selection is provided. | Keep `local` for testing; use `--connection=6b6t` for public server. |
+| `connection.profiles.local.bot.host` | `127.0.0.1` | Localhost server address. | Use this for your local test server/proxy. |
+| `connection.profiles.local.bot.port` | `54321` | Localhost server port. | Must match your local server. |
+| `connection.profiles.local.bot.auth` | `offline` | Local auth mode. | `offline` is fastest for local tests. |
+| `connection.profiles.local.bot.version` | `1.21.8` | Local server version. | Keep exact for local testing. |
+| `connection.profiles.local.bot.profilesFolder` | `./auth-cache` | Auth cache folder. | Mostly relevant if local auth is not offline. |
+| `connection.profiles.local.bot.viewDistance` | `normal` | Local view distance. | Raise/lower depending on local performance. |
+| `connection.profiles.local.bot.checkTimeoutInterval` | `60000` | Local timeout in ms. | Fine for local server. |
+| `connection.profiles.local.bot.reconnect.enabled` | `true` | Local reconnect enabled. | Keep enabled for testing restarts. |
+| `connection.profiles.local.bot.reconnect.delayMs` | `15000` | Local reconnect delay. | Lower if you want faster local reconnects. |
+| `connection.profiles.local.bot.reconnect.maxAttempts` | `25` | Local reconnect attempt count. | Raise for long unattended tests. |
+| `connection.profiles.6b6t.bot.host` | `alt.6b6t.org` | 6b6t endpoint. | Change if your 6b6t connection/proxy uses a different address. |
+| `connection.profiles.6b6t.bot.port` | `25565` | 6b6t port. | Default Minecraft port. |
+| `connection.profiles.6b6t.bot.auth` | `microsoft` | Microsoft auth for public server. | Make sure `multiUser.bots[].name` matches the accounts you want to launch. |
+| `connection.profiles.6b6t.bot.version` | `auto` | Let Mineflayer negotiate version. | Use exact version only if 6b6t requires it. |
+| `connection.profiles.6b6t.bot.profilesFolder` | `./auth-cache` | Microsoft auth cache folder. | Keep stable so accounts stay logged in. |
+| `connection.profiles.6b6t.bot.viewDistance` | `short` | 6b6t view distance. | Lower reduces network load. |
+| `connection.profiles.6b6t.bot.checkTimeoutInterval` | `90000` | 6b6t timeout in ms. | Higher tolerates public-server lag spikes. |
+| `connection.profiles.6b6t.bot.reconnect.enabled` | `true` | 6b6t reconnect enabled. | Keep enabled for queue/kick/restart recovery. |
+| `connection.profiles.6b6t.bot.reconnect.delayMs` | `30000` | Slower reconnect for public server. | Helps avoid reconnect spam/anti-bot flags. |
+| `connection.profiles.6b6t.bot.reconnect.maxAttempts` | `50` | 6b6t reconnect attempt count. | Higher for long unattended runs. |
+| `connection.profiles.6b6t.multiUser.joinStaggerMs` | `15000` | 6b6t default bot join spacing. | Helps avoid login bursts. |
+| `connection.profiles.6b6t.multiUser.startStaggerMs` | `6000` | 6b6t default work start spacing. | Reduces startup lag spikes. |
+| `connection.profiles.6b6t.multiUser.staleStateMs` | `60000` | 6b6t stale heartbeat timeout. | Higher avoids false stale marks during lag. |
+| `connection.profiles.6b6t.multiUser.heartbeatMs` | `4000` | 6b6t heartbeat write interval. | Lower notices status changes faster. |
 
 ### 3.2 `files`
 
@@ -319,9 +377,31 @@ Repair behavior:
 
 File-based master/slave coordination. No in-game DM/chat system is required.
 
+Simple rule:
+
+1. Put one account in `bot.usernames` for one bot.
+2. Put multiple accounts in `bot.usernames` for multibot.
+3. `multiUser` is now mostly timing/coordination settings. You usually do not need to edit `multiUser.bots`.
+
+Examples:
+
+```json
+"bot": {
+  "username": "MyMainAccount",
+  "usernames": ["MyMainAccount"]
+}
+```
+
+```json
+"bot": {
+  "username": "MyMainAccount",
+  "usernames": ["MyMainAccount", "MyAlt1", "MyAlt2"]
+}
+```
+
 | Key | Current | Options / Meaning | Tuning hint |
 |---|---:|---|---|
-| `multiUser.enabled` | `true` | Enables multibot launcher/coordination. | Set `false` for single bot. |
+| `multiUser.enabled` | `true` | Allows multibot when `bot.usernames` has 2+ names. | You can leave this `true`; one username still runs single-bot mode. |
 | `multiUser.mode` | `file` | Currently `file`. | Uses JSON files in `syncFolder`. |
 | `multiUser.syncFolder` | `./logs/nerv-printer-sync` | Folder for master/slave state files. | Can delete for a fresh coordination state. |
 | `multiUser.requireAllReady` | `true` | Master waits for slaves before starting. | Keep `true` to avoid uneven starts. |
@@ -335,7 +415,9 @@ File-based master/slave coordination. No in-game DM/chat system is required.
 | `multiUser.startStaggerMs` | `5000` | Default print start spacing. | Increase if startup causes lag spikes. |
 | `multiUser.launchFromSingleProcess` | `true` | One Node process launches all configured bots. | Current supported mode. |
 
-Each entry in `multiUser.bots`:
+Legacy advanced roster: each entry in `multiUser.bots`.
+
+This still works, but `bot.usernames` is simpler and preferred.
 
 | Key | Meaning | Options / Hint |
 |---|---|---|
@@ -395,7 +477,7 @@ Used fields include:
 
 Do not move behavior tuning here.
 
-## 5. `config.test.json` Override Behavior
+## 5. Connection Overrides And `config.test.json`
 
 If present, the first bot in `config.test.json` can override local bot connection values:
 
@@ -407,6 +489,13 @@ If present, the first bot in `config.test.json` can override local bot connectio
 6. `profilesFolder`
 7. `viewDistance`
 8. `checkTimeoutInterval`
+
+After that, the selected `connection` profile is applied. This means:
+
+1. `npm run start:nerv` uses `connection.active`, currently `local`.
+2. `npm run start:nerv:local` forces localhost.
+3. `npm run start:nerv:6b6t` forces 6b6t and overrides `config.test.json` connection values.
+4. You can also run `node nerv-printer.js --connection=6b6t`.
 
 ## 6. JSON Plan Format (`files.inputMode = json`)
 
@@ -479,9 +568,11 @@ From `package.json`:
 
 1. `npm run start` runs `index.js`
 2. `npm run start:nerv` runs `nerv-printer.js`
-3. `npm run start:broadcast` runs quote broadcast mode in `index.js`
-4. `npm run clean` removes install/auth caches
-5. `npm run clean:install` clean install cycle
+3. `npm run start:nerv:local` runs `nerv-printer.js --connection=local`
+4. `npm run start:nerv:6b6t` runs `nerv-printer.js --connection=6b6t`
+5. `npm run start:broadcast` runs quote broadcast mode in `index.js`
+6. `npm run clean` removes install/auth caches
+7. `npm run clean:install` clean install cycle
 
 ## 10. Minimal Example `nerv-printer-config.json`
 
@@ -491,11 +582,38 @@ From `package.json`:
     "host": "127.0.0.1",
     "port": 54321,
     "username": "MapartBot",
+    "usernames": ["MapartBot"],
     "auth": "offline",
     "version": "1.21.8",
     "profilesFolder": "./auth-cache",
     "viewDistance": "normal",
     "checkTimeoutInterval": 60000
+  },
+  "connection": {
+    "active": "local",
+    "profiles": {
+      "local": {
+        "bot": {
+          "host": "127.0.0.1",
+          "port": 54321,
+          "auth": "offline",
+          "version": "1.21.8"
+        }
+      },
+      "6b6t": {
+        "bot": {
+          "host": "alt.6b6t.org",
+          "port": 25565,
+          "auth": "microsoft",
+          "version": "auto",
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 30000,
+            "maxAttempts": 50
+          }
+        }
+      }
+    }
   },
   "files": {
     "inputMode": "nbt",

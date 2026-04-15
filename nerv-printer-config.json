@@ -3,6 +3,9 @@
     "host": "127.0.0.1",
     "port": 54321,
     "username": "MapartBot",
+    "usernames": [
+      "MapartBot"
+    ],
     "auth": "offline",
     "version": "1.21.8",
     "profilesFolder": "./auth-cache",
@@ -12,6 +15,49 @@
       "enabled": true,
       "delayMs": 15000,
       "maxAttempts": 25
+    }
+  },
+  "connection": {
+    "active": "local",
+    "profiles": {
+      "local": {
+        "bot": {
+          "host": "127.0.0.1",
+          "port": 54321,
+          "auth": "offline",
+          "version": "1.21.8",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "normal",
+          "checkTimeoutInterval": 60000,
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 15000,
+            "maxAttempts": 25
+          }
+        }
+      },
+      "6b6t": {
+        "bot": {
+          "host": "alt.6b6t.org",
+          "port": 25565,
+          "auth": "microsoft",
+          "version": "auto",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "short",
+          "checkTimeoutInterval": 90000,
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 30000,
+            "maxAttempts": 50
+          }
+        },
+        "multiUser": {
+          "joinStaggerMs": 15000,
+          "startStaggerMs": 6000,
+          "staleStateMs": 60000,
+          "heartbeatMs": 4000
+        }
+      }
     }
   },
   "files": {
@@ -172,29 +218,6 @@
     "startAllOnMasterReady": true,
     "joinStaggerMs": 12000,
     "startStaggerMs": 5000,
-    "launchFromSingleProcess": true,
-    "bots": [
-      {
-        "name": "MapartBot",
-        "role": "master",
-        "enabled": true,
-        "joinDelayMs": 4000,
-        "startDelayMs": 8000
-      },
-      {
-        "name": "MapartBot1",
-        "role": "slave",
-        "enabled": true,
-        "joinDelayMs": 16000,
-        "startDelayMs": 13000
-      },
-      {
-        "name": "MapartBot2",
-        "role": "slave",
-        "enabled": true,
-        "joinDelayMs": 28000,
-        "startDelayMs": 18000
-      }
-    ]
+    "launchFromSingleProcess": true
   }
 }
