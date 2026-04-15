@@ -240,7 +240,7 @@ function createDefaultConfig() {
       postPrintCenterWaitMs: 15000,
       postPrintInteractionDelayMs: 100,
       postPrintMapSettleDelayMs: 100,
-      dumpAimSettleMs: 180,
+      dumpAimSettleMs: 0,
       dumpYawInvert: false,
       dumpPitchInvert: false,
       dumpTestStationWaitMs: 5000,
@@ -262,6 +262,9 @@ function createDefaultConfig() {
       scannerWorkloadMode: 'fixed',
       inventoryCycleTestWaitAfterMs: 5000,
       inventoryCycleTestRows: 2,
+      dumpPathThinkTimeoutMs: 3000,
+      dumpAlreadyNearRange: 2.25,
+      dumpReaimEveryStacks: 0,
       repairTestWaitAfterMs: 5000,
       repairTestMaxPasses: 3,
       repairGoalRange: 3.25,
@@ -1443,6 +1446,22 @@ function stopMovementControls(bot) {
   }
 }
 
+async function gotoWithTemporaryThinkTimeout(bot, goal, timeoutMs) {
+  const pathfinderApi = bot.pathfinder || {}
+  const previous = pathfinderApi.thinkTimeout
+  if (Number.isFinite(timeoutMs)) {
+    pathfinderApi.thinkTimeout = Number.isFinite(previous) ? Math.max(previous, timeoutMs) : timeoutMs
+  }
+
+  try {
+    await pathfinderApi.goto(goal)
+  } finally {
+    if (Number.isFinite(previous)) {
+      pathfinderApi.thinkTimeout = previous
+    }
+  }
+}
+
 async function maintainDumpAim(bot, config, station) {
   const aim = minecraftYawPitchToMineflayerRadians(station?.yaw, station?.pitch, config.advanced || {})
   if (!aim) return
@@ -1461,6 +1480,23 @@ async function maintainDumpAim(bot, config, station) {
   await bot.look(aim.yawRad, aim.pitchRad, true)
   await delay(settleMs)
   await bot.look(aim.yawRad, aim.pitchRad, true)
+}
+
+async function reachDumpStation(bot, config, station, range = 0.5) {
+  const stationPos = station?.position
+  if (!stationPos) return false
+
+  const dumpAlreadyNearRange = Math.max(range, toNumber(config.advanced?.dumpAlreadyNearRange, 2.25))
+  const dist = bot.entity.position.distanceTo(new bot.entity.position.constructor(Number(stationPos.x), Number(stationPos.y), Number(stationPos.z)))
+  if (dist <= dumpAlreadyNearRange) {
+    await maintainDumpAim(bot, config, station)
+    return true
+  }
+
+  const dumpPathThinkTimeoutMs = Math.max(1000, toNumber(config.advanced?.dumpPathThinkTimeoutMs, 3000))
+  await gotoWithTemporaryThinkTimeout(bot, new GoalNear(Number(stationPos.x), Number(stationPos.y), Number(stationPos.z), range), dumpPathThinkTimeoutMs)
+  await maintainDumpAim(bot, config, station)
+  return true
 }
 
 async function withdrawFromChest(bot, config, chestPos, itemName, amount, accessPosition) {
@@ -2063,7 +2099,7 @@ function selectInventoryPlanningTargets(targets, config) {
 
 function selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrder, config) {
   const advanced = config.advanced || {}
-  const lineLimit = Math.max(1, toNumber(advanced.inventoryRefillRows, 2))
+  const lineLimit = getInventoryManagedLinesPerRun(config, Math.max(1, toNumber(config.printer?.linesPerRun, 3)))
   const maxMaterialTypes = Math.max(1, Math.min(16, toNumber(advanced.inventoryMaxMaterialTypes, 16)))
   const selectedCols = colBatch.slice(0, Math.min(lineLimit, colBatch.length))
   const selectedMaterials = new Set()
@@ -2088,6 +2124,13 @@ function selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrd
     cols: selectedCols,
     materials: [...selectedMaterials]
   }
+}
+
+function getInventoryManagedLinesPerRun(config, linesPerRun) {
+  const advanced = config.advanced || {}
+  const refillRows = Math.max(1, toNumber(advanced.inventoryRefillRows, 2))
+  const rowWidth = Math.max(1, toNumber(linesPerRun, 1))
+  return Math.max(1, rowWidth * refillRows)
 }
 
 function getNervRequiredItems(bot, config, targets) {
@@ -2300,31 +2343,46 @@ async function dumpCarpetStacks(bot, config, stacks, reasonLabel = 'dumpedStacks
     return 0
   }
 
-  const targetStation = nearestEntryByPosition(bot, dumpStations, (entry) => entry.position)
-  const dumpPos = targetStation?.position
-  if (!dumpPos) return 0
+  const sortedStations = [...dumpStations].sort((a, b) => horizontalDist2(bot, a.position) - horizontalDist2(bot, b.position))
+  let targetStation = null
+  let dumpPos = null
+  let lastReachError = null
 
-  try {
-    await bot.pathfinder.goto(new GoalNear(Number(dumpPos.x), Number(dumpPos.y), Number(dumpPos.z), 0.5))
-    await maintainDumpAim(bot, config, targetStation)
-  } catch (err) {
-    console.log(`[PREDUMP-WARN] Could not reach dump station: ${err?.message || err}`)
+  for (const station of sortedStations) {
+    const stationPos = station?.position
+    if (!stationPos) continue
+    try {
+      await reachDumpStation(bot, config, station, 0.5)
+      targetStation = station
+      dumpPos = stationPos
+      break
+    } catch (err) {
+      lastReachError = err
+      console.log(`[PREDUMP-WARN] Could not reach dump station ${stationPos.x} ${stationPos.y} ${stationPos.z}: ${err?.message || err}`)
+    }
+  }
+
+  if (!targetStation || !dumpPos) {
+    console.log(`[PREDUMP-WARN] Could not reach any dump station: ${lastReachError?.message || lastReachError || 'no reachable station'}`)
     return 0
   }
+
+  const aim = minecraftYawPitchToMineflayerRadians(targetStation?.yaw, targetStation?.pitch, config.advanced || {})
+  const yawDeg = aim?.yawDeg ?? null
+  const pitchDeg = aim?.pitchDeg ?? null
+  const botYawDeg = normalizeAngleDegrees(180 - (bot.entity.yaw * 180 / Math.PI))
+  const botPitchDeg = -(bot.entity.pitch * 180 / Math.PI)
+  const reaimEvery = Math.max(0, toNumber(config.advanced?.dumpReaimEveryStacks, 0))
+  console.log(`[PREDUMP-AIM] Bot at ${bot.entity.position.x.toFixed(2)}, ${bot.entity.position.y.toFixed(2)}, ${bot.entity.position.z.toFixed(2)} | yaw=${yawDeg ?? 'null'} pitch=${pitchDeg ?? 'null'} | botYaw=${botYawDeg?.toFixed(2) ?? 'null'}deg botPitch=${botPitchDeg.toFixed(2)}`)
 
   let dumped = 0
   for (const stack of stacks) {
     try {
-      await maintainDumpAim(bot, config, targetStation)
-      const aim = minecraftYawPitchToMineflayerRadians(targetStation?.yaw, targetStation?.pitch, config.advanced || {})
-      const yawDeg = aim?.yawDeg ?? null
-      const pitchDeg = aim?.pitchDeg ?? null
-      const botYawDeg = normalizeAngleDegrees(180 - (bot.entity.yaw * 180 / Math.PI))
-      const botPitchDeg = -(bot.entity.pitch * 180 / Math.PI)
-      console.log(`[PREDUMP-AIM] Bot at ${bot.entity.position.x.toFixed(2)}, ${bot.entity.position.y.toFixed(2)}, ${bot.entity.position.z.toFixed(2)} | yaw=${yawDeg ?? 'null'} pitch=${pitchDeg ?? 'null'} | botYaw=${botYawDeg?.toFixed(2) ?? 'null'}deg botPitch=${botPitchDeg.toFixed(2)}deg`)
+      if (reaimEvery > 0 && dumped > 0 && dumped % reaimEvery === 0) {
+        await maintainDumpAim(bot, config, targetStation)
+      }
       await bot.tossStack(stack)
       dumped += 1
-      await maintainDumpAim(bot, config, targetStation)
       await delay(toNumber(config.advanced?.inventoryActionDelayMs, 100))
     } catch (err) {
       if (config.advanced?.debugPrints) {
@@ -2453,25 +2511,39 @@ async function dumpCarpetStacksForSpace(bot, config, keepNames = new Set(), maxS
 
   if (!candidates.length) return 0
 
-  const targetStation = nearestEntryByPosition(bot, dumpStations, (entry) => entry.position)
-  const dumpPos = targetStation?.position
-  if (!dumpPos) return 0
+  const sortedStations = [...dumpStations].sort((a, b) => horizontalDist2(bot, a.position) - horizontalDist2(bot, b.position))
+  let targetStation = null
+  let dumpPos = null
+  let lastReachError = null
 
-  try {
-    await bot.pathfinder.goto(new GoalNear(Number(dumpPos.x), Number(dumpPos.y), Number(dumpPos.z), 0.5))
-    await maintainDumpAim(bot, config, targetStation)
-  } catch (err) {
-    console.log(`[PREDUMP-WARN] Could not reach dump station for space cleanup: ${err?.message || err}`)
+  for (const station of sortedStations) {
+    const stationPos = station?.position
+    if (!stationPos) continue
+    try {
+      await reachDumpStation(bot, config, station, 0.5)
+      targetStation = station
+      dumpPos = stationPos
+      break
+    } catch (err) {
+      lastReachError = err
+      console.log(`[PREDUMP-WARN] Could not reach dump station for space cleanup ${stationPos.x} ${stationPos.y} ${stationPos.z}: ${err?.message || err}`)
+    }
+  }
+
+  if (!targetStation || !dumpPos) {
+    console.log(`[PREDUMP-WARN] Could not reach any dump station for space cleanup: ${lastReachError?.message || lastReachError || 'no reachable station'}`)
     return 0
   }
 
+  const reaimEvery = Math.max(0, toNumber(config.advanced?.dumpReaimEveryStacks, 0))
   let dumped = 0
   for (const stack of candidates) {
     try {
-      await maintainDumpAim(bot, config, targetStation)
+      if (reaimEvery > 0 && dumped > 0 && dumped % reaimEvery === 0) {
+        await maintainDumpAim(bot, config, targetStation)
+      }
       await bot.tossStack(stack)
       dumped += 1
-      await maintainDumpAim(bot, config, targetStation)
       await delay(toNumber(config.advanced?.inventoryActionDelayMs, 100))
     } catch (err) {
       if (config.advanced?.debugPrints) {
@@ -2500,7 +2572,7 @@ function estimateNeededFromLookahead(targets) {
 
 async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   const advanced = config.advanced || {}
-  if (advanced.predictiveRestock === false || !targets.length) return
+  if (advanced.predictiveRestock === false || !targets.length) return true
 
   const planning = options.windowed === true
     ? {
@@ -2511,7 +2583,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       }
     : selectInventoryPlanningTargets(targets, config)
   const planningTargets = planning.targets
-  if (!planningTargets.length) return
+  if (!planningTargets.length) return true
 
   const maxIterations = Math.max(20, toNumber(advanced.nervInventoryMaxPlanIterations, 80))
   const stableRequired = getNervRequiredItems(bot, config, planningTargets)
@@ -2529,7 +2601,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
     const plan = buildNervInventoryPlanFromRequired(bot, config, planningTargets, stableNeededByBlock, stableRequired)
     const neededByBlock = plan.requiredItems
 
-    if (!neededByBlock.size) return
+    if (!neededByBlock.size) return true
 
     for (const blockName of neededByBlock.keys()) {
       unavailableMaterialCache.delete(blockName)
@@ -2546,14 +2618,26 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       console.log(`[NERV-INVENTORY] availableSlots=${plan.availableSlots.length} required=${formatInventoryPlanMap(plan.requiredItems)} keep=${formatInventoryPlanMap(plan.materialInInv)} dumpSlots=${plan.dumpSlots.length} restock=${formatRestockList(plan.restockList)}`)
     }
 
-    if (!restockList.length) return
+    if (!restockList.length) {
+      if (options.dumpWithoutRestock === true && advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
+        console.log(`[NERV-DUMP] Dumping ${plan.dumpSlots.length} slot(s) before next chunk: ${formatDumpSlots(plan.dumpSlots)}`)
+        const dumped = await dumpNervInventorySlots(bot, config, plan.dumpSlots, 'nervDumpBeforeNextChunk')
+        if (dumped <= 0) return false
+        await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+        continue
+      }
+      return true
+    }
 
     if (advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
-      const dumpsNeeded = Math.min(plan.dumpSlots.length, estimateDumpSlotsNeededForRestock(bot, restockList))
+      const dumpsNeeded = options.dumpAllUnneededBeforeRestock === true
+        ? plan.dumpSlots.length
+        : Math.min(plan.dumpSlots.length, estimateDumpSlotsNeededForRestock(bot, restockList))
       if (dumpsNeeded > 0) {
         const dumpSlots = plan.dumpSlots.slice(0, dumpsNeeded)
         console.log(`[NERV-DUMP] Dumping ${dumpSlots.length}/${plan.dumpSlots.length} slot(s) before restock: ${formatDumpSlots(dumpSlots)}`)
-        await dumpNervInventorySlots(bot, config, dumpSlots, 'nervPredumpBeforeRefill')
+        const dumped = await dumpNervInventorySlots(bot, config, dumpSlots, 'nervPredumpBeforeRefill')
+        if (dumped <= 0) return false
         await delay(toNumber(advanced.inventoryActionDelayMs, 100))
         continue
       }
@@ -2605,7 +2689,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
 
       if (stillNeed > remainingCapacity) {
         console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} still needs ${stillNeed}, but inventory can only accept ${remainingCapacity}. Stopping refill cycle to avoid cycling chests.`)
-        return
+        return false
       }
 
       if (haveAfter <= haveBefore && config.errorHandling?.logErrors !== false) {
@@ -2621,6 +2705,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   if (config.errorHandling?.logErrors !== false) {
     console.log(`[NERV-RESTOCK-WARN] Refill planner hit safety limit (${maxIterations}); continuing with current inventory.`)
   }
+  return false
 }
 
 function getRepairRestockPlan(bot, targets) {
@@ -3042,6 +3127,162 @@ function takeNearestRepairBatch(bot, targets, batchSize) {
   return { batch, remaining }
 }
 
+function classifyRepairTargets(bot, config, targets) {
+  const already = []
+  const missing = []
+  const occupied = []
+
+  for (const target of targets) {
+    const { targetPos, shiftedDown } = resolveTargetPlacementPosition(bot, target, config)
+    const resolvedTarget = shiftedDown
+      ? { ...target, position: { x: targetPos.x, y: targetPos.y, z: targetPos.z } }
+      : target
+    const actual = bot.blockAt(targetPos)
+
+    if (actual?.name === target.blockName) {
+      already.push(resolvedTarget)
+    } else if (!actual || actual.name === 'air') {
+      missing.push(resolvedTarget)
+    } else {
+      occupied.push(resolvedTarget)
+    }
+  }
+
+  return { already, missing, occupied }
+}
+
+async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRange, label = 'REPAIR-MIXED') {
+  if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
+
+  const printer = config.printer || {}
+  const advanced = config.advanced || {}
+  const tickMs = Math.max(10, toNumber(advanced.repairFastTickMs, toNumber(printer.fastTraversalTickMs, 40)))
+  const maxPerTick = Math.max(1, toNumber(advanced.repairFastMaxPlacementsPerTick, toNumber(printer.maxPlacementsPerTick, 1)))
+  const goalRange = Math.max(0.5, toNumber(advanced.repairFastGoalRange, toNumber(advanced.repairGoalRange, Math.max(0.75, placeRange - 1.5))))
+  const Vec3 = bot.entity.position.constructor
+  const processed = new Set()
+  let active = true
+  let placed = 0
+  let already = 0
+  let skipped = 0
+
+  const targetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
+  const targetPosition = (target) => new Vec3(target.position.x, target.position.y, target.position.z)
+  const getResolvedTarget = (target) => {
+    const { targetPos, shiftedDown } = resolveTargetPlacementPosition(bot, target, config)
+    return shiftedDown
+      ? { ...target, position: { x: targetPos.x, y: targetPos.y, z: targetPos.z } }
+      : target
+  }
+
+  const markResult = (target, result, prefix) => {
+    if (result.state === 'placed') placed += 1
+    else if (result.state === 'already') already += 1
+    else {
+      skipped += 1
+      if (config.errorHandling?.logErrors !== false) {
+        console.log(`[${prefix}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+      }
+    }
+  }
+
+  const fastAirLoop = (async () => {
+    while (active) {
+      const botPos = bot.entity.position
+      const candidates = targets
+        .filter((target) => !processed.has(targetKey(target)))
+        .map(getResolvedTarget)
+        .filter((target) => {
+          const pos = targetPosition(target)
+          const actual = bot.blockAt(pos)
+          if (actual?.name === target.blockName) return true
+          if (actual && actual.name !== 'air') return false
+          return botPos.distanceTo(pos.offset(0.5, 0.5, 0.5)) <= placeRange
+        })
+        .sort((a, b) => {
+          const aPos = new Vec3(a.position.x + 0.5, a.position.y + 0.5, a.position.z + 0.5)
+          const bPos = new Vec3(b.position.x + 0.5, b.position.y + 0.5, b.position.z + 0.5)
+          return botPos.distanceTo(aPos) - botPos.distanceTo(bPos)
+        })
+
+      let placementsThisTick = 0
+      for (const target of candidates) {
+        const key = targetKey(target)
+        if (processed.has(key)) continue
+        if (placementsThisTick >= maxPerTick) break
+
+        processed.add(key)
+        placementsThisTick += 1
+
+        try {
+          const result = await placeNervScannerTarget(bot, config, target)
+          markResult(target, result, label)
+        } catch (err) {
+          skipped += 1
+          if (config.errorHandling?.logErrors !== false) {
+            console.log(`[${label}-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+          }
+        }
+      }
+
+      await delay(tickMs)
+    }
+  })()
+
+  try {
+    bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
+
+    while (processed.size < targets.length) {
+      const botPos = bot.entity.position
+      const remaining = targets
+        .map(getResolvedTarget)
+        .filter((target) => !processed.has(targetKey(target)))
+        .sort((a, b) => {
+          const aPos = new Vec3(a.position.x + 0.5, a.position.y + 0.5, a.position.z + 0.5)
+          const bPos = new Vec3(b.position.x + 0.5, b.position.y + 0.5, b.position.z + 0.5)
+          return botPos.distanceTo(aPos) - botPos.distanceTo(bPos)
+        })
+
+      const target = remaining[0]
+      if (!target) break
+
+      await bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
+      const key = targetKey(target)
+      if (processed.has(key)) continue
+
+      const pos = targetPosition(target)
+      const actual = bot.blockAt(pos)
+      if (actual?.name === target.blockName) {
+        processed.add(key)
+        already += 1
+        continue
+      }
+
+      processed.add(key)
+      try {
+        const result = actual && actual.name !== 'air'
+          ? await placeTarget(bot, config, target, true)
+          : await placeNervScannerTarget(bot, config, target)
+        markResult(target, result, actual && actual.name !== 'air' ? `${label}-STOP` : label)
+      } catch (err) {
+        skipped += 1
+        if (config.errorHandling?.logErrors !== false) {
+          console.log(`[${label}-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+        }
+      }
+    }
+  } catch (err) {
+    if (config.errorHandling?.logErrors !== false) {
+      console.log(`[${label}-MOVE-ERR] ${err?.message || err}`)
+    }
+  } finally {
+    active = false
+    await fastAirLoop
+  }
+
+  return { placed, already, skipped }
+}
+
 async function repairTargetsInBatches(bot, config, targets, placeRange, label = 'REPAIR') {
   const advanced = config.advanced || {}
   const batchSize = Math.max(1, toNumber(advanced.repairBatchSize, 256))
@@ -3068,7 +3309,10 @@ async function repairTargetsInBatches(bot, config, targets, placeRange, label = 
       await ensureRepairMaterialsForTargets(bot, config, batch)
     }
 
-    const result = await repairTargets(bot, config, batch, placeRange)
+    const repairGroups = classifyRepairTargets(bot, config, batch)
+    console.log(`[${label}-BATCH] mixedRepair=true missing=${repairGroups.missing.length} occupied=${repairGroups.occupied.length} already=${repairGroups.already.length}`)
+
+    const result = await repairTargetsWhileMovingWithStops(bot, config, batch, placeRange, `${label}-MIXED`)
     placed += result.placed
     already += result.already
     skipped += result.skipped
@@ -3214,7 +3458,21 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
   return { placed, already, skipped, processed: processed.size }
 }
 
-async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide) {
+function buildNervUCheckpoints(batchTargets, startOnNorthSide) {
+  const minX = Math.min(...batchTargets.map((target) => target.position.x))
+  const minY = Math.min(...batchTargets.map((target) => target.position.y))
+  const minZ = Math.min(...batchTargets.map((target) => target.position.z))
+  const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
+  const activeCols = new Set(batchTargets.map((target) => target.col))
+  const cp1 = { x: minX + 0.5, y: minY, z: minZ + 0.5 }
+  const cp2 = { x: minX + 0.5, y: minY, z: maxZ + 0.5 }
+
+  return startOnNorthSide
+    ? [{ position: cp1, action: '', activeCols }, { position: cp2, action: 'lineEnd', activeCols }]
+    : [{ position: cp2, action: '', activeCols }, { position: cp1, action: 'lineEnd', activeCols }]
+}
+
+async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true) {
   if (!batchTargets.length) return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0 }
 
   const printer = config.printer || {}
@@ -3222,23 +3480,18 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
   const checkpointBuffer = Math.max(0.5, toNumber(config.advanced?.checkpointBuffer, 0.8))
 
-  const minX = Math.min(...batchTargets.map((target) => target.position.x))
-  const minY = Math.min(...batchTargets.map((target) => target.position.y))
-  const minZ = Math.min(...batchTargets.map((target) => target.position.z))
-  const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
-  const cp1 = { x: minX + 0.5, y: minY, z: minZ + 0.5 }
-  const cp2 = { x: minX + 0.5, y: minY, z: maxZ + 0.5 }
-  const checkpoints = startOnNorthSide
-    ? [{ position: cp1, action: '' }, { position: cp2, action: 'lineEnd' }]
-    : [{ position: cp2, action: '' }, { position: cp1, action: 'lineEnd' }]
+  const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide)
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
+  const neededByBlock = estimateNeededFromLookahead(batchTargets)
   let active = true
   let currentGoal = checkpoints[0].position
   let currentAction = checkpoints[0].action
+  let currentActiveCols = checkpoints[0].activeCols
   let placed = 0
   let already = 0
   let skipped = 0
+  let emergencyRestockBlock = null
   const seen = new Set()
 
   const placementLoop = (async () => {
@@ -3246,7 +3499,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
       if (allowPlacement) {
         for (let i = 0; i < maxPerTick; i += 1) {
-          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, seen)
+          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, seen, currentActiveCols)
           if (!target) break
 
           const key = `${target.position.x}:${target.position.y}:${target.position.z}`
@@ -3260,6 +3513,11 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
               skipped += 1
               if (config.errorHandling?.logErrors !== false) {
                 console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+              }
+              if (allowEmergencyRestock && String(result.reason || '').startsWith('missing-item-')) {
+                emergencyRestockBlock = target.blockName
+                active = false
+                break
               }
             }
           } catch (err) {
@@ -3277,8 +3535,10 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
 
   try {
     for (const checkpoint of checkpoints) {
+      if (emergencyRestockBlock) break
       currentGoal = checkpoint.position
       currentAction = checkpoint.action
+      currentActiveCols = checkpoint.activeCols
       const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
       const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
       bot.setControlState('sprint', shouldSprint)
@@ -3287,6 +3547,24 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   } finally {
     active = false
     await placementLoop
+  }
+
+  if (allowEmergencyRestock && emergencyRestockBlock) {
+    console.log(`[NERV-SCANNER-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; stopping movement, refilling, and retrying remaining targets once.`)
+    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
+    if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
+      const Vec3Retry = bot.entity.position.constructor
+      const remainingTargets = batchTargets.filter((target) => {
+        const actual = bot.blockAt(new Vec3Retry(target.position.x, target.position.y, target.position.z))
+        return actual?.name !== target.blockName
+      })
+      if (remainingTargets.length) {
+        const retry = await runNervScannerPlacementBatch(bot, config, remainingTargets, startOnNorthSide, false)
+        placed += retry.placed
+        already += retry.already
+        skipped += retry.skipped
+      }
+    }
   }
 
   const Vec3 = bot.entity.position.constructor
@@ -3299,7 +3577,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   return { placed, already, skipped, seen: seen.size, missing }
 }
 
-async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide) {
+async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true) {
   if (!batchTargets.length) {
     return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
   }
@@ -3312,20 +3590,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
   const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
 
-  const minX = Math.min(...batchTargets.map((target) => target.position.x))
-  const minY = Math.min(...batchTargets.map((target) => target.position.y))
-  const minZ = Math.min(...batchTargets.map((target) => target.position.z))
-  const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
-  const cp1 = { x: minX + 0.5, y: minY, z: minZ + 0.5 }
-  const cp2 = { x: minX + 0.5, y: minY, z: maxZ + 0.5 }
-  const checkpoints = startOnNorthSide
-    ? [{ position: cp1, action: '' }, { position: cp2, action: 'lineEnd' }]
-    : [{ position: cp2, action: '' }, { position: cp1, action: 'lineEnd' }]
+  const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide)
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
+  const neededByBlock = estimateNeededFromLookahead(batchTargets)
   let active = true
   let currentGoal = checkpoints[0].position
   let currentAction = checkpoints[0].action
+  let currentActiveCols = checkpoints[0].activeCols
   let lastTickTime = Date.now()
   let placed = 0
   let already = 0
@@ -3334,6 +3606,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let rawAllowedTotal = 0
   let cappedTotal = 0
   let maxAllowedSeen = 0
+  let emergencyRestockBlock = null
   const seen = new Set()
   const pendingUntil = new Map()
 
@@ -3362,7 +3635,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         }
 
         for (let i = 0; i < allowed; i += 1) {
-          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded)
+          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded, currentActiveCols)
           if (!target) break
 
           const key = `${target.position.x}:${target.position.y}:${target.position.z}`
@@ -3387,6 +3660,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
               if (String(result.reason || '').startsWith('missing-item-')) {
                 hardStops += 1
+                if (allowEmergencyRestock) {
+                  emergencyRestockBlock = target.blockName
+                  active = false
+                }
                 lastTickTime = Date.now()
                 break
               }
@@ -3415,8 +3692,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   try {
     for (const checkpoint of checkpoints) {
+      if (emergencyRestockBlock) break
       currentGoal = checkpoint.position
       currentAction = checkpoint.action
+      currentActiveCols = checkpoint.activeCols
       const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
       const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
       bot.setControlState('sprint', shouldSprint)
@@ -3425,6 +3704,28 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   } finally {
     active = false
     await placementLoop
+  }
+
+  if (allowEmergencyRestock && emergencyRestockBlock) {
+    console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; stopping movement, refilling, and retrying remaining targets once.`)
+    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
+    if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
+      const Vec3Retry = bot.entity.position.constructor
+      const remainingTargets = batchTargets.filter((target) => {
+        const actual = bot.blockAt(new Vec3Retry(target.position.x, target.position.y, target.position.z))
+        return actual?.name !== target.blockName
+      })
+      if (remainingTargets.length) {
+        const retry = await runNervTimeWorkloadPlacementBatch(bot, config, remainingTargets, startOnNorthSide, false)
+        placed += retry.placed
+        already += retry.already
+        skipped += retry.skipped
+        hardStops += retry.hardStops
+        rawAllowedTotal += retry.rawAllowed
+        cappedTotal += retry.capped
+        maxAllowedSeen = Math.max(maxAllowedSeen, retry.maxAllowed)
+      }
+    }
   }
 
   const Vec3 = bot.entity.position.constructor
@@ -3471,6 +3772,7 @@ async function runPrint(bot, config) {
   const input = await loadTargets(config)
   const calibratedTargets = calibrateTargetsForWorld(bot, input.targets, config)
   const linesPerRun = toNumber(printer.linesPerRun, 3)
+  const printChunkLines = getInventoryManagedLinesPerRun(config, linesPerRun)
   const northToSouth = printer.northToSouth !== false
   const placeWhileSprinting = printer.placeWhileSprinting === true
   const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
@@ -3786,174 +4088,199 @@ async function runPrint(bot, config) {
   }
 
 
-  for (let i = 0; i < colTraversal.length; i += Math.max(1, linesPerRun)) {
-    const colBatch = colTraversal.slice(i, i + Math.max(1, linesPerRun))
-    const rowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
-    const batchTargets = []
-    for (const row of rowOrder) {
-      for (const col of colBatch) {
+  for (let i = 0; i < colTraversal.length; i += printChunkLines) {
+    const inventoryCols = colTraversal.slice(i, i + printChunkLines)
+    const inventoryRowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
+    const inventoryTargets = []
+    for (const row of inventoryRowOrder) {
+      for (const col of inventoryCols) {
         const target = byColRow.get(`${col}:${row}`)
-        if (target) batchTargets.push(target)
+        if (target) inventoryTargets.push(target)
       }
     }
-    const inventoryWindow = selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrder, config)
+    const inventoryWindow = selectInventoryPlanningTargetsFromPrintBatch(byColRow, inventoryCols, inventoryRowOrder, config)
 
     const lookaheadStart = Math.min(orderedTargets.length, resumeFrom + processedInRun)
-    console.log(`[NERV-INVENTORY-WINDOW] cols=${inventoryWindow.cols.join(',') || 'none'} targets=${inventoryWindow.targets.length}/${batchTargets.length} materials=${inventoryWindow.materials.length}/16 batchCols=${colBatch.join(',')}`)
+    console.log(`[NERV-INVENTORY-WINDOW] cols=${inventoryWindow.cols.join(',') || 'none'} targets=${inventoryWindow.targets.length}/${inventoryTargets.length} materials=${inventoryWindow.materials.length}/16 inventoryCols=${inventoryCols.join(',')} inventoryRows=${Math.max(1, toNumber(config.advanced?.inventoryRefillRows, 2))} rowWidth=${Math.max(1, toNumber(linesPerRun, 1))}`)
     saveProgress('printing', {
       state: 'inventory_restock',
       action: 'ensure-materials',
       lookaheadStart,
       inventoryTargets: inventoryWindow.targets.length,
       inventoryCols: inventoryWindow.cols.join(','),
-      colBatch: colBatch.join(',')
+      colBatch: inventoryCols.join(',')
     })
-    await ensureMaterialsForTargets(bot, config, inventoryWindow.targets, {
+    const materialsReady = await ensureMaterialsForTargets(bot, config, inventoryWindow.targets, {
       windowed: true,
       cols: inventoryWindow.cols,
-      materials: inventoryWindow.materials
+      materials: inventoryWindow.materials,
+      dumpWithoutRestock: true,
+      dumpAllUnneededBeforeRestock: true
     })
-    saveProgress('printing', {
-      state: 'printing_batch',
-      action: 'place-batch',
-      colBatch: colBatch.join(','),
-      batchIndex: Math.floor(i / Math.max(1, linesPerRun)) + 1
-    })
+    if (!materialsReady) {
+      console.log('[NERV-INVENTORY-BLOCKED] Could not clean/refill inventory for this window. Stopping before placement to avoid skips with residue items.')
+      return {
+        sourceType: input.sourceType,
+        sourcePath: input.sourcePath,
+        sourceName: input.sourceName,
+        didWork: true
+      }
+    }
 
-    if (printer.fastTraversalEnabled === true) {
-      const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'fixed').toLowerCase()
-      const result = scannerWorkloadMode === 'time'
-        ? await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide)
-        : await runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide)
-      placed += result.placed
-      already += result.already
-      skipped += result.skipped
-      processedInRun += batchTargets.length
-      if (scannerWorkloadMode === 'time') {
-        console.log(`[NERV-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
+    for (let j = 0; j < inventoryCols.length; j += Math.max(1, toNumber(linesPerRun, 1))) {
+      const colBatch = inventoryCols.slice(j, j + Math.max(1, toNumber(linesPerRun, 1)))
+      const rowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
+      const batchTargets = []
+      for (const row of rowOrder) {
+        for (const col of colBatch) {
+          const target = byColRow.get(`${col}:${row}`)
+          if (target) batchTargets.push(target)
+        }
+      }
+
+      saveProgress('printing', {
+        state: 'printing_batch',
+        action: 'place-batch',
+        colBatch: colBatch.join(','),
+        inventoryCols: inventoryCols.join(','),
+        batchIndex: Math.floor((i + j) / Math.max(1, toNumber(linesPerRun, 1))) + 1
+      })
+
+      if (printer.fastTraversalEnabled === true) {
+        const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'fixed').toLowerCase()
+        const result = scannerWorkloadMode === 'time'
+          ? await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide)
+          : await runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide)
+        placed += result.placed
+        already += result.already
+        skipped += result.skipped
+        processedInRun += batchTargets.length
+        if (scannerWorkloadMode === 'time') {
+          console.log(`[NERV-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
+        } else {
+          console.log(`[NERV-SCANNER-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing}`)
+        }
+        if (progressEnabled) {
+          saveProgress('printing', {
+            state: 'printing_batch',
+            action: 'batch-complete',
+            colBatch: colBatch.join(','),
+            placed,
+            already,
+            skipped
+          })
+        }
       } else {
-        console.log(`[NERV-SCANNER-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing}`)
-      }
-      if (progressEnabled) {
-        saveProgress('printing', {
-          state: 'printing_batch',
-          action: 'batch-complete',
-          colBatch: colBatch.join(','),
-          placed,
-          already,
-          skipped
-        })
-      }
-    } else {
-      const firstTarget = rowOrder
-        .map((row) => colBatch.map((col) => byColRow.get(`${col}:${row}`)).find(Boolean))
-        .find(Boolean)
+        const firstTarget = rowOrder
+          .map((row) => colBatch.map((col) => byColRow.get(`${col}:${row}`)).find(Boolean))
+          .find(Boolean)
 
-      if (firstTarget) {
-        const startGoal = new GoalNear(firstTarget.position.x, firstTarget.position.y, firstTarget.position.z, Math.max(1, placeRange - 1))
-        try {
-          await bot.pathfinder.goto(startGoal)
-        } catch (err) {
-          if (config.errorHandling?.logErrors !== false) {
-            console.log(`[MOVE-ERROR] ${firstTarget.position.x} ${firstTarget.position.y} ${firstTarget.position.z} -> ${err?.message || err}`)
-          }
-        }
-      }
-
-      for (let rowIndex = 0; rowIndex < rowOrder.length; rowIndex++) {
-        const row = rowOrder[rowIndex]
-        const rowTargets = colBatch
-          .map((col) => byColRow.get(`${col}:${row}`))
-          .filter(Boolean)
-
-        if (!rowTargets.length) continue
-
-        const rowAnchor = rowTargets[0]
-        const rowGoal = new GoalNear(rowAnchor.position.x, rowAnchor.position.y, rowAnchor.position.z, Math.max(1, placeRange - 1))
-
-        let shouldGotoRow = true
-        if (placeWhileSprinting) {
-          const dx = bot.entity.position.x - (rowAnchor.position.x + 0.5)
-          const dz = bot.entity.position.z - (rowAnchor.position.z + 0.5)
-          const distance2 = dx * dx + dz * dz
-          shouldGotoRow = distance2 > Math.pow(Math.max(1, placeRange - 0.5), 2)
-        }
-
-        if (shouldGotoRow) {
+        if (firstTarget) {
+          const startGoal = new GoalNear(firstTarget.position.x, firstTarget.position.y, firstTarget.position.z, Math.max(1, placeRange - 1))
           try {
-            await bot.pathfinder.goto(rowGoal)
+            await bot.pathfinder.goto(startGoal)
           } catch (err) {
-            skipped += rowTargets.length
             if (config.errorHandling?.logErrors !== false) {
-              console.log(`[MOVE-ERROR] ${rowAnchor.position.x} ${rowAnchor.position.y} ${rowAnchor.position.z} -> ${err?.message || err}`)
+              console.log(`[MOVE-ERROR] ${firstTarget.position.x} ${firstTarget.position.y} ${firstTarget.position.z} -> ${err?.message || err}`)
             }
-            continue
           }
         }
 
-        for (const target of rowTargets) {
-          try {
-            const result = await placeTarget(bot, config, target)
-            if (result.state === 'placed') {
-              placed += 1
-              if (config.advanced?.debugPrints) {
-                console.log(`[PLACE] ${target.blockName} at ${target.position.x} ${target.position.y} ${target.position.z}`)
+        for (let rowIndex = 0; rowIndex < rowOrder.length; rowIndex++) {
+          const row = rowOrder[rowIndex]
+          const rowTargets = colBatch
+            .map((col) => byColRow.get(`${col}:${row}`))
+            .filter(Boolean)
+
+          if (!rowTargets.length) continue
+
+          const rowAnchor = rowTargets[0]
+          const rowGoal = new GoalNear(rowAnchor.position.x, rowAnchor.position.y, rowAnchor.position.z, Math.max(1, placeRange - 1))
+
+          let shouldGotoRow = true
+          if (placeWhileSprinting) {
+            const dx = bot.entity.position.x - (rowAnchor.position.x + 0.5)
+            const dz = bot.entity.position.z - (rowAnchor.position.z + 0.5)
+            const distance2 = dx * dx + dz * dz
+            shouldGotoRow = distance2 > Math.pow(Math.max(1, placeRange - 0.5), 2)
+          }
+
+          if (shouldGotoRow) {
+            try {
+              await bot.pathfinder.goto(rowGoal)
+            } catch (err) {
+              skipped += rowTargets.length
+              if (config.errorHandling?.logErrors !== false) {
+                console.log(`[MOVE-ERROR] ${rowAnchor.position.x} ${rowAnchor.position.y} ${rowAnchor.position.z} -> ${err?.message || err}`)
               }
-            } else if (result.state === 'already') {
-              already += 1
-            } else {
+              continue
+            }
+          }
+
+          for (const target of rowTargets) {
+            try {
+              const result = await placeTarget(bot, config, target)
+              if (result.state === 'placed') {
+                placed += 1
+                if (config.advanced?.debugPrints) {
+                  console.log(`[PLACE] ${target.blockName} at ${target.position.x} ${target.position.y} ${target.position.z}`)
+                }
+              } else if (result.state === 'already') {
+                already += 1
+              } else {
+                skipped += 1
+                if (config.errorHandling?.logErrors !== false) {
+                  console.log(`[SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+                }
+              }
+            } catch (err) {
               skipped += 1
               if (config.errorHandling?.logErrors !== false) {
-                console.log(`[SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+                console.log(`[PLACE-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
               }
             }
-          } catch (err) {
-            skipped += 1
-            if (config.errorHandling?.logErrors !== false) {
-              console.log(`[PLACE-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+
+            processedInRun += 1
+            if (progressEnabled && (processedInRun % progressSaveEvery === 0 || resumeFrom + processedInRun >= orderedTargets.length)) {
+              saveProgress('printing', {
+                state: 'printing_batch',
+                action: 'target-progress',
+                placed,
+                already,
+                skipped
+              })
             }
           }
+        }
+      }
 
-          processedInRun += 1
-          if (progressEnabled && (processedInRun % progressSaveEvery === 0 || resumeFrom + processedInRun >= orderedTargets.length)) {
-            saveProgress('printing', {
-              state: 'printing_batch',
-              action: 'target-progress',
-              placed,
-              already,
-              skipped
-            })
+      // LineEnd: scan the completed movement row for errors
+      saveProgress('printing', {
+        state: 'printing_lineend_check',
+        action: 'verify-completed-batch',
+        colBatch: colBatch.join(',')
+      })
+      const Vec3_LineEnd = bot.entity.position.constructor
+      const errorListKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
+      for (const col of colBatch) {
+        for (const row of rowOrder) {
+          const target = byColRow.get(`${col}:${row}`)
+          if (!target) continue
+          const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+          if (errorListKeys.has(key)) continue
+          const actual = bot.blockAt(new Vec3_LineEnd(target.position.x, target.position.y, target.position.z))
+          if (actual?.name !== target.blockName) {
+            errorList.push(target)
+            if (config.errorHandling?.logErrors !== false) {
+              const reason = (!actual || actual.name === 'air') ? 'missing' : `wrong-${actual.name}`
+              console.log(`[LINEEND-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
+            }
           }
         }
       }
-    }
 
-    // LineEnd: scan the completed column batch for errors
-    saveProgress('printing', {
-      state: 'printing_lineend_check',
-      action: 'verify-completed-batch',
-      colBatch: colBatch.join(',')
-    })
-    const Vec3_LineEnd = bot.entity.position.constructor
-    const errorListKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
-    for (const col of colBatch) {
-      for (const row of rowOrder) {
-        const target = byColRow.get(`${col}:${row}`)
-        if (!target) continue
-        const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-        if (errorListKeys.has(key)) continue
-        const actual = bot.blockAt(new Vec3_LineEnd(target.position.x, target.position.y, target.position.z))
-        if (actual?.name !== target.blockName) {
-          errorList.push(target)
-          if (config.errorHandling?.logErrors !== false) {
-            const reason = (!actual || actual.name === 'air') ? 'missing' : `wrong-${actual.name}`
-            console.log(`[LINEEND-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
-          }
-        }
-      }
+      startOnNorthSide = !startOnNorthSide
     }
-
-    startOnNorthSide = !startOnNorthSide
   }
 
   console.log(`[DONE-SWEEP] placed=${placed} already=${already} skipped=${skipped} errors=${errorList.length}`)
@@ -4391,11 +4718,10 @@ function buildNervScannerCheckpoints(targets, config, maxGroupsOverride = null) 
   return checkpoints
 }
 
-function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processed = new Set()) {
+function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processed = new Set(), activeCols = null) {
   const printer = config.printer || {}
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
   const minPlaceDistance = Math.max(0, toNumber(printer.minPlaceDistance, 0.8))
-  const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const radius = Math.ceil(placeRange) + 1
   const Vec3 = bot.entity.position.constructor
   const baseX = Math.floor(bot.entity.position.x)
@@ -4408,10 +4734,10 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
     for (let dz = -radius; dz <= radius; dz += 1) {
       const x = baseX + dx
       const z = baseZ + dz
-      if (x > currentGoal.x + linesPerRun - 1 || x < currentGoal.x - 1) continue
 
       const target = targetByXZ.get(`${x}:${z}`)
       if (!target) continue
+      if (activeCols instanceof Set && !activeCols.has(target.col)) continue
       const key = `${target.position.x}:${target.position.y}:${target.position.z}`
       if (processed.has(key)) continue
 
