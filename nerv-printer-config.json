@@ -129,15 +129,16 @@
   "anchorTranslation": {
     "enabled": true,
     "sourceAnchor": {
-      "x": -450,
-      "y": 0,
-      "z": -962
+        "x": -706,
+        "y": -9,
+        "z": -962
     },
     "targetAnchor": {
-      "x": -450,
-      "y": 0,
+      "x": -706,
+      "y": -9,
       "z": -962
     }
+
   },
   "multiUser": {
     "enabled": false
