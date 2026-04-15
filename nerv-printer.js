@@ -7,7 +7,7 @@ const nbt = require('prismarine-nbt')
 const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder')
 
 const CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config.json')
-const IMPORTED_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'carpet-printer-config.json')
+const DEFAULT_IMPORTED_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'carpet-printer-config.json')
 const TEST_BOT_CONFIG_FILE = path.resolve(process.cwd(), 'config.test.json')
 const LOG_FILE = path.resolve(process.cwd(), 'logs', 'nerv-printer.log')
 
@@ -626,9 +626,23 @@ function mergeUserConfig(base, loaded, options = {}) {
 function loadConfig() {
   const base = createDefaultConfig()
 
-  if (fs.existsSync(IMPORTED_CONFIG_FILE)) {
-    const imported = readJson(IMPORTED_CONFIG_FILE)
-    console.log('[CONFIG] Loaded nerv-printer-config/_configs/carpet-printer-config.json')
+  // Try to get the machineConfigFile path from the main config
+  let machineConfigFilePath = DEFAULT_IMPORTED_CONFIG_FILE
+  if (fs.existsSync(CONFIG_FILE)) {
+    try {
+      const mainConfig = readJson(CONFIG_FILE)
+      const customMachineConfigFile = mainConfig?.files?.machineConfigFile
+      if (customMachineConfigFile) {
+        machineConfigFilePath = path.resolve(process.cwd(), customMachineConfigFile)
+      }
+    } catch (err) {
+      // If reading fails, use default
+    }
+  }
+
+  if (fs.existsSync(machineConfigFilePath)) {
+    const imported = readJson(machineConfigFilePath)
+    console.log(`[CONFIG] Loaded ${path.relative(process.cwd(), machineConfigFilePath)}`)
     const importedConfig = importNervFolderConfig(imported, base)
 
     if (fs.existsSync(CONFIG_FILE)) {
@@ -636,13 +650,13 @@ function loadConfig() {
       const config = mergeUserConfig(importedConfig, loaded, { applyMachine: false, allowMapCornerOnly: false })
       applyAnchorTranslation(config)
       console.log('[CONFIG] Loaded nerv-printer-config.json (non-machine overrides only).')
-      console.log('[CONFIG] Machine/platform/chest settings remain sourced from carpet-printer-config.json.')
+      console.log('[CONFIG] Machine/platform/chest settings remain sourced from machine config file.')
       return config
     }
 
     const config = importedConfig
     applyAnchorTranslation(config)
-    console.log('[CONFIG] Using imported config only (no local overrides found).')
+    console.log('[CONFIG] Using machine config only (no local overrides found).')
     return config
   }
 
@@ -659,7 +673,7 @@ function loadConfig() {
     return config
   }
 
-  throw new Error('Missing config. Expected nerv-printer-config.json or nerv-printer-config/_configs/carpet-printer-config.json')
+  throw new Error(`Missing config. Expected nerv-printer-config.json or the machineConfigFile path specified in files.machineConfigFile`)
 }
 
 function axisOffset(axis, amount) {

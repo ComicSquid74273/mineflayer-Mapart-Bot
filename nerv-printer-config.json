@@ -18,7 +18,7 @@
     "inputMode": "nbt",
     "planFile": "./mapart-plan.json",
     "machineConfigProfile": "carpet",
-    "machineConfigFile": "./nerv-printer-config/_configs/carpet-printer-config.json",
+    "machineConfigFile": "./nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json",
     "resumeProgress": true,
     "progressFile": "./logs/nerv-printer-progress.json",
     "progressSaveEvery": 10,
