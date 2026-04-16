@@ -136,6 +136,10 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function placementNoiseLogsEnabled(config) {
+  return config?.advanced?.placementNoiseLogs !== false
+}
+
 function readOptionalJson(filePath) {
   if (!fs.existsSync(filePath)) return null
   try {
@@ -449,6 +453,7 @@ function createDefaultConfig() {
       scannerRetryCooldownMs: 30,
       scannerPreSwapDelayMs: 0,
       scannerPostSwapDelayMs: 0,
+      placementNoiseLogs: true,
       scannerWorkloadMode: 'fixed',
       inventoryCycleTestWaitAfterMs: 5000,
       inventoryCycleTestRows: 2,
@@ -3279,6 +3284,11 @@ function resolveTargetPlacementPosition(bot, target, config) {
   return { targetPos, shiftedDown }
 }
 
+function requiresSneakPlacementSupport(block) {
+  const name = String(block?.name || '')
+  return name === 'dispenser' || name === 'dropper'
+}
+
 async function placeTarget(bot, config, target, isRepairPass = false) {
   await waitForPlatformReady(bot, config, 'before-place')
 
@@ -3385,7 +3395,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
 
   for (const attempt of placeAttempts) {
     const sneakOnDispenserOnly = config.advanced?.sneakOnDispenserOnly !== false
-    const shouldSneak = sneakOnDispenserOnly ? attempt?.block?.name === 'dispenser' : true
+    const shouldSneak = sneakOnDispenserOnly ? requiresSneakPlacementSupport(attempt?.block) : true
     try {
       if (shouldSneak) {
         bot.setControlState('sneak', true)
@@ -3469,13 +3479,13 @@ async function repairTargets(bot, config, targets, placeRange) {
       else if (result.state === 'already') already += 1
       else {
         skipped += 1
-        if (config.errorHandling?.logErrors !== false) {
+        if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
           console.log(`[REPAIR-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
         }
       }
     } catch (err) {
       skipped += 1
-      if (config.errorHandling?.logErrors !== false) {
+      if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
         console.log(`[REPAIR-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
       }
     }
@@ -3572,7 +3582,9 @@ function logRepairMismatchWarningForTargets(bot, config, targets, totalTargets, 
 
   const summary = summarizeRepairMismatchReasons(bot, config, targets)
   const wrongRatio = summary.total > 0 ? summary.occupied / summary.total : 0
-  console.log(`[${label}-WARN-DETAIL] missing=${summary.missing} occupied=${summary.occupied} unloaded=${summary.unloaded} wrongRatio=${(wrongRatio * 100).toFixed(1)}%; continuing repair.`)
+  if (placementNoiseLogsEnabled(config)) {
+    console.log(`[${label}-WARN-DETAIL] missing=${summary.missing} occupied=${summary.occupied} unloaded=${summary.unloaded} wrongRatio=${(wrongRatio * 100).toFixed(1)}%; continuing repair.`)
+  }
   return true
 }
 
@@ -3672,7 +3684,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
     else if (result.state === 'already') already += 1
     else {
       skipped += 1
-      if (config.errorHandling?.logErrors !== false) {
+      if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
         console.log(`[${prefix}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
       }
     }
@@ -3766,7 +3778,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
         if (failures >= 2) {
           processed.add(targetKey(target))
           skipped += 1
-          if (config.errorHandling?.logErrors !== false) {
+          if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
             console.log(`[${label}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (move-failed)`)
           }
         }
@@ -3959,7 +3971,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
           else if (result.state === 'already') already += 1
           else {
             skipped += 1
-            if (config.errorHandling?.logErrors !== false) {
+            if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
               console.log(`[FAST-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
             }
           }
@@ -4073,7 +4085,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
             else if (result.state === 'already') already += 1
             else {
               skipped += 1
-              if (config.errorHandling?.logErrors !== false) {
+              if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
               }
               if (allowEmergencyRestock && String(result.reason || '').startsWith('missing-item-')) {
@@ -4223,7 +4235,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               pendingUntil.delete(key)
             } else {
               skipped += 1
-              if (config.errorHandling?.logErrors !== false) {
+              if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
               }
 
@@ -4489,7 +4501,7 @@ async function runPrint(bot, config) {
       const actual = bot.blockAt(new Vec3Verify(target.position.x, target.position.y, target.position.z))
       if (actual?.name !== target.blockName) {
         errorList.push(target)
-        if (config.errorHandling?.logErrors !== false) {
+        if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
           const reason = (!actual || actual.name === 'air') ? 'missing' : `wrong-${actual.name}`
           console.log(`[LINEEND-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
         }
@@ -4824,9 +4836,9 @@ async function runPrint(bot, config) {
         already += result.already
         skipped += result.skipped
         processedInRun += batchTargets.length
-        if (scannerWorkloadMode === 'time') {
+        if (placementNoiseLogsEnabled(config) && scannerWorkloadMode === 'time') {
           console.log(`[NERV-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
-        } else {
+        } else if (placementNoiseLogsEnabled(config)) {
           console.log(`[NERV-SCANNER-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing}`)
         }
         if (progressEnabled) {
@@ -4898,7 +4910,7 @@ async function runPrint(bot, config) {
                 already += 1
               } else {
                 skipped += 1
-                if (config.errorHandling?.logErrors !== false) {
+                if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                   console.log(`[SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
                 }
               }
@@ -6120,7 +6132,7 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       if (distance > placeRange || distance <= minPlaceDistance) continue
 
       const actual = bot.blockAt(targetPos)
-      if (actual && actual.name !== 'air') continue
+      if (actual && actual.name !== 'air' && !String(actual.name).endsWith('_carpet')) continue
 
       if (distance < bestDistance) {
         best = target
@@ -6133,74 +6145,7 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
 }
 
 async function placeNervScannerTarget(bot, config, target) {
-  const advanced = config.advanced || {}
-  const Vec3 = bot.entity.position.constructor
-  const targetPos = new Vec3(target.position.x, target.position.y, target.position.z)
-  const blockAtTarget = bot.blockAt(targetPos)
-
-  if (blockAtTarget?.name === target.blockName) {
-    return { state: 'already' }
-  }
-
-  if (blockAtTarget && blockAtTarget.name !== 'air') {
-    return { state: 'skip', reason: `occupied-by-${blockAtTarget.name}` }
-  }
-
-  const support = bot.blockAt(targetPos.offset(0, -1, 0))
-  if (!support || support.name === 'air') {
-    return { state: 'skip', reason: 'missing-support' }
-  }
-
-  if (String(bot.heldItem?.name || '') !== target.blockName) {
-    const equipped = await equipMaterial(bot, config, target.blockName)
-    if (!equipped) {
-      return { state: 'skip', reason: `missing-item-${target.blockName}` }
-    }
-    await delay(toNumber(advanced.scannerPreSwapDelayMs, 0))
-    await delay(toNumber(advanced.scannerPostSwapDelayMs, 0))
-  }
-
-  if (String(bot.heldItem?.name || '') !== target.blockName) {
-    const equipped = await equipMaterial(bot, config, target.blockName)
-    if (!equipped || String(bot.heldItem?.name || '') !== target.blockName) {
-      return { state: 'skip', reason: `missing-item-${target.blockName}` }
-    }
-  }
-
-  const sneakOnDispenserOnly = config.advanced?.sneakOnDispenserOnly !== false
-  const shouldSneak = sneakOnDispenserOnly ? support.name === 'dispenser' : true
-  let lastErr = null
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    try {
-      if (shouldSneak) {
-        bot.setControlState('sneak', true)
-      }
-
-      if (typeof bot._genericPlace === 'function') {
-        await bot._genericPlace(support, new Vec3(0, 1, 0), {
-          swingArm: 'right',
-          forceLook: 'ignore'
-        })
-      } else {
-        await bot.placeBlock(support, new Vec3(0, 1, 0))
-      }
-      return { state: 'placed' }
-    } catch (err) {
-      lastErr = err
-      const errMsg = String(err?.message || err).toLowerCase()
-      if (!errMsg.includes('must be holding an item') || attempt >= 2) {
-        throw err
-      }
-      await equipMaterial(bot, config, target.blockName)
-      await delay(toNumber(advanced.scannerPostSwapDelayMs, 0))
-    } finally {
-      if (shouldSneak) {
-        bot.setControlState('sneak', false)
-      }
-    }
-  }
-
-  throw lastErr || new Error('scanner placement failed')
+  return await placeTarget(bot, config, target, 'noWait')
 }
 
 async function runNervScannerTest(bot, config) {
