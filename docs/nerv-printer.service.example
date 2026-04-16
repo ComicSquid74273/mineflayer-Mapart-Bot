@@ -1,0 +1,16 @@
+[Unit]
+Description=Mapart Bot Nerv Printer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mapart-bot
+ExecStart=/usr/bin/node /home/ubuntu/mapart-bot/nerv-printer.js --connection=6b6t --disable-logs
+Restart=always
+RestartSec=15
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

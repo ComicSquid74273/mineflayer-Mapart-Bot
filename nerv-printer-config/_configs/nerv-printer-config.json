@@ -104,7 +104,7 @@
               {
                 "name": "lobby-2",
                 "type": "disk",
-                "action": "portal",
+                "action": "wait-transfer",
                 "centerX": 1000,
                 "centerZ": 1000,
                 "radius": 192

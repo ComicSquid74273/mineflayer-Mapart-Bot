@@ -798,6 +798,7 @@ function importNervFolderConfig(imported, baseConfig) {
 function mergeUserConfig(base, loaded, options = {}) {
   const applyMachine = options.applyMachine !== false
   const allowMapCornerOnly = options.allowMapCornerOnly === true
+  const allowMachineNodeOverrides = options.allowMachineNodeOverrides === true
 
   const merged = {
     ...base,
@@ -830,6 +831,18 @@ function mergeUserConfig(base, loaded, options = {}) {
       dumpStations: Array.isArray(loaded.machine?.dumpStations)
         ? loaded.machine.dumpStations
         : (base.machine.dumpStations || []),
+      cartographyTable: { ...base.machine.cartographyTable, ...(loaded.machine?.cartographyTable || {}) },
+      finishedMapChest: { ...base.machine.finishedMapChest, ...(loaded.machine?.finishedMapChest || {}) },
+      resetBlock: { ...base.machine.resetBlock, ...(loaded.machine?.resetBlock || {}) },
+      xpBottleChest: { ...base.machine.xpBottleChest, ...(loaded.machine?.xpBottleChest || {}) },
+      xpButton: { ...base.machine.xpButton, ...(loaded.machine?.xpButton || {}) },
+      xpDispenser: { ...base.machine.xpDispenser, ...(loaded.machine?.xpDispenser || {}) },
+      anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) }
+    }
+  } else if (allowMachineNodeOverrides) {
+    merged.machine = {
+      ...base.machine,
+      dumpStation: { ...base.machine.dumpStation, ...(loaded.machine?.dumpStation || {}) },
       cartographyTable: { ...base.machine.cartographyTable, ...(loaded.machine?.cartographyTable || {}) },
       finishedMapChest: { ...base.machine.finishedMapChest, ...(loaded.machine?.finishedMapChest || {}) },
       resetBlock: { ...base.machine.resetBlock, ...(loaded.machine?.resetBlock || {}) },
@@ -950,11 +963,11 @@ function loadConfig() {
 
     if (hasUserConfig) {
       const loaded = readJson(userConfigPath)
-      const config = mergeUserConfig(importedConfig, loaded, { applyMachine: false, allowMapCornerOnly: false })
+      const config = mergeUserConfig(importedConfig, loaded, { applyMachine: false, allowMapCornerOnly: false, allowMachineNodeOverrides: true })
       applyAnchorTranslation(config)
       applyConnectionProfile(config)
-      console.log(`[CONFIG] Loaded ${path.relative(process.cwd(), userConfigPath)} (non-machine overrides only).`)
-      console.log('[CONFIG] Machine/platform/chest settings remain sourced from machine config file.')
+      console.log(`[CONFIG] Loaded ${path.relative(process.cwd(), userConfigPath)} (runtime overrides plus explicit machine node overrides).`)
+      console.log('[CONFIG] Machine layout remains sourced from machine config file unless overridden in local machine nodes.')
       return config
     }
 
@@ -7249,6 +7262,10 @@ function getRequiredSpawnCount(config) {
   return toNumber(config.bot?.requiredSpawnCountBeforeStartup, is6b6tConfig(config) ? 3 : 1)
 }
 
+function getTransferWaitReconnectMs(config) {
+  return Math.max(1000, toNumber(config.bot?.requiredSpawnFallbackSeconds, 25) * 1000)
+}
+
 function getPlatformBounds(config) {
   const mapCorner = config.machine?.mapCorner
   if (!mapCorner || !Number.isFinite(mapCorner.x) || !Number.isFinite(mapCorner.z)) {
@@ -7534,6 +7551,49 @@ function isTransferLobbyPosition(pos, config) {
   return getTransferLobbyRegion(pos, config) != null
 }
 
+function getLobbyPortalAutoTrigger(pos, config) {
+  const portalConfig = getLobbyPortalConfig(config)
+  if (!portalConfig?.enabled) return null
+  if (!isPositionUsable(pos)) return null
+  if (isPositionInsidePlatformBounds(pos, config)) return null
+
+  const transferRegion = getTransferLobbyRegion(pos, config)
+  if (transferRegion) {
+    return {
+      hold: true,
+      source: `transfer-region:${transferRegion.name}`,
+      region: transferRegion
+    }
+  }
+
+  if (isInsideLoginPortalZone(pos, portalConfig)) {
+    return {
+      hold: false,
+      source: 'login-portal-zone',
+      region: getMatchedLobbyRegion(pos, portalConfig)
+    }
+  }
+
+  if (isInsideLobbySpawnDisk(pos, portalConfig)) {
+    return {
+      hold: false,
+      source: 'spawn-disk',
+      region: getMatchedLobbyRegion(pos, portalConfig)
+    }
+  }
+
+  const region = getMatchedLobbyRegion(pos, portalConfig)
+  if (region && region.action !== 'wait-transfer') {
+    return {
+      hold: false,
+      source: `region:${region.name}`,
+      region
+    }
+  }
+
+  return null
+}
+
 function sanitizeSpatialName(value) {
   return String(value || 'bot').replace(/[^a-z0-9._-]+/gi, '_').replace(/^_+|_+$/g, '') || 'bot'
 }
@@ -7555,6 +7615,28 @@ function getSpatialAwarenessFile(config) {
   const connection = sanitizeSpatialName(config.connection?.active || config.connection?.selected || 'local')
   const username = sanitizeSpatialName(config.bot?.username || 'MapartBot')
   return path.resolve(process.cwd(), 'spatial-awareness', `${connection}-${username}.json`)
+}
+
+function readSavedSpatialSnapshot(config) {
+  return readOptionalJson(getSpatialAwarenessFile(config))
+}
+
+function getSpatialReferencePosition(bot, config, reason = 'spatial-reference') {
+  let pos = bot?.entity?.position
+  if (!isPositionMissing(pos)) return pos
+  if (rescueBotPositionFromPlatformCache(bot, config, reason)) {
+    pos = bot?.entity?.position
+    if (!isPositionMissing(pos)) return pos
+  }
+  const cached = bot?.__nervLastPlatformPosition
+  if (cached && Number.isFinite(cached.x) && Number.isFinite(cached.y) && Number.isFinite(cached.z)) {
+    return {
+      x: Number(cached.x),
+      y: Number(cached.y),
+      z: Number(cached.z)
+    }
+  }
+  return pos
 }
 
 function classifySpatialPosition(pos, config) {
@@ -7914,7 +7996,11 @@ async function walkSpatialCoverage(bot, config) {
 
   for (let i = 0; i < waypoints.length && isBotSessionLive(bot); i += 1) {
     const waypoint = waypoints[i]
-    const classification = classifySpatialPosition(bot?.entity?.position, config)
+    let currentPos = getSpatialReferencePosition(bot, config, `spatial-coverage:${i + 1}`)
+    if (isPositionMissing(currentPos) && seedBotPositionFromPlatform(bot, config, `spatial-coverage:${i + 1}`)) {
+      currentPos = bot?.entity?.position
+    }
+    const classification = classifySpatialPosition(currentPos, config)
     if (classification.state === 'transfer-lobby' || classification.state === 'missing-position') {
       console.log(`[SPATIAL-COVERAGE-WARN] pausing coverage walk because bot state=${classification.state}; waypoint=${i + 1}/${waypoints.length}`)
       break
@@ -7961,15 +8047,21 @@ function verifySpatialLandmarks(bot, config, anchor = getSpatialAnchor(config)) 
 }
 
 function buildSpatialSnapshot(bot, config) {
-  const position = roundPosition(bot?.entity?.position)
+  const savedSnapshot = readSavedSpatialSnapshot(config)
+  const referencePosition = getSpatialReferencePosition(bot, config, 'spatial-snapshot')
+  const position = roundPosition(referencePosition)
   const bounds = getPlatformBounds(config)
   const anchor = getSpatialAnchor(config)
-  const classification = classifySpatialPosition(bot?.entity?.position, config)
+  const classification = classifySpatialPosition(referencePosition, config)
   const landmarks = verifySpatialLandmarks(bot, config, anchor)
+  const liveScan = finalizeSpatialAggregate(bot.__nervSpatialAggregate, anchor) || scanSpatialBlocks(bot, config, anchor)
+  const shouldReuseSavedScan = !!savedSnapshot?.scan && ((toNumber(liveScan?.waypointsVisited, 0) <= 0 && toNumber(liveScan?.scanned, 0) <= 0) || hasCliFlag('--spatial-reuse-last'))
+  const scan = shouldReuseSavedScan ? savedSnapshot.scan : liveScan
   const requiredFailures = landmarks.filter((entry) => entry.required && entry.enabled !== false && entry.status === 'mismatch')
   const requiredPending = landmarks.filter((entry) => entry.required && entry.enabled !== false && entry.status === 'pending-unloaded')
   const warnings = []
   if (!classification.platform) warnings.push(`not-on-platform:${classification.state}`)
+  if (shouldReuseSavedScan) warnings.push(`reused-saved-spatial-scan:${savedSnapshot.createdAt || 'unknown'}`)
   if (config.machine?.xpDispenser?.enabled === true) {
     warnings.push('xpBottleChest ignored; xpDispenser is configured as XP source')
   }
@@ -7996,7 +8088,8 @@ function buildSpatialSnapshot(bot, config) {
     },
     coverageBounds: getSpatialCoverageBounds(config),
     relativeCoverageBounds: relativeBoundsToAnchor(getSpatialCoverageBounds(config), anchor),
-    scan: finalizeSpatialAggregate(bot.__nervSpatialAggregate, anchor) || scanSpatialBlocks(bot, config, anchor),
+    scan,
+    reusedSavedScan: shouldReuseSavedScan,
     landmarks,
     summary: {
       ok: classification.platform === true && requiredFailures.length === 0 && requiredPending.length === 0,
@@ -8286,6 +8379,47 @@ function installPlatformSafety(bot, config) {
   }
 }
 
+function formatCoordTriplet(pos) {
+  if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) return 'disabled'
+  return `${Number(pos.x)},${Number(pos.y)},${Number(pos.z)}`
+}
+
+function logConfiguredCoordinateSummary(config) {
+  const bounds = getPlatformBounds(config)
+  const portalConfig = getLobbyPortalConfig(config)
+  const machine = config.machine || {}
+
+  if (bounds) {
+    console.log(`[COORDS] platform bounds x=${Math.round(bounds.minX)}..${Math.round(bounds.maxX)} z=${Math.round(bounds.minZ)}..${Math.round(bounds.maxZ)} mapCorner=${formatCoordTriplet(machine.mapCorner)}`)
+  }
+
+  if (portalConfig?.enabled) {
+    const regions = getConfiguredLobbyRegions(portalConfig)
+    if (regions.length) {
+      for (const region of regions) {
+        const type = String(region.type || 'disk').toLowerCase()
+        if (type === 'box') {
+          console.log(`[COORDS] lobby region ${region.name || 'unnamed'} type=box action=${String(region.action || 'none').toLowerCase()} center=${toNumber(region.x, region.centerX)},${toNumber(region.y, 0)},${toNumber(region.z, region.centerZ)} radius=${toNumber(region.radius, 0)}`)
+        } else {
+          console.log(`[COORDS] lobby region ${region.name || 'unnamed'} type=disk action=${String(region.action || 'none').toLowerCase()} center=${toNumber(region.centerX, region.x)},*,${toNumber(region.centerZ, region.z)} radius=${toNumber(region.radius, 0)}`)
+        }
+      }
+    }
+
+    const spawn = portalConfig.spawnDisk || {}
+    console.log(`[COORDS] spawnDisk enabled=${spawn.enabled !== false} center=${toNumber(spawn.centerX, 0)},*,${toNumber(spawn.centerZ, 0)} radius=${toNumber(spawn.radius, 0)} waypoint=${formatCoordTriplet(spawn.waypoint)} portal=${formatCoordTriplet(spawn.portal)}`)
+
+    const login = portalConfig.loginPortal || {}
+    console.log(`[COORDS] loginPortal enabled=${login.enabled !== false} center=${toNumber(login.x, 0)},${toNumber(login.y, 0)},${toNumber(login.z, 0)} radius=${toNumber(login.radius, 0)}`)
+  }
+
+  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpButton', 'xpDispenser', 'anvil']) {
+    const node = machine[key]
+    if (!node) continue
+    console.log(`[COORDS] machine ${key} enabled=${node.enabled !== false} position=${formatCoordTriplet(node.position)} access=${formatCoordTriplet(node.accessPosition)}`)
+  }
+}
+
 function logStartupSummary(config, reconnect) {
   const bot = config.bot || {}
   const files = config.files || {}
@@ -8307,6 +8441,7 @@ function logStartupSummary(config, reconnect) {
   console.log(
     `[STARTUP] anchor enabled=${anchor.enabled !== false} source=(${toNumber(anchor.sourceAnchor?.x, 0)},${toNumber(anchor.sourceAnchor?.y, 0)},${toNumber(anchor.sourceAnchor?.z, 0)}) target=(${toNumber(anchor.targetAnchor?.x, 0)},${toNumber(anchor.targetAnchor?.y, 0)},${toNumber(anchor.targetAnchor?.z, 0)}) delta=(${toNumber(delta.x, 0)},${toNumber(delta.y, 0)},${toNumber(delta.z, 0)})`
   )
+  logConfiguredCoordinateSummary(config)
 }
 
 function runSingleSession(config, sessionNumber) {
@@ -8391,7 +8526,9 @@ function runSingleSession(config, sessionNumber) {
       const reqSpawn = getRequiredSpawnCount(config)
       const triggerLabel = trigger === 'fallback'
         ? `Fallback startup after ${spawnedCount}/${reqSpawn} spawn event(s).`
-        : `Threshold reached (${spawnedCount}/${reqSpawn}).`
+        : (trigger === 'zone-auto'
+            ? `Auto-triggered from lobby portal zone at ${spawnedCount}/${reqSpawn} spawn event(s).`
+            : `Threshold reached (${spawnedCount}/${reqSpawn}).`)
       console.log(`[SPAWN] ${triggerLabel} Delaying startup...`)
 
       const printer = config.printer || {}
@@ -8400,8 +8537,10 @@ function runSingleSession(config, sessionNumber) {
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 60)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 0)) * 2
       const waitForPlatformPosition = config.bot?.waitForPlatformPositionOnSpawn !== false && getPlatformBounds(config) != null
+      const transferReconnectAttempts = Math.max(1, Math.floor(getTransferWaitReconnectMs(config) / 500))
       let attempts = 0
       let missingPositionAttempts = 0
+      let transferWaitAttempts = 0
       let lobbyPortalAttempts = 0
       const maxLobbyPortalRuns = Math.max(1, toNumber(getLobbyPortalConfig(config)?.maxSessionRuns, 2))
       while (attempts < maxAttempts) {
@@ -8419,6 +8558,9 @@ function runSingleSession(config, sessionNumber) {
           missingPositionAttempts = 0
         }
 
+        const transferRegion = getTransferLobbyRegion(p, config)
+        transferWaitAttempts = transferRegion ? (transferWaitAttempts + 1) : 0
+
         if (isPositionUsable(p) && (!waitForPlatformPosition || isPositionInsidePlatformBounds(p, config))) {
           break
         }
@@ -8432,6 +8574,14 @@ function runSingleSession(config, sessionNumber) {
           console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of waiting idle.`)
           try { bot.quit('spawn-position-missing') } catch { }
           settle('spawn-position-missing')
+          return
+        }
+
+        if (transferWaitAttempts >= transferReconnectAttempts) {
+          lastErrorText = `transfer zone wait exceeded ${Math.round(transferWaitAttempts / 2)}s`
+          console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of fallback startup.`)
+          try { bot.quit('transfer-zone-timeout') } catch { }
+          settle('transfer-zone-timeout')
           return
         }
 
@@ -8540,11 +8690,24 @@ function runSingleSession(config, sessionNumber) {
       if (printerStarted || startupPending) return
 
       const reqSpawn = getRequiredSpawnCount(config)
+      const autoTrigger = getLobbyPortalAutoTrigger(bot?.entity?.position, config)
+      if (autoTrigger && !autoTrigger.hold) {
+        console.log(`[SPAWN] Auto-triggering startup from ${autoTrigger.source} at ${spawnedCount}/${reqSpawn} spawn event(s).`)
+        await startAfterSpawn('zone-auto')
+        return
+      }
       if (spawnedCount < reqSpawn) {
         console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
         if (!spawnFallbackTimer) {
-          const fallbackMs = Math.max(1000, toNumber(config.bot?.requiredSpawnFallbackSeconds, 25) * 1000)
+          const fallbackMs = getTransferWaitReconnectMs(config)
           spawnFallbackTimer = setTimeout(() => {
+            if (autoTrigger?.hold) {
+              lastErrorText = `transfer zone wait exceeded ${Math.round(fallbackMs / 1000)}s before spawn gate`
+              console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of fallback startup.`)
+              try { bot.quit('transfer-zone-timeout') } catch { }
+              settle('transfer-zone-timeout')
+              return
+            }
             void startAfterSpawn('fallback')
           }, fallbackMs)
           spawnFallbackTimer.unref?.()
@@ -8757,13 +8920,20 @@ function runSpatialAwarenessTestSession(config) {
       }
       const triggerText = trigger === 'fallback'
         ? `Fallback after ${spawnedCount}/${reqSpawn} spawn event(s).`
-        : `Spawn gate reached (${spawnedCount}/${reqSpawn}).`
+        : (trigger === 'zone-auto'
+            ? `Auto-triggered from lobby portal zone at ${spawnedCount}/${reqSpawn} spawn event(s).`
+            : `Spawn gate reached (${spawnedCount}/${reqSpawn}).`)
       console.log(`[SPATIAL] ${triggerText} Waiting for final platform; printer will not start.`)
 
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 180)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 45)) * 2
+      const waitForPlatformPosition = config.bot?.waitForPlatformPositionOnSpawn !== false && getPlatformBounds(config) != null
+      const transferReconnectAttempts = Math.max(1, Math.floor(getTransferWaitReconnectMs(config) / 500))
+      const maxLobbyPortalRuns = Math.max(1, toNumber(getLobbyPortalConfig(config)?.maxSessionRuns, 2))
       let attempts = 0
       let missingAttempts = 0
+      let transferWaitAttempts = 0
+      let lobbyPortalAttempts = 0
       while (!settled && isBotSessionLive(bot) && attempts < maxAttempts) {
         let pos = bot?.entity?.position
         recordPlatformPosition(pos, 'spatial-wait')
@@ -8773,6 +8943,7 @@ function runSpatialAwarenessTestSession(config) {
         const classification = classifySpatialPosition(pos, config)
         if (classification.state === 'missing-position') missingAttempts += 1
         else missingAttempts = 0
+        transferWaitAttempts = classification.state === 'transfer-lobby' ? (transferWaitAttempts + 1) : 0
 
         if (attempts % 6 === 0) {
           const region = classification.region ? ` region=${classification.region.name}${classification.region.action ? ` action=${classification.region.action}` : ''}` : ''
@@ -8797,8 +8968,52 @@ function runSpatialAwarenessTestSession(config) {
           return
         }
 
+        if (transferWaitAttempts >= transferReconnectAttempts) {
+          console.log(`[SPATIAL-RECONNECT] transfer zone wait exceeded ${Math.round(transferWaitAttempts / 2)}s; ending test so reconnect/rotation can handle it.`)
+          finishAndQuit({ endReason: 'transfer-zone-timeout' })
+          return
+        }
+
+        if (waitForPlatformPosition && isLobbyPortalEnabled(config) && classification.state !== 'missing-position' && classification.platform !== true && lobbyPortalAttempts < maxLobbyPortalRuns) {
+          if (classification.state === 'transfer-lobby') {
+            await delay(500)
+            attempts += 1
+            continue
+          }
+
+          lobbyPortalAttempts += 1
+          console.log(`[SPATIAL-PORTAL] Outside platform during spatial test; trying lobby portal automation (${lobbyPortalAttempts}/${maxLobbyPortalRuns}).`)
+          try {
+            const attempted = await runLobbyPortalAutomation(bot, config)
+            if (attempted) {
+              attempts = 0
+              await delay(500)
+              continue
+            }
+          } catch (err) {
+            console.log(`[SPATIAL-PORTAL-WARN] Lobby portal automation failed: ${err?.message || err}`)
+          }
+        }
+
         await delay(500)
         attempts += 1
+      }
+
+      if (!settled && isBotSessionLive(bot)) {
+        if (!isPositionUsable(bot?.entity?.position)) {
+          if (!tryRescuePositionFromCache('spatial-timeout')) {
+            seedBotPositionFromPlatform(bot, config, 'spatial-timeout')
+          }
+        }
+
+        const { snapshot, filePath } = saveSnapshot()
+        finishAndQuit({
+          success: snapshot.summary.ok,
+          endReason: settled ? 'settled' : 'spatial-timeout',
+          file: filePath,
+          summary: snapshot.summary
+        })
+        return
       }
 
       finishAndQuit({ endReason: settled ? 'settled' : 'spatial-timeout' })
@@ -8806,11 +9021,22 @@ function runSpatialAwarenessTestSession(config) {
 
     bot.on('spawn', () => {
       spawnedCount += 1
+      const autoTrigger = getLobbyPortalAutoTrigger(bot?.entity?.position, config)
+      if (autoTrigger && !autoTrigger.hold) {
+        console.log(`[SPATIAL] Auto-triggering spatial wait from ${autoTrigger.source} at ${spawnedCount}/${reqSpawn} spawn event(s).`)
+        void startSpatialWait('zone-auto')
+        return
+      }
       if (spawnedCount < reqSpawn) {
         console.log(`[SPATIAL] spawn event ${spawnedCount}/${reqSpawn}; waiting for backend/world transfer.`)
         if (!spawnFallbackTimer) {
-          const fallbackMs = Math.max(1000, toNumber(config.bot?.requiredSpawnFallbackSeconds, 25) * 1000)
+          const fallbackMs = getTransferWaitReconnectMs(config)
           spawnFallbackTimer = setTimeout(() => {
+            if (autoTrigger?.hold) {
+              console.log(`[SPATIAL-RECONNECT] transfer zone wait exceeded ${Math.round(fallbackMs / 1000)}s before spawn gate; ending test.`)
+              finishAndQuit({ endReason: 'transfer-zone-timeout' })
+              return
+            }
             void startSpatialWait('fallback')
           }, fallbackMs)
           spawnFallbackTimer.unref?.()
@@ -8996,13 +9222,17 @@ function run6b6tLobbyTestSession(config, label) {
       const reqSpawn = getRequiredSpawnCount(config)
       const triggerLabel = trigger === 'fallback'
         ? `Fallback startup after ${spawnedCount}/${reqSpawn} spawn event(s).`
-        : `Threshold reached (${spawnedCount}/${reqSpawn}).`
+        : (trigger === 'zone-auto'
+            ? `Auto-triggered from lobby portal zone at ${spawnedCount}/${reqSpawn} spawn event(s).`
+            : `Threshold reached (${spawnedCount}/${reqSpawn}).`)
       console.log(`[TEST-6B6T] ${label}: ${triggerLabel} Waiting for final destination only; printer will not start.`)
 
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 180)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 45)) * 2
+      const transferReconnectAttempts = Math.max(1, Math.floor(getTransferWaitReconnectMs(config) / 500))
       let attempts = 0
       let missingPositionAttempts = 0
+      let transferWaitAttempts = 0
       let lobbyPortalAttempts = 0
       const maxLobbyPortalRuns = Math.max(1, toNumber(getLobbyPortalConfig(config)?.maxSessionRuns, 2))
 
@@ -9015,6 +9245,8 @@ function run6b6tLobbyTestSession(config, label) {
         const positionMissing = isPositionMissing(pos)
         if (positionMissing) missingPositionAttempts += 1
         else missingPositionAttempts = 0
+        const transferRegion = getTransferLobbyRegion(pos, config)
+        transferWaitAttempts = transferRegion ? (transferWaitAttempts + 1) : 0
 
         if (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)) {
           console.log(`[TEST-6B6T-SUCCESS] ${label}: reached final platform at ${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}. Printer not started.`)
@@ -9040,6 +9272,13 @@ function run6b6tLobbyTestSession(config, label) {
           return
         }
 
+        if (transferWaitAttempts >= transferReconnectAttempts) {
+          lastErrorText = `transfer zone wait exceeded ${Math.round(transferWaitAttempts / 2)}s`
+          console.log(`[TEST-6B6T-RECONNECT] ${label}: ${lastErrorText}.`)
+          finishAndQuit({ endReason: 'transfer-zone-timeout' })
+          return
+        }
+
         if (attempts > 0 && attempts % 10 === 0) {
           const reason = isPositionUsable(pos) ? 'not at final platform yet' : 'missing or resetting'
           console.log(`[TEST-6B6T] ${label}: coordinates ${reason} (${attempts}/${maxAttempts}) p=${JSON.stringify(pos)}`)
@@ -9055,11 +9294,23 @@ function run6b6tLobbyTestSession(config, label) {
     bot.on('spawn', async () => {
       spawnedCount += 1
       const reqSpawn = getRequiredSpawnCount(config)
+      const autoTrigger = getLobbyPortalAutoTrigger(bot?.entity?.position, config)
+      if (autoTrigger && !autoTrigger.hold) {
+        console.log(`[TEST-6B6T] ${label}: auto-triggering destination wait from ${autoTrigger.source} at ${spawnedCount}/${reqSpawn} spawn event(s).`)
+        await startTestWait('zone-auto')
+        return
+      }
       if (spawnedCount < reqSpawn) {
         console.log(`[TEST-6B6T] ${label}: spawn event ${spawnedCount}/${reqSpawn}; waiting for transfer/backend spawn.`)
         if (!spawnFallbackTimer) {
-          const fallbackMs = Math.max(1000, toNumber(config.bot?.requiredSpawnFallbackSeconds, 25) * 1000)
+          const fallbackMs = getTransferWaitReconnectMs(config)
           spawnFallbackTimer = setTimeout(() => {
+            if (autoTrigger?.hold) {
+              lastErrorText = `transfer zone wait exceeded ${Math.round(fallbackMs / 1000)}s before spawn gate`
+              console.log(`[TEST-6B6T-RECONNECT] ${label}: ${lastErrorText}.`)
+              finishAndQuit({ endReason: 'transfer-zone-timeout' })
+              return
+            }
             void startTestWait('fallback')
           }, fallbackMs)
           spawnFallbackTimer.unref?.()
