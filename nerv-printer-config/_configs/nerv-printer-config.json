@@ -181,7 +181,7 @@
     "startOnSpawn": true,
     "startDelayMs": 1500,
     "allowJump": false,
-    "placeWhileSprinting": true,
+    "placeWhileSprinting": false,
     "postPrintTestOnly": false,
     "printOffset": {
       "x": 0,
@@ -197,7 +197,7 @@
     "northToSouth": true,
     "mapFillSquareSize": 4,
     "sprintMode": "off",
-    "fastTraversalEnabled": true,
+    "fastTraversalEnabled": false,
     "fastTraversalTickMs": 35,
     "fastTraversalCheckpointEveryRows": 8,
     "fastTraversalCatchupPasses": 2,
