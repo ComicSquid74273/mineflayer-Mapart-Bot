@@ -206,7 +206,7 @@
   },
   "advanced": {
     "antiHunger": {
-      "enabled": false,
+      "enabled": true,
       "sprint": true,
       "onGround": true
     },

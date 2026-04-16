@@ -5,6 +5,16 @@ This repository has two entrypoints:
 1. `index.js` for general bot logic.
 2. `nerv-printer.js` for Nerv-style carpet printing.
 
+Both root files are compatibility wrappers. The actual source now lives under `src/`:
+
+- `src/nerv-printer/cli.js` - main NERV printer runtime.
+- `src/nerv-printer/placement/` - placement workload helpers.
+- `src/nerv-printer/diagnostics/` - rescan, state, and verification helpers.
+- `src/broadcast/cli.js` - general/broadcast bot runtime.
+- `src/broadcast/test-cli.js` - broadcast test runner.
+- `docs/` - notes such as 6b6t and anchor information.
+- `assets/schematics/` - schematic/litematic assets.
+
 This guide documents `nerv-printer.js` from setup to full configuration reference.
 
 ## Quick Start (2 Minutes)
@@ -23,7 +33,7 @@ npm install
 
 - Add `.nbt` into `nerv-printer-config/`
 
-4. Tune local behavior in `nerv-printer-config.json`:
+4. Tune local behavior in `nerv-printer-config/_configs/nerv-printer-config.json`:
 
 - `printer.printOffset`
 - `files.resumeProgress`
@@ -79,7 +89,7 @@ npm install
 
 5. Tune runtime behavior in:
 
-- `nerv-printer-config.json`
+- `nerv-printer-config/_configs/nerv-printer-config.json`
 
 6. Start printer:
 
@@ -103,17 +113,18 @@ node nerv-printer.js
 When `nerv-printer-config/_configs/carpet-printer-config.json` exists:
 
 1. Machine/platform/chest data comes from the imported carpet file.
-2. Non-machine overrides come from `nerv-printer-config.json`.
+2. Non-machine overrides come from `nerv-printer-config/_configs/nerv-printer-config.json`.
 
 When imported carpet file does not exist:
 
-1. `nerv-printer-config.json` is used directly.
+1. `nerv-printer-config/_configs/nerv-printer-config.json` is used directly.
+2. The legacy root path `nerv-printer-config.json` is still accepted as a fallback.
 
 Do not duplicate machine coordinates in local config when imported carpet config is present.
 
 ## 3. Complete Local Config Reference
 
-All fields below are from `nerv-printer-config.json`. Values shown are the current working config values in this repo, not universal defaults.
+All fields below are from `nerv-printer-config/_configs/nerv-printer-config.json`. Values shown are the current working config values in this repo, not universal defaults.
 
 Tuning rule of thumb:
 
@@ -635,7 +646,7 @@ From `package.json`:
 6. `npm run clean` removes install/auth caches
 7. `npm run clean:install` clean install cycle
 
-## 10. Minimal Example `nerv-printer-config.json`
+## 10. Minimal Example `nerv-printer-config/_configs/nerv-printer-config.json`
 
 ```json
 {
