@@ -135,6 +135,7 @@ Connection and Mineflayer session settings.
 | `bot.usernames[].enabled` | `true` / `false` | Whether this account is active. | Single-bot mode picks the first enabled account; multibot uses all enabled accounts. |
 | `bot.usernames[].auth` | optional | `offline` or `microsoft` per account. | Useful when some accounts are local/offline and some are Microsoft. |
 | `bot.usernames[].profilesFolder` | optional | Per-account auth cache folder. | Usually `./auth-cache`; can split folders if needed. |
+| `bot.usernames[].loginPassword` | optional | Cracked/offline 6b6t `/login` password. | Used only by the 6b6t chat-login helper for offline accounts. |
 | `bot.username` | fallback only | Legacy single/default username if `bot.usernames` is missing. | Prefer `bot.usernames`; no need to set both. |
 | `bot.auth` | `offline` | `offline`, `microsoft`. | Use `offline` for local/offline test server. |
 | `bot.version` | `1.21.8` | Exact MC version or sometimes `auto`. | Exact version is safer with Mineflayer. |

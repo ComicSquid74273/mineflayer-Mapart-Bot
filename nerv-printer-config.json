@@ -7,23 +7,26 @@
         "auth": "microsoft"
       },
       {
-        "name": "MapartBot1",
-        "enabled": false,
-        "auth": "microsoft"
-      },
-      {
-        "name": "MapartBot2",
-        "enabled": false,
-        "auth": "microsoft"
-      }
+            "name": "ComicBot001",
+            "enabled": false,
+            "auth": "offline",
+            "loginPassword": "zKoUufW3hb71u"
+          },
+          {
+            "name": "MapartBot2",
+            "enabled": false,
+            "auth": "offline",
+            "loginPassword": "bot2_password"
+          }
+
     ],
-    "version": "1.21.8",
+    "version": "1.20",
     "profilesFolder": "./auth-cache",
     "viewDistance": "normal",
     "checkTimeoutInterval": 60000,
     "reconnect": {
       "enabled": true,
-      "delayMs": 15000,
+      "delayMs": 10000,
       "maxAttempts": 25
     }
   },
@@ -35,7 +38,6 @@
           "host": "127.0.0.1",
           "port": 54321,
           "auth": "offline",
-          "version": "1.21.8",
           "profilesFolder": "./auth-cache",
           "viewDistance": "normal",
           "checkTimeoutInterval": 60000,
@@ -48,21 +50,109 @@
       },
       "6b6t": {
         "bot": {
-          "host": "alt.6b6t.org",
+          "host": "alt3.6b6t.org",
+          "hosts": [
+            "alt3.6b6t.org",
+            "alt.6b6t.org",
+            "play.6b6t.org",
+            "alt2.6b6t.org"
+          ],
           "port": 25565,
           "auth": "microsoft",
-          "version": "1.21.11",
           "profilesFolder": "./auth-cache",
           "viewDistance": "normal",
           "checkTimeoutInterval": 90000,
-          "requiredSpawnCountBeforeStartup": 2,
-          "requiredSpawnFallbackSeconds": 25,
-          "spawnPositionTimeoutSeconds": 180,
+          "requiredSpawnCountBeforeStartup": 3,
+          "requiredSpawnFallbackSeconds": 90,
+          "spawnPositionTimeoutSeconds": 240,
+          "spawnMissingPositionReconnectSeconds": 75,
           "waitForPlatformPositionOnSpawn": true,
           "seedPositionFromPlatformOnSpawn": true,
+          "chatLogin": {
+            "enabled": true,
+            "offlineOnly": true,
+            "command": "/login",
+            "promptPatterns": [
+              "please login with the command",
+              "/login <password>"
+            ],
+            "successPatterns": [
+              "you are now logged in",
+              "successfully logged in"
+            ],
+            "minDelayMs": 750,
+            "retryMs": 5000,
+            "maxAttempts": 5
+          },
+          "lobbyPortal": {
+            "enabled": true,
+            "accountMode": "auto",
+            "maxAttempts": 3,
+            "pathTimeoutMs": 60000,
+            "portalEntryMs": 3000,
+            "waitAfterPortalMs": 12000,
+            "portalSearchRadius": 96,
+            "lobbyRegions": [
+              {
+                "name": "lobby-1",
+                "type": "disk",
+                "action": "wait-transfer",
+                "centerX": 500,
+                "centerZ": 500,
+                "radius": 192
+              },
+              {
+                "name": "lobby-2",
+                "type": "disk",
+                "action": "portal",
+                "centerX": 1000,
+                "centerZ": 1000,
+                "radius": 192
+              },
+              {
+                "name": "login-portal-999",
+                "type": "box",
+                "action": "login-portal",
+                "x": 1000,
+                "y": 100,
+                "z": 1000,
+                "radius": 16
+              }
+            ],
+            "spawnDisk": {
+              "enabled": false,
+              "centerX": 1000,
+              "centerZ": 1000,
+              "radius": 192,
+              "waitBeforeMoveMs": 2500,
+              "twoStepRoute": false,
+              "useConfiguredPortalTarget": false,
+              "waypoint": {
+                "x": 7,
+                "y": 18,
+                "z": 61
+              },
+              "portal": {
+                "x": 0,
+                "y": 20,
+                "z": -16
+              },
+              "goalRange": 2
+            },
+            "loginPortal": {
+              "enabled": true,
+              "x": 1000,
+              "y": 100,
+              "z": 1000,
+              "radius": 16,
+              "waitBeforeMoveMs": 5000,
+              "portalTargetZ": -989,
+              "goalRange": 2
+            }
+          },
           "reconnect": {
             "enabled": true,
-            "delayMs": 30000,
+            "delayMs": 11000,
             "maxAttempts": 50
           }
         },
@@ -99,20 +189,20 @@
       "z": -1
     },
     "linesPerRun": 3,
-    "placeRange": 5,
+    "placeRange": 4,
     "minPlaceDistance": 0.8,
     "ignoredBlocks": [],
-    "placeDelayMs": 0,
+    "placeDelayMs": 10,
     "rotate": false,
     "northToSouth": true,
-    "mapFillSquareSize": 1,
+    "mapFillSquareSize": 4,
     "sprintMode": "off",
     "fastTraversalEnabled": true,
-    "fastTraversalTickMs": 20,
+    "fastTraversalTickMs": 35,
     "fastTraversalCheckpointEveryRows": 8,
     "fastTraversalCatchupPasses": 2,
     "fastTraversalCatchupStallMs": 4000,
-    "maxPlacementsPerTick": 10
+    "maxPlacementsPerTick": 8
   },
   "advanced": {
     "antiHunger": {
@@ -210,9 +300,9 @@
     "useMapCornerYForNbtCarpets": true,
     "repairBatchSize": 256,
     "repairRestockMode": "fast",
-    "postBuildDelayMs": 0,
+    "postBuildDelayMs": 10,
     "retryInteractTimeoutMs": 800,
-    "checkpointBuffer": 0.35,
+    "checkpointBuffer": 0.8,
     "breakCarpetAboveReset": false,
     "debugPrints": false
   },
@@ -234,7 +324,7 @@
     }
   },
   "multiUser": {
-    "enabled": true,
+    "enabled": false,
     "mode": "file",
     "syncFolder": "./logs/nerv-printer-sync",
     "requireAllReady": true,
