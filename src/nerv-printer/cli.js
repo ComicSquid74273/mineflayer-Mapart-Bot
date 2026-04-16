@@ -8804,6 +8804,7 @@ function runSingleSession(config, sessionNumber) {
         if (!spawnFallbackTimer) {
           const fallbackMs = getTransferWaitReconnectMs(config)
           spawnFallbackTimer = setTimeout(() => {
+            lastErrorText = `spawn gate stalled at ${spawnedCount}/${reqSpawn} for ${Math.round(fallbackMs / 1000)}s`
             if (autoTrigger?.hold) {
               lastErrorText = `transfer zone wait exceeded ${Math.round(fallbackMs / 1000)}s before spawn gate`
               console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of fallback startup.`)
@@ -8811,7 +8812,9 @@ function runSingleSession(config, sessionNumber) {
               settle('transfer-zone-timeout')
               return
             }
-            void startAfterSpawn('fallback')
+            console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of fallback startup.`)
+            try { bot.quit('spawn-gate-timeout') } catch { }
+            settle('spawn-gate-timeout')
           }, fallbackMs)
           spawnFallbackTimer.unref?.()
         }
