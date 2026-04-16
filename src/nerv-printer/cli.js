@@ -30,7 +30,6 @@ const stdinCommandState = {
   initialized: false,
   rl: null,
   status: null,
-  queuedVerificationAction: null,
   verificationWaiter: null
 }
 
@@ -7285,7 +7284,12 @@ function ensureStdinCommandInterface() {
     }
 
     if (value === 'help' || value === '?') {
-      console.log('[COMMAND] Commands: status, verified, refresh')
+      console.log('[COMMAND] Commands: status, verified, refresh, clear')
+      return
+    }
+
+    if (value === 'clear') {
+      console.log('[COMMAND] Nothing queued. Verification commands are only accepted during the active token prompt.')
       return
     }
 
@@ -7307,11 +7311,7 @@ function ensureStdinCommandInterface() {
       return
     }
 
-    stdinCommandState.queuedVerificationAction = {
-      action: verificationAction,
-      at: Date.now()
-    }
-    console.log(`[COMMAND] Stored ${verificationAction} for the next verification prompt.`)
+    console.log('[COMMAND] No active token verification prompt right now. This does not apply to Microsoft browser login.')
   })
 
   console.log('[COMMAND] Interactive commands enabled. Type "status", "verified", or "refresh" while the bot is running.')
@@ -7320,18 +7320,12 @@ function ensureStdinCommandInterface() {
 
 function waitForVerificationInput({ account, host, version, code, refreshMs = 9 * 60 * 1000 }) {
   const verifyUrl = 'https://6b6t.org/verify'
+  console.log(`[VERIFY-CODE] ${account || 'unknown-account'} -> ${code || 'unknown-code'}`)
   console.log(`[VERIFY] account=${account} host=${host} version=${version} code=${code || 'unknown'} url=${verifyUrl}`)
   console.log('[VERIFY] Open the URL, verify this account/code, then type "verified" here. Type "refresh" to request a fresh code.')
 
   return new Promise((resolve) => {
     ensureStdinCommandInterface()
-    const queued = stdinCommandState.queuedVerificationAction
-    if (queued && Date.now() - queued.at <= Math.max(30000, toNumber(refreshMs, 9 * 60 * 1000))) {
-      stdinCommandState.queuedVerificationAction = null
-      console.log(`[VERIFY] Using queued terminal command: ${queued.action}`)
-      resolve(queued.action)
-      return
-    }
     const timer = setTimeout(() => {
       stdinCommandState.verificationWaiter = null
       console.log(`[VERIFY] Code for account=${account} is near expiry; refreshing by retrying the same test case.`)
