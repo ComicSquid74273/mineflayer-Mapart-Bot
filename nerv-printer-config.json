@@ -1,12 +1,22 @@
 {
   "bot": {
-    "host": "127.0.0.1",
-    "port": 54321,
-    "username": "MapartBot",
     "usernames": [
-      "MapartBot"
+      {
+        "name": "ComicSquid007",
+        "enabled": true,
+        "auth": "microsoft"
+      },
+      {
+        "name": "MapartBot1",
+        "enabled": false,
+        "auth": "microsoft"
+      },
+      {
+        "name": "MapartBot2",
+        "enabled": false,
+        "auth": "microsoft"
+      }
     ],
-    "auth": "offline",
     "version": "1.21.8",
     "profilesFolder": "./auth-cache",
     "viewDistance": "normal",
@@ -41,10 +51,15 @@
           "host": "alt.6b6t.org",
           "port": 25565,
           "auth": "microsoft",
-          "version": "auto",
+          "version": "1.21.11",
           "profilesFolder": "./auth-cache",
-          "viewDistance": "short",
+          "viewDistance": "normal",
           "checkTimeoutInterval": 90000,
+          "requiredSpawnCountBeforeStartup": 2,
+          "requiredSpawnFallbackSeconds": 25,
+          "spawnPositionTimeoutSeconds": 180,
+          "waitForPlatformPositionOnSpawn": true,
+          "seedPositionFromPlatformOnSpawn": true,
           "reconnect": {
             "enabled": true,
             "delayMs": 30000,
@@ -100,6 +115,18 @@
     "maxPlacementsPerTick": 10
   },
   "advanced": {
+    "antiHunger": {
+      "enabled": false,
+      "sprint": true,
+      "onGround": true
+    },
+    "platformWatchdogEnabled": true,
+    "platformWatchdogPollMs": 1000,
+    "platformHoldLogMs": 5000,
+    "startupSupportProbeEnabled": true,
+    "startupSupportMinRatio": 0.5,
+    "startupSupportPollMs": 5000,
+    "startupSupportLogMs": 15000,
     "preRestockDelayMs": 80,
     "inventoryActionDelayMs": 35,
     "postRestockDelayMs": 120,
@@ -123,6 +150,8 @@
     "postPrintResetEnabled": true,
     "postPrintXpRefillEnabled": true,
     "postPrintRenameMapEnabled": true,
+    "postPrintRequireRenameBeforeStore": false,
+    "postPrintRenameAttempts": 3,
     "postPrintMinXpLevel": 2,
     "postPrintTargetXpLevel": 3,
     "postPrintSkipResetInteraction": false,
@@ -194,16 +223,15 @@
   "anchorTranslation": {
     "enabled": true,
     "sourceAnchor": {
-        "x": -706,
-        "y": -9,
-        "z": -962
-    },
-    "targetAnchor": {
       "x": -706,
       "y": -9,
       "z": -962
+    },
+    "targetAnchor": {
+      "x": 8765118,
+      "y": 66,
+      "z": 5890366
     }
-
   },
   "multiUser": {
     "enabled": true,

@@ -35,12 +35,29 @@ function formatLogArg(value) {
   }
 }
 
+function terminalLogsDisabledByCli() {
+  const args = process.argv.slice(2)
+  const disabledFlags = new Set([
+    '--disable-logs',
+    '--disableLogs',
+    '--disable-terminal-logs',
+    '--no-terminal-logs',
+    '--log-to-file-only',
+    '--silent',
+    '--quiet'
+  ])
+  if (args.some((arg) => disabledFlags.has(arg))) return true
+  const envValue = String(process.env.NERV_DISABLE_TERMINAL_LOGS || '').toLowerCase()
+  return envValue === '1' || envValue === 'true' || envValue === 'yes'
+}
+
 function initLogger() {
   const logDir = path.dirname(LOG_FILE)
   if (!fs.existsSync(logDir)) {
     fs.mkdirSync(logDir, { recursive: true })
   }
 
+  const terminalLogsEnabled = !terminalLogsDisabledByCli()
   const stream = fs.createWriteStream(LOG_FILE, { flags: 'a' })
   const getBotStream = (botName) => {
     const safeName = sanitizeSyncName(botName)
@@ -68,17 +85,17 @@ function initLogger() {
   }
 
   console.log = (...args) => {
-    original.log(...args)
+    if (terminalLogsEnabled) original.log(...args)
     write('INFO', args)
   }
 
   console.warn = (...args) => {
-    original.warn(...args)
+    if (terminalLogsEnabled) original.warn(...args)
     write('WARN', args)
   }
 
   console.error = (...args) => {
-    original.error(...args)
+    if (terminalLogsEnabled) original.error(...args)
     write('ERROR', args)
   }
 
@@ -89,7 +106,7 @@ function initLogger() {
     }
   })
 
-  original.log(`[LOG] Writing runtime logs to ${LOG_FILE}`)
+  if (terminalLogsEnabled) original.log(`[LOG] Writing runtime logs to ${LOG_FILE}`)
   write('INFO', [`[LOG] Writing runtime logs to ${LOG_FILE}`])
 }
 
@@ -244,6 +261,11 @@ function createDefaultConfig() {
             profilesFolder: './auth-cache',
             viewDistance: 'short',
             checkTimeoutInterval: 90000,
+            requiredSpawnCountBeforeStartup: 2,
+            requiredSpawnFallbackSeconds: 25,
+            spawnPositionTimeoutSeconds: 180,
+            waitForPlatformPositionOnSpawn: true,
+            seedPositionFromPlatformOnSpawn: true,
             reconnect: {
               enabled: true,
               delayMs: 30000,
@@ -289,6 +311,18 @@ function createDefaultConfig() {
       maxPlacementsPerTick: 1
     },
     advanced: {
+      antiHunger: {
+        enabled: true,
+        sprint: true,
+        onGround: true
+      },
+      platformWatchdogEnabled: true,
+      platformWatchdogPollMs: 1000,
+      platformHoldLogMs: 5000,
+      startupSupportProbeEnabled: true,
+      startupSupportMinRatio: 0.5,
+      startupSupportPollMs: 5000,
+      startupSupportLogMs: 15000,
       preRestockDelayMs: 500,
       inventoryActionDelayMs: 100,
       postRestockDelayMs: 500,
@@ -306,6 +340,8 @@ function createDefaultConfig() {
       postPrintResetEnabled: true,
       postPrintXpRefillEnabled: true,
       postPrintRenameMapEnabled: true,
+      postPrintRequireRenameBeforeStore: false,
+      postPrintRenameAttempts: 3,
       postPrintMinXpLevel: 2,
       postPrintTargetXpLevel: 5,
       postPrintXpButtonMaxPresses: 40,
@@ -1857,6 +1893,12 @@ function findInventoryItemByType(bot, itemName) {
   return bot.inventory.items().find((entry) => entry.type === itemId)
 }
 
+function findInventoryItemsByType(bot, itemName) {
+  const itemId = getItemId(bot, itemName)
+  if (!itemId) return []
+  return bot.inventory.items().filter((entry) => entry.type === itemId)
+}
+
 function countInventoryByType(bot, itemName) {
   const itemId = getItemId(bot, itemName)
   if (!itemId) return 0
@@ -1904,6 +1946,11 @@ async function refillXpForPostPrint(bot, config) {
       break
     }
   }
+
+  const finalLevel = toNumber(bot.experience?.level, 0)
+  if (finalLevel < minLevel) {
+    console.log(`[POSTPRINT-WARN] XP refill ended below rename minimum: level=${finalLevel} min=${minLevel} target=${targetLevel}.`)
+  }
 }
 
 async function renameFinishedMap(bot, config, anvilConfig, sourceName) {
@@ -1914,39 +1961,59 @@ async function renameFinishedMap(bot, config, anvilConfig, sourceName) {
     return null
   }
 
-  const filledMap = findInventoryItemByType(bot, 'filled_map')
-  if (!filledMap) {
+  const renameTarget = String(path.parse(sourceName || 'map').name || 'map').slice(0, 35)
+  const maxAttempts = Math.max(1, toNumber(advanced.postPrintRenameAttempts, 3))
+  const settleMs = Math.max(
+    toNumber(advanced.postPrintInteractionDelayMs, 200),
+    toNumber(advanced.postPrintMapSettleDelayMs, 200)
+  )
+
+  let filledMaps = findInventoryItemsByType(bot, 'filled_map')
+  if (!filledMaps.length) {
     console.log('[POSTPRINT-WARN] No filled map found to rename.')
     return null
   }
 
-  const renameTarget = String(path.parse(sourceName || 'map').name || 'map').slice(0, 35)
-  try {
-    const beforeHints = getItemNameHints(filledMap)
-    if (beforeHints.length) {
-      console.log(`[POSTPRINT-DEBUG] Rename candidate before anvil: ${beforeHints.join(' | ')}`)
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const unnamed = filledMaps.filter((entry) => !isMapNamed(entry, renameTarget))
+    if (!unnamed.length) {
+      console.log(`[POSTPRINT] Verified ${filledMaps.length} filled map(s) named ${renameTarget}.`)
+      return renameTarget
     }
 
-    const anvil = await openAnvilAt(bot, anvilConfig.position, anvilConfig.accessPosition)
-    await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
-    await anvil.rename(filledMap, renameTarget)
-    await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
-    if (typeof anvil.close === 'function') anvil.close()
+    const filledMap = unnamed[0]
 
-    const filledMapId = getItemId(bot, 'filled_map')
-    const inventoryMaps = bot.inventory.items().filter((entry) => entry.type === filledMapId)
-    const matched = inventoryMaps.find((entry) => isMapNamed(entry, renameTarget))
-    if (!matched) {
-      const sampleNames = inventoryMaps.flatMap((entry) => getItemNameHints(entry)).slice(0, 6)
-      console.log(`[POSTPRINT-WARN] Rename reported success but renamed map name not found in inventory. Seen names: ${sampleNames.join(' | ') || 'none'}`)
+    try {
+      const beforeHints = getItemNameHints(filledMap)
+      if (beforeHints.length) {
+        console.log(`[POSTPRINT-DEBUG] Rename attempt ${attempt}/${maxAttempts} candidate: ${beforeHints.join(' | ')}`)
+      }
+
+      const anvil = await openAnvilAt(bot, anvilConfig.position, anvilConfig.accessPosition)
+      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+      await anvil.rename(filledMap, renameTarget)
+      await delay(settleMs)
+      if (typeof anvil.close === 'function') anvil.close()
+      await delay(settleMs)
+
+      filledMaps = findInventoryItemsByType(bot, 'filled_map')
+      const remainingUnnamed = filledMaps.filter((entry) => !isMapNamed(entry, renameTarget))
+      if (!remainingUnnamed.length && filledMaps.length > 0) {
+        console.log(`[POSTPRINT] Renamed and verified ${filledMaps.length} filled map(s) to ${renameTarget}.`)
+        return renameTarget
+      }
+
+      const sampleNames = filledMaps.flatMap((entry) => getItemNameHints(entry)).slice(0, 8)
+      console.log(`[POSTPRINT-WARN] Rename attempt ${attempt}/${maxAttempts} not fully verified. renamed=${filledMaps.length - remainingUnnamed.length}/${filledMaps.length} seen=${sampleNames.join(' | ') || 'none'}`)
+    } catch (err) {
+      console.log(`[POSTPRINT-WARN] Rename attempt ${attempt}/${maxAttempts} failed: ${err?.message || err}`)
+      await delay(settleMs)
+      filledMaps = findInventoryItemsByType(bot, 'filled_map')
     }
-
-    console.log(`[POSTPRINT] Renamed finished map to ${renameTarget}.`)
-    return renameTarget
-  } catch (err) {
-    console.log(`[POSTPRINT-WARN] Rename step failed: ${err?.message || err}`)
-    return null
   }
+
+  console.log(`[POSTPRINT-WARN] Rename could not be verified after ${maxAttempts} attempt(s); not storing unverified map(s).`)
+  return null
 }
 
 function getItemNameHints(item) {
@@ -2137,15 +2204,32 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     if (advanced.postPrintStoreFinishedMapEnabled !== false && finishedChestPos && (cartographySucceeded || advanced.postPrintUseCartographyEnabled === false)) {
       const filledMapId = getItemId(bot, 'filled_map')
       const filledMaps = bot.inventory.items().filter((entry) => entry.type === filledMapId)
+      let mapsToStore = filledMaps
 
-      if (advanced.postPrintRenameMapEnabled !== false && renamedTarget) {
-        const renamedCount = filledMaps.filter((entry) => isMapNamed(entry, renamedTarget)).length
-        if (renamedCount === 0) {
-          console.log('[POSTPRINT-WARN] Did not detect renamed map name in inventory; depositing anyway as requested.')
+      if (advanced.postPrintRenameMapEnabled !== false && advanced.postPrintRequireRenameBeforeStore !== false) {
+        if (!renamedTarget) {
+          console.log('[POSTPRINT-WARN] Rename is required before store, but no verified renamed map exists. Leaving map in inventory for retry.')
+          return
+        }
+
+        mapsToStore = filledMaps.filter((entry) => isMapNamed(entry, renamedTarget))
+        const unverifiedCount = filledMaps.length - mapsToStore.length
+        if (unverifiedCount > 0) {
+          console.log(`[POSTPRINT-WARN] Leaving ${unverifiedCount} unverified filled map(s) in inventory; only storing verified renamed maps.`)
         }
       }
 
-      for (const stack of filledMaps) {
+      if (!mapsToStore.length && filledMaps.length > 0) {
+        if (advanced.postPrintRequireRenameBeforeStore !== false) {
+          console.log('[POSTPRINT-WARN] No verified filled map selected for storage. Leaving map in inventory for retry.')
+          return
+        }
+
+        console.log('[POSTPRINT-WARN] No verified renamed map selected, but strict rename-store is disabled. Storing all filled maps anyway.')
+        mapsToStore = filledMaps
+      }
+
+      for (const stack of mapsToStore) {
         if (stack.count <= 0) continue
         const hints = getItemNameHints(stack)
         if (hints.length) {
@@ -2219,9 +2303,8 @@ function countInventoryItems(bot, itemName) {
 }
 
 function getBuildMaterialSlotCapacity(bot) {
-  const inventory = bot.inventory
-  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
-  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : (Array.isArray(inventory.slots) ? inventory.slots.length : 46)
+  const inventory = bot.inventory || {}
+  const { start, end } = getInventorySlotBounds(bot)
   let capacity = 0
 
   for (let i = start; i < end; i += 1) {
@@ -2671,9 +2754,8 @@ async function dumpNervInventorySlots(bot, config, dumpSlots, reasonLabel = 'ner
 function inventoryHasRoomForItem(bot, itemName) {
   const itemInfo = bot.registry.itemsByName[itemName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
-  const inventory = bot.inventory
-  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
-  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : (Array.isArray(inventory.slots) ? inventory.slots.length : 46)
+  const inventory = bot.inventory || {}
+  const { start, end } = getInventorySlotBounds(bot)
 
   for (let i = start; i < end; i += 1) {
     const slot = inventory.slots[i]
@@ -2689,8 +2771,7 @@ function inventoryCapacityForItem(bot, itemName) {
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
   const inventory = bot.inventory || {}
   const slots = Array.isArray(inventory.slots) ? inventory.slots : []
-  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
-  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : (Array.isArray(inventory.slots) ? inventory.slots.length : 46)
+  const { start, end } = getInventorySlotBounds(bot)
   let capacity = 0
 
   for (let i = start; i < end; i += 1) {
@@ -2708,8 +2789,7 @@ function inventoryCapacityForItem(bot, itemName) {
 function countEmptyInventorySlots(bot) {
   const inventory = bot.inventory || {}
   const slots = Array.isArray(inventory.slots) ? inventory.slots : []
-  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
-  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : (Array.isArray(inventory.slots) ? inventory.slots.length : 46)
+  const { start, end } = getInventorySlotBounds(bot)
   let empty = 0
 
   for (let i = start; i < end; i += 1) {
@@ -2724,8 +2804,7 @@ function countPartialInventorySlotsForItem(bot, itemName) {
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
   const inventory = bot.inventory || {}
   const slots = Array.isArray(inventory.slots) ? inventory.slots : []
-  const start = Number.isFinite(inventory.inventoryStart) ? inventory.inventoryStart : 9
-  const end = Number.isFinite(inventory.inventoryEnd) ? inventory.inventoryEnd : (Array.isArray(inventory.slots) ? inventory.slots.length : 46)
+  const { start, end } = getInventorySlotBounds(bot)
   let partial = 0
 
   for (let i = start; i < end; i += 1) {
@@ -2914,13 +2993,13 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       if (restockFailureCache.has(item.blockName) && Date.now() - restockFailureCache.get(item.blockName) < Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))) {
         continue
       }
-      
+
       const groups = getMaterialChestGroupsForRefill(bot, config, item.blockName)
       if (!groups || !groups.length || !groups[0].length) continue
 
       const nearestChest = groups[0][0]
       const dist = horizontalDist2(bot, nearestChest)
-      
+
       if (dist < closestDist) {
         closestDist = dist
         closestItem = item
@@ -2931,7 +3010,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
 
     const haveBefore = countInventoryItems(bot, closestItem.blockName)
     const pullsNeeded = Math.max(0, toNumber(closestItem.stacks, 0))
-    
+
     if (pullsNeeded <= 0) continue
 
     console.log(`[NERV-RESTOCK] Closest material=${closestItem.blockName} dist=${Math.round(Math.sqrt(closestDist))} pullsRequested=${pullsNeeded} rawAmount=${closestItem.rawAmount}`)
@@ -3105,6 +3184,8 @@ function resolveTargetPlacementPosition(bot, target, config) {
 }
 
 async function placeTarget(bot, config, target, isRepairPass = false) {
+  await waitForPlatformReady(bot, config, 'before-place')
+
   const printer = config.printer || {}
   const errors = config.errorHandling || {}
   const Vec3 = bot.entity.position.constructor
@@ -4140,6 +4221,60 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
 }
 
+function probeStartupSupport(bot, targets) {
+  if (!targets.length) return { supportCount: 0, sampleSize: 0 }
+  const Vec3 = bot.entity.position.constructor
+  const probeSample = targets.slice(0, Math.min(64, targets.length))
+  let supportCount = 0
+
+  for (const target of probeSample) {
+    const pos = new Vec3(target.position.x, target.position.y, target.position.z)
+    const support = bot.blockAt(pos.offset(0, -1, 0))
+    if (support && support.name !== 'air') supportCount += 1
+  }
+
+  return { supportCount, sampleSize: probeSample.length }
+}
+
+async function waitForStartupSupport(bot, config, targets) {
+  if (config.advanced?.startupSupportProbeEnabled === false || !targets.length) {
+    return probeStartupSupport(bot, targets)
+  }
+
+  const minRatio = Math.max(0, Math.min(1, toNumber(config.advanced?.startupSupportMinRatio, 0.5)))
+  const pollMs = Math.max(500, toNumber(config.advanced?.startupSupportPollMs, 5000))
+  const logMs = Math.max(1000, toNumber(config.advanced?.startupSupportLogMs, 15000))
+  let lastLog = 0
+
+  while (bot?._client && bot._client.state !== 'disconnected') {
+    await waitForPlatformReady(bot, config, 'startup-support')
+
+    if (typeof bot.waitForChunksToLoad === 'function') {
+      try {
+        await Promise.race([
+          bot.waitForChunksToLoad(),
+          delay(Math.min(4000, pollMs))
+        ])
+      } catch {
+        // Continue with a direct block probe below.
+      }
+    }
+
+    const probe = probeStartupSupport(bot, targets)
+    const ratio = probe.sampleSize > 0 ? probe.supportCount / probe.sampleSize : 1
+    if (ratio >= minRatio) return probe
+
+    const now = Date.now()
+    if (now - lastLog >= logMs) {
+      console.log(`[PROBE-HOLD] support=${probe.supportCount}/${probe.sampleSize}; waiting for platform chunks/support before inventory or placement.`)
+      lastLog = now
+    }
+    await delay(pollMs)
+  }
+
+  return probeStartupSupport(bot, targets)
+}
+
 async function runPrint(bot, config) {
   const files = config.files || {}
   const printer = config.printer || {}
@@ -4239,15 +4374,8 @@ async function runPrint(bot, config) {
 
   // Quick support probe to catch bad Y alignment before committing full sweep.
   if (pending.length) {
-    const Vec3 = bot.entity.position.constructor
-    const probeSample = pending.slice(0, Math.min(64, pending.length))
-    let supportCount = 0
-    for (const target of probeSample) {
-      const pos = new Vec3(target.position.x, target.position.y, target.position.z)
-      const support = bot.blockAt(pos.offset(0, -1, 0))
-      if (support && support.name !== 'air') supportCount += 1
-    }
-    console.log(`[PROBE] support=${supportCount}/${probeSample.length} at startup.`)
+    const probe = await waitForStartupSupport(bot, config, pending)
+    console.log(`[PROBE] support=${probe.supportCount}/${probe.sampleSize} at startup.`)
   }
 
   if (!pending.length) {
@@ -4863,8 +4991,9 @@ async function runPrint(bot, config) {
 
 function createBot(config) {
   const botCfg = config.bot || {}
+  console.log(`[BOT] username=${botCfg.username || 'MapartBot'} target=${botCfg.host || '127.0.0.1'}:${toNumber(botCfg.port, 25565)} auth=${botCfg.auth || 'offline'} version=${botCfg.version || 'auto'}`)
 
-  return mineflayer.createBot({
+  const bot = mineflayer.createBot({
     host: botCfg.host || '127.0.0.1',
     port: toNumber(botCfg.port, 25565),
     username: botCfg.username || 'MapartBot',
@@ -4874,6 +5003,78 @@ function createBot(config) {
     viewDistance: botCfg.viewDistance || 'tiny',
     checkTimeoutInterval: toNumber(botCfg.checkTimeoutInterval, 60000)
   })
+
+  applyAntiHunger(bot, config)
+
+  return bot
+}
+
+function getAntiHungerOptions(config) {
+  const value = config.advanced?.antiHunger
+  if (value === false) return { enabled: false }
+  if (value && typeof value === 'object') {
+    return {
+      enabled: value.enabled !== false,
+      sprint: value.sprint !== false,
+      onGround: value.onGround !== false
+    }
+  }
+  return {
+    enabled: true,
+    sprint: true,
+    onGround: true
+  }
+}
+
+function applyAntiHunger(bot, config) {
+  const options = getAntiHungerOptions(config)
+  if (!options.enabled || bot.__nervAntiHungerApplied || !bot._client?.write) return
+
+  let lastOnGround = false
+  let ignoreNextMovePacket = false
+  const originalWrite = bot._client.write.bind(bot._client)
+
+  const isMovePacket = (packetName) => {
+    return packetName === 'position' || packetName === 'position_look' || packetName === 'look' || packetName === 'flying'
+  }
+
+  const isStartSprintingAction = (data) => {
+    const action = String(data?.actionId ?? data?.action ?? '').toLowerCase()
+    return data?.actionId === 3 || action === '3' || action === 'start_sprinting' || action === 'start sprinting'
+  }
+
+  bot._client.write = (packetName, data) => {
+    const packetData = data || {}
+    if (options.sprint && packetName === 'entity_action' && isStartSprintingAction(packetData)) {
+      return
+    }
+
+    if (options.onGround && data && isMovePacket(packetName)) {
+      const realOnGround = Boolean(bot.entity?.onGround)
+      if (realOnGround && !lastOnGround) {
+        ignoreNextMovePacket = true
+      }
+      lastOnGround = realOnGround
+
+      if (ignoreNextMovePacket) {
+        ignoreNextMovePacket = false
+      } else {
+        const inWater = Boolean(bot.entity?.isInWater || bot.entity?.isInLava)
+        const hasVehicle = bot.vehicle != null
+        const isDigging = bot.targetDigBlock != null
+        const verticalVelocity = Number(bot.entity?.velocity?.y || 0)
+        if (!hasVehicle && !inWater && realOnGround && verticalVelocity <= 0 && !isDigging) {
+          if (Object.prototype.hasOwnProperty.call(data, 'onGround')) data.onGround = false
+          if (Object.prototype.hasOwnProperty.call(data, 'ground')) data.ground = false
+        }
+      }
+    }
+
+    return originalWrite(packetName, data)
+  }
+
+  bot.__nervAntiHungerApplied = true
+  console.log(`[ANTI-HUNGER] Enabled by default. sprint=${options.sprint !== false} onGround=${options.onGround !== false}`)
 }
 
 function hasCliFlag(flag) {
@@ -4890,6 +5091,58 @@ function sanitizeSyncName(name) {
   return String(name || '').replace(/[^a-zA-Z0-9._-]/g, '_')
 }
 
+function parseUsernameList(value) {
+  if (!value) return []
+  return String(value)
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function getSimpleUsernameRoster(config) {
+  const cliUsernames = parseUsernameList(getCliValue('--usernames'))
+  if (cliUsernames.length) return cliUsernames
+
+  const cliUsername = getCliValue('--username')
+  if (cliUsername) return [cliUsername.trim()].filter(Boolean)
+
+  const envUsernames = parseUsernameList(process.env.NERV_USERNAMES)
+  if (envUsernames.length) return envUsernames
+
+  const envUsername = process.env.NERV_USERNAME
+  if (envUsername) return [envUsername.trim()].filter(Boolean)
+
+  if (Array.isArray(config.bot?.usernames) && config.bot.usernames.length) {
+    return config.bot.usernames
+  }
+
+  return config.bot?.username ? [String(config.bot.username).trim()].filter(Boolean) : []
+}
+
+function getAccountBotOverrides(entry) {
+  if (!entry || typeof entry !== 'object') return {}
+  const allowedKeys = [
+    'auth',
+    'profilesFolder'
+  ]
+  const overrides = {}
+  for (const key of allowedKeys) {
+    if (entry[key] !== undefined) overrides[key] = entry[key]
+  }
+  return overrides
+}
+
+function mergeBotOverrides(baseBot, overrides = {}) {
+  return {
+    ...(baseBot || {}),
+    ...overrides,
+    reconnect: {
+      ...(baseBot?.reconnect || {}),
+      ...(overrides.reconnect || {})
+    }
+  }
+}
+
 function normalizeSimpleBotEntry(entry, index, multi) {
   if (typeof entry === 'string') {
     return {
@@ -4898,6 +5151,7 @@ function normalizeSimpleBotEntry(entry, index, multi) {
       enabled: true,
       joinDelayMs: index * toNumber(multi.joinStaggerMs, 8000),
       startDelayMs: index * toNumber(multi.startStaggerMs, 3000),
+      botOverrides: {},
       raw: entry
     }
   }
@@ -4909,6 +5163,7 @@ function normalizeSimpleBotEntry(entry, index, multi) {
       enabled: entry.enabled !== false,
       joinDelayMs: Math.max(0, toNumber(entry.joinDelayMs, index * toNumber(multi.joinStaggerMs, 8000))),
       startDelayMs: Math.max(0, toNumber(entry.startDelayMs, index * toNumber(multi.startStaggerMs, 3000))),
+      botOverrides: getAccountBotOverrides(entry),
       raw: entry
     }
   }
@@ -4918,9 +5173,8 @@ function normalizeSimpleBotEntry(entry, index, multi) {
 
 function getEnabledMultiBots(config) {
   const multi = config.multiUser || {}
-  const simpleRoster = Array.isArray(config.bot?.usernames) && config.bot.usernames.length
-    ? config.bot.usernames
-    : null
+  const simpleUsernames = getSimpleUsernameRoster(config)
+  const simpleRoster = simpleUsernames.length ? simpleUsernames : null
   const configured = simpleRoster || (Array.isArray(multi.bots) ? multi.bots : [])
   const bots = configured
     .map((entry, index) => normalizeSimpleBotEntry(entry, index, multi))
@@ -4940,10 +5194,14 @@ function shouldRunMultiUser(config) {
 
 function applySingleBotRoster(config) {
   const bots = getEnabledMultiBots(config)
-  if (bots.length === 1) {
+  const multiAllowed = config.multiUser?.enabled !== false
+  if (bots.length === 1 || (bots.length > 1 && !multiAllowed)) {
     config.bot = {
-      ...(config.bot || {}),
+      ...mergeBotOverrides(config.bot, bots[0].botOverrides),
       username: bots[0].name
+    }
+    if (bots.length > 1 && !multiAllowed) {
+      console.log(`[CONFIG] multiUser.enabled=false; using first enabled bot account ${bots[0].name}.`)
     }
   }
   return config
@@ -5230,7 +5488,10 @@ async function waitForMultiMasterRunning(config) {
 
 function makeMultiWorkerConfig(config, plan, assignment) {
   const workerConfig = cloneJson(config)
-  workerConfig.bot = { ...(workerConfig.bot || {}), username: assignment.name }
+  workerConfig.bot = {
+    ...mergeBotOverrides(workerConfig.bot || {}, assignment.botOverrides || {}),
+    username: assignment.name
+  }
   workerConfig.files = {
     ...(workerConfig.files || {}),
     progressFile: assignment.progressFile,
@@ -5332,6 +5593,7 @@ function runSingleDumpTestSession(config) {
   return new Promise((resolve) => {
     const bot = createBot(config)
     bot.loadPlugin(pathfinder)
+    installPlatformSafety(bot, config)
 
     let settled = false
     const settle = () => {
@@ -5340,8 +5602,42 @@ function runSingleDumpTestSession(config) {
       resolve()
     }
 
-    bot.once('spawn', async () => {
+    let printerStarted = false
+    let startupPending = false
+    let spawnedCount = 0
+    let spawnFallbackTimer = null
+
+    const startAfterSpawn = async (trigger = 'threshold') => {
+      if (printerStarted || startupPending) return
+      startupPending = true
+      if (spawnFallbackTimer) {
+        clearTimeout(spawnFallbackTimer)
+        spawnFallbackTimer = null
+      }
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      const triggerLabel = trigger === 'fallback'
+        ? `Fallback startup after ${spawnedCount}/${reqSpawn} spawn event(s).`
+        : `Threshold reached (${spawnedCount}/${reqSpawn}).`
+      console.log(`[SPAWN] ${triggerLabel} Delaying startup...`)
+
       const printer = config.printer || {}
+      await delay(toNumber(printer.startDelayMs, 1500))
+
+      let attempts = 0
+      while (attempts < 20) {
+        const p = bot?.entity?.position
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) break
+        await delay(500)
+        attempts++
+      }
+
+      if (!isPlatformNearby(bot, config)) {
+        console.log(`[STATE] Bot is not near the mapart platform (spawn ${spawnedCount}). Waiting idle.`)
+        return
+      }
+
+      printerStarted = true
       const allowJump = printer.allowJump !== false
 
       console.log('[TEST-DUMP] Connected.')
@@ -5357,6 +5653,19 @@ function runSingleDumpTestSession(config) {
         bot.quit('dump test complete')
         settle()
       }
+    }
+
+    bot.on('spawn', async () => {
+      spawnedCount += 1
+      if (printerStarted || startupPending) return
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (spawnedCount < reqSpawn) {
+        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        return
+      }
+
+      await startAfterSpawn('threshold')
     })
 
     bot.on('kicked', (reason) => {
@@ -5493,8 +5802,42 @@ function runSingleMovingPlaceTestSession(config) {
       resolve()
     }
 
-    bot.once('spawn', async () => {
+    let printerStarted = false
+    let startupPending = false
+    let spawnedCount = 0
+    let spawnFallbackTimer = null
+
+    const startAfterSpawn = async (trigger = 'threshold') => {
+      if (printerStarted || startupPending) return
+      startupPending = true
+      if (spawnFallbackTimer) {
+        clearTimeout(spawnFallbackTimer)
+        spawnFallbackTimer = null
+      }
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      const triggerLabel = trigger === 'fallback'
+        ? `Fallback startup after ${spawnedCount}/${reqSpawn} spawn event(s).`
+        : `Threshold reached (${spawnedCount}/${reqSpawn}).`
+      console.log(`[SPAWN] ${triggerLabel} Delaying startup...`)
+
       const printer = config.printer || {}
+      await delay(toNumber(printer.startDelayMs, 1500))
+
+      let attempts = 0
+      while (attempts < 20) {
+        const p = bot?.entity?.position
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) break
+        await delay(500)
+        attempts++
+      }
+
+      if (!isPlatformNearby(bot, config)) {
+        console.log(`[STATE] Bot is not near the mapart platform (spawn ${spawnedCount}). Waiting idle.`)
+        return
+      }
+
+      printerStarted = true
       const allowJump = printer.allowJump !== false
 
       console.log('[TEST-MOVE-PLACE] Connected.')
@@ -5510,6 +5853,19 @@ function runSingleMovingPlaceTestSession(config) {
         bot.quit('moving place test complete')
         settle()
       }
+    }
+
+    bot.on('spawn', async () => {
+      spawnedCount += 1
+      if (printerStarted || startupPending) return
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (spawnedCount < reqSpawn) {
+        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        return
+      }
+
+      await startAfterSpawn('threshold')
     })
 
     bot.on('kicked', (reason) => {
@@ -5671,7 +6027,7 @@ async function placeNervScannerTarget(bot, config, target) {
         bot.setControlState('sneak', false)
       }
     }
-  } 
+  }
 
   throw lastErr || new Error('scanner placement failed')
 }
@@ -5966,8 +6322,37 @@ function runSingleNervScannerTestSession(config) {
       resolve()
     }
 
-    bot.once('spawn', async () => {
+    let printerStarted = false
+    let spawnedCount = 0
+    bot.on('spawn', async () => {
+      spawnedCount += 1
+      if (printerStarted) return
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (spawnedCount < reqSpawn) {
+        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        return
+      }
+
+      console.log(`[SPAWN] Threshold reached (${spawnedCount}/${reqSpawn}). Delaying startup...`)
+
       const printer = config.printer || {}
+      await delay(toNumber(printer.startDelayMs, 1500))
+
+      let attempts = 0
+      while (attempts < 20) {
+        const p = bot?.entity?.position
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) break
+        await delay(500)
+        attempts++
+      }
+
+      if (!isPlatformNearby(bot, config)) {
+        console.log(`[STATE] Bot is not near the mapart platform (spawn ${spawnedCount}). Waiting idle.`)
+        return
+      }
+
+      printerStarted = true
       const allowJump = printer.allowJump !== false
 
       console.log('[TEST-NERV-SCANNER] Connected.')
@@ -6012,8 +6397,37 @@ function runSingleNervWorkloadTestSession(config) {
       resolve()
     }
 
-    bot.once('spawn', async () => {
+    let printerStarted = false
+    let spawnedCount = 0
+    bot.on('spawn', async () => {
+      spawnedCount += 1
+      if (printerStarted) return
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (spawnedCount < reqSpawn) {
+        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        return
+      }
+
+      console.log(`[SPAWN] Threshold reached (${spawnedCount}/${reqSpawn}). Delaying startup...`)
+
       const printer = config.printer || {}
+      await delay(toNumber(printer.startDelayMs, 1500))
+
+      let attempts = 0
+      while (attempts < 20) {
+        const p = bot?.entity?.position
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) break
+        await delay(500)
+        attempts++
+      }
+
+      if (!isPlatformNearby(bot, config)) {
+        console.log(`[STATE] Bot is not near the mapart platform (spawn ${spawnedCount}). Waiting idle.`)
+        return
+      }
+
+      printerStarted = true
       const allowJump = printer.allowJump !== false
 
       console.log('[TEST-NERV-WORKLOAD] Connected.')
@@ -6274,7 +6688,38 @@ function runSingleInventoryPlanTestSession(config) {
       resolve()
     }
 
-    bot.once('spawn', async () => {
+    let printerStarted = false
+    let spawnedCount = 0
+    bot.on('spawn', async () => {
+      spawnedCount += 1
+      if (printerStarted) return
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (spawnedCount < reqSpawn) {
+        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        return
+      }
+
+      console.log(`[SPAWN] Threshold reached (${spawnedCount}/${reqSpawn}). Delaying startup...`)
+
+      const printer = config.printer || {}
+      await delay(toNumber(printer.startDelayMs, 1500))
+
+      let attempts = 0
+      while (attempts < 20) {
+        const p = bot?.entity?.position
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) break
+        await delay(500)
+        attempts++
+      }
+
+      if (!isPlatformNearby(bot, config)) {
+        console.log(`[STATE] Bot is not near the mapart platform (spawn ${spawnedCount}). Waiting idle.`)
+        return
+      }
+
+      printerStarted = true
+
       console.log('[TEST-INVENTORY-PLAN] Connected.')
 
       try {
@@ -6315,8 +6760,37 @@ function runSingleInventoryCycleTestSession(config) {
       resolve()
     }
 
-    bot.once('spawn', async () => {
+    let printerStarted = false
+    let spawnedCount = 0
+    bot.on('spawn', async () => {
+      spawnedCount += 1
+      if (printerStarted) return
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (spawnedCount < reqSpawn) {
+        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        return
+      }
+
+      console.log(`[SPAWN] Threshold reached (${spawnedCount}/${reqSpawn}). Delaying startup...`)
+
       const printer = config.printer || {}
+      await delay(toNumber(printer.startDelayMs, 1500))
+
+      let attempts = 0
+      while (attempts < 20) {
+        const p = bot?.entity?.position
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) break
+        await delay(500)
+        attempts++
+      }
+
+      if (!isPlatformNearby(bot, config)) {
+        console.log(`[STATE] Bot is not near the mapart platform (spawn ${spawnedCount}). Waiting idle.`)
+        return
+      }
+
+      printerStarted = true
       const allowJump = printer.allowJump !== false
 
       console.log('[TEST-INVENTORY-CYCLE] Connected.')
@@ -6361,8 +6835,37 @@ function runSingleRepairTestSession(config) {
       resolve()
     }
 
-    bot.once('spawn', async () => {
+    let printerStarted = false
+    let spawnedCount = 0
+    bot.on('spawn', async () => {
+      spawnedCount += 1
+      if (printerStarted) return
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (spawnedCount < reqSpawn) {
+        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        return
+      }
+
+      console.log(`[SPAWN] Threshold reached (${spawnedCount}/${reqSpawn}). Delaying startup...`)
+
       const printer = config.printer || {}
+      await delay(toNumber(printer.startDelayMs, 1500))
+
+      let attempts = 0
+      while (attempts < 20) {
+        const p = bot?.entity?.position
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) break
+        await delay(500)
+        attempts++
+      }
+
+      if (!isPlatformNearby(bot, config)) {
+        console.log(`[STATE] Bot is not near the mapart platform (spawn ${spawnedCount}). Waiting idle.`)
+        return
+      }
+
+      printerStarted = true
       const allowJump = printer.allowJump !== false
 
       console.log('[TEST-REPAIR] Connected.')
@@ -6404,11 +6907,18 @@ function getReconnectConfig(config) {
   }
 }
 
-function shouldRetryReconnect(session) {
+function shouldRetryReconnect(session, config) {
   const endReason = String(session?.endReason || '').toLowerCase()
   const lastError = String(session?.lastError || '').toLowerCase()
   const kicked = String(session?.kickedReason || '').toLowerCase()
   const text = `${endReason} ${lastError} ${kicked}`
+
+  if (config?.bot?.skipReconnectOnModdedKick !== false) {
+    if (text.includes('fabric') || text.includes('registry entry namespaces')) {
+      console.log('[RECONNECT] Skipped reconnect because server requires unsupported client mods.')
+      return false
+    }
+  }
 
   const nonRetryHints = [
     'disconnect.quitting',
@@ -6439,6 +6949,204 @@ function shouldRetryReconnect(session) {
   return true
 }
 
+function getRequiredSpawnCount(config) {
+  const is6b6t = config.connection?.active === '6b6t' || String(config.bot?.host || '').includes('6b6t')
+  return toNumber(config.bot?.requiredSpawnCountBeforeStartup, is6b6t ? 2 : 1)
+}
+
+function getPlatformBounds(config) {
+  const mapCorner = config.machine?.mapCorner
+  if (!mapCorner || !Number.isFinite(mapCorner.x) || !Number.isFinite(mapCorner.z)) {
+    return null
+  }
+  const cx = toNumber(mapCorner.x, 0)
+  const cz = toNumber(mapCorner.z, 0)
+  const mw = toNumber(config.machine?.mapSize?.width, 128)
+  const mh = toNumber(config.machine?.mapSize?.height, 128)
+
+  return {
+    minX: Math.min(cx, cx + mw, cx - mw) - 30,
+    maxX: Math.max(cx, cx + mw, cx - mw) + 30,
+    minZ: Math.min(cz, cz + mh, cz - mh) - 30,
+    maxZ: Math.max(cz, cz + mh, cz - mh) + 30
+  }
+}
+
+function isPositionUsable(pos) {
+  return pos && Number.isFinite(pos.x) && Number.isFinite(pos.z) && (Math.abs(pos.x) > 1 || Math.abs(pos.z) > 1)
+}
+
+function isPositionInsidePlatformBounds(pos, config) {
+  const bounds = getPlatformBounds(config)
+  if (!bounds) return true
+  if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.z)) return false
+  return pos.x >= bounds.minX && pos.x <= bounds.maxX && pos.z >= bounds.minZ && pos.z <= bounds.maxZ
+}
+
+function getPlatformSeedPosition(config) {
+  const mapCorner = config.machine?.mapCorner
+  if (Number.isFinite(mapCorner?.x) && Number.isFinite(mapCorner?.y) && Number.isFinite(mapCorner?.z)) {
+    return {
+      x: Number(mapCorner.x) + 0.5,
+      y: Number(mapCorner.y),
+      z: Number(mapCorner.z) + 0.5
+    }
+  }
+
+  const targetAnchor = config.anchorTranslation?.targetAnchor
+  if (Number.isFinite(targetAnchor?.x) && Number.isFinite(targetAnchor?.y) && Number.isFinite(targetAnchor?.z)) {
+    return {
+      x: Number(targetAnchor.x) + 0.5,
+      y: Number(targetAnchor.y),
+      z: Number(targetAnchor.z) + 0.5
+    }
+  }
+
+  const bounds = getPlatformBounds(config)
+  if (bounds) {
+    return {
+      x: (bounds.minX + bounds.maxX) / 2,
+      y: toNumber(config.machine?.mapCorner?.y, toNumber(config.anchorTranslation?.targetAnchor?.y, 64)),
+      z: (bounds.minZ + bounds.maxZ) / 2
+    }
+  }
+
+  return null
+}
+
+function seedBotPositionFromPlatform(bot, config, reason = 'position-seed') {
+  if (config.bot?.seedPositionFromPlatformOnSpawn === false) return false
+  const seed = getPlatformSeedPosition(config)
+  if (!seed || !bot?.entity?.position) return false
+
+  try {
+    if (typeof bot.entity.position.set === 'function') {
+      bot.entity.position.set(seed.x, seed.y, seed.z)
+    } else {
+      bot.entity.position.x = seed.x
+      bot.entity.position.y = seed.y
+      bot.entity.position.z = seed.z
+    }
+    if (bot.entity.velocity && typeof bot.entity.velocity.set === 'function') {
+      bot.entity.velocity.set(0, 0, 0)
+    }
+    console.log(`[POSITION-SEED] ${reason}: seeded internal Mineflayer position to ${seed.x.toFixed(1)},${seed.y.toFixed(1)},${seed.z.toFixed(1)} from platform config.`)
+    return true
+  } catch (err) {
+    console.log(`[POSITION-SEED-WARN] Could not seed internal position: ${err?.message || err}`)
+    return false
+  }
+}
+
+function isPlatformNearby(bot, config) {
+  const bounds = getPlatformBounds(config)
+  if (!bounds) {
+    return true
+  }
+
+  const botPos = bot?.entity?.position
+  if (!botPos || !Number.isFinite(botPos.x) || !Number.isFinite(botPos.z)) {
+    console.log(`[STATE] Platform check strictly failed because coordinate data is completely missing or NaN. botPos=${JSON.stringify(botPos)}`)
+    return false
+  }
+
+  if (!isPositionInsidePlatformBounds(botPos, config)) {
+    console.log(`[STATE] Bot is at X:${Math.round(botPos.x)} Z:${Math.round(botPos.z)} which is too far from platform bounds X(${Math.round(bounds.minX)} to ${Math.round(bounds.maxX)}) Z(${Math.round(bounds.minZ)} to ${Math.round(bounds.maxZ)}).`)
+    return false
+  }
+  return true
+}
+
+function stopBotMovement(bot) {
+  for (const control of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) {
+    try { bot.setControlState(control, false) } catch { }
+  }
+  try { bot.pathfinder?.stop?.() } catch { }
+  try { bot.pathfinder?.setGoal?.(null) } catch { }
+}
+
+function getPlatformHoldReason(bot, config) {
+  const pos = bot?.entity?.position
+  if (!isPositionUsable(pos)) return `position-not-ready p=${JSON.stringify(pos)}`
+  if (!isPositionInsidePlatformBounds(pos, config)) return `outside-platform p=${JSON.stringify(pos)}`
+  return ''
+}
+
+async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
+  if (config.advanced?.platformWatchdogEnabled === false || getPlatformBounds(config) == null) return
+  if (isPositionUsable(bot?.entity?.position) && isPositionInsidePlatformBounds(bot.entity.position, config)) return
+
+  if (bot.__nervPlatformHoldPromise) {
+    return bot.__nervPlatformHoldPromise
+  }
+
+  bot.__nervPlatformHoldPromise = (async () => {
+    const pollMs = Math.max(250, toNumber(config.advanced?.platformWatchdogPollMs, 1000))
+    const logMs = Math.max(1000, toNumber(config.advanced?.platformHoldLogMs, 5000))
+    let lastLog = 0
+    let announced = false
+
+    while (bot?._client && bot._client.state !== 'disconnected') {
+      const pos = bot?.entity?.position
+      if (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)) {
+        if (announced) {
+          console.log(`[PLATFORM-HOLD] Recovered on platform at X:${Math.round(pos.x)} Z:${Math.round(pos.z)}. Resuming.`)
+        }
+        return
+      }
+
+      stopBotMovement(bot)
+      const now = Date.now()
+      if (!announced || now - lastLog >= logMs) {
+        console.log(`[PLATFORM-HOLD] Paused ${reason}; waiting for platform position. ${getPlatformHoldReason(bot, config)}`)
+        lastLog = now
+        announced = true
+      }
+      await delay(pollMs)
+    }
+  })()
+
+  try {
+    await bot.__nervPlatformHoldPromise
+  } finally {
+    bot.__nervPlatformHoldPromise = null
+  }
+}
+
+function installPlatformSafety(bot, config) {
+  if (config.advanced?.platformWatchdogEnabled === false || bot.__nervPlatformSafetyInstalled) return
+  bot.__nervPlatformSafetyInstalled = true
+
+  const pollMs = Math.max(250, toNumber(config.advanced?.platformWatchdogPollMs, 1000))
+  const timer = setInterval(() => {
+    if (!bot.__nervPlatformWatchdogActive) return
+    if (!getPlatformBounds(config)) return
+    const pos = bot?.entity?.position
+    if (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)) return
+    stopBotMovement(bot)
+    void waitForPlatformReady(bot, config, 'runtime-watchdog')
+  }, pollMs)
+  timer.unref?.()
+  bot.once('end', () => clearInterval(timer))
+
+  if (bot.pathfinder?.goto && !bot.pathfinder.__nervPlatformGotoWrapped) {
+    const originalGoto = bot.pathfinder.goto.bind(bot.pathfinder)
+    bot.pathfinder.goto = async (goal) => {
+      await waitForPlatformReady(bot, config, 'before-path')
+      try {
+        return await originalGoto(goal)
+      } catch (err) {
+        if (!isPositionUsable(bot?.entity?.position) || !isPositionInsidePlatformBounds(bot.entity.position, config)) {
+          await waitForPlatformReady(bot, config, 'path-interrupted')
+          return await originalGoto(goal)
+        }
+        throw err
+      }
+    }
+    bot.pathfinder.__nervPlatformGotoWrapped = true
+  }
+}
+
 function logStartupSummary(config, reconnect) {
   const bot = config.bot || {}
   const files = config.files || {}
@@ -6466,9 +7174,11 @@ function runSingleSession(config, sessionNumber) {
   return new Promise((resolve) => {
     const bot = createBot(config)
     bot.loadPlugin(pathfinder)
+    installPlatformSafety(bot, config)
 
     let lastErrorText = ''
     let kickedText = ''
+    let successfulStartup = false
 
     let settled = false
     const settle = (reason) => {
@@ -6477,19 +7187,69 @@ function runSingleSession(config, sessionNumber) {
       resolve({
         endReason: reason || 'disconnected',
         lastError: lastErrorText,
-        kickedReason: kickedText
+        kickedReason: kickedText,
+        successfulStartup
       })
     }
 
-    bot.once('spawn', async () => {
+    let printerStarted = false
+    let startupPending = false
+    let spawnedCount = 0
+    let spawnFallbackTimer = null
+
+    const startAfterSpawn = async (trigger = 'threshold') => {
+      if (printerStarted || startupPending) return
+      startupPending = true
+      if (spawnFallbackTimer) {
+        clearTimeout(spawnFallbackTimer)
+        spawnFallbackTimer = null
+      }
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      const triggerLabel = trigger === 'fallback'
+        ? `Fallback startup after ${spawnedCount}/${reqSpawn} spawn event(s).`
+        : `Threshold reached (${spawnedCount}/${reqSpawn}).`
+      console.log(`[SPAWN] ${triggerLabel} Delaying startup...`)
+
       const printer = config.printer || {}
+      await delay(toNumber(printer.startDelayMs, 1500))
+
+      const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 60)) * 2
+      const waitForPlatformPosition = config.bot?.waitForPlatformPositionOnSpawn !== false && getPlatformBounds(config) != null
+      let attempts = 0
+      while (attempts < maxAttempts) {
+        const p = bot?.entity?.position
+
+        if (isPositionUsable(p) && (!waitForPlatformPosition || isPositionInsidePlatformBounds(p, config))) {
+          break
+        }
+
+        if (attempts > 0 && attempts % 10 === 0) {
+          const reason = isPositionUsable(p) ? 'not near platform yet' : 'missing or resetting'
+          console.log(`[SPAWN] Coordinates ${reason}... (${attempts}/${maxAttempts}) p=${JSON.stringify(p)}`)
+        }
+        await delay(500)
+        attempts++
+      }
+
+      const finalPos = bot?.entity?.position
+      if (!isPositionUsable(finalPos)) {
+        seedBotPositionFromPlatform(bot, config, 'spawn-position-nan')
+      }
+
+      if (!isPositionUsable(bot?.entity?.position) || !isPositionInsidePlatformBounds(bot.entity.position, config)) {
+        console.log(`[SPAWN-HOLD] Position was not ready/on-platform after ${Math.round(maxAttempts / 2)}s. Holding instead of quitting.`)
+        await waitForPlatformReady(bot, config, 'spawn')
+      }
+
+      printerStarted = true
+      successfulStartup = true
+      bot.__nervPlatformWatchdogActive = true
       const allowJump = printer.allowJump !== false
 
       console.log(`[SPAWN] Connected. session=${sessionNumber}`)
 
       configurePathfinderMovements(bot, config)
-
-      await delay(toNumber(printer.startDelayMs, 1500))
 
       bot.on('physicsTick', () => {
         if (String(printer.sprintMode || 'always').toLowerCase() === 'always') {
@@ -6542,6 +7302,26 @@ function runSingleSession(config, sessionNumber) {
       } catch (err) {
         console.log('[FATAL]', err?.message || err)
       }
+    }
+
+    bot.on('spawn', async () => {
+      spawnedCount += 1
+      if (printerStarted || startupPending) return
+
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (spawnedCount < reqSpawn) {
+        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        if (!spawnFallbackTimer) {
+          const fallbackMs = Math.max(1000, toNumber(config.bot?.requiredSpawnFallbackSeconds, 25) * 1000)
+          spawnFallbackTimer = setTimeout(() => {
+            void startAfterSpawn('fallback')
+          }, fallbackMs)
+          spawnFallbackTimer.unref?.()
+        }
+        return
+      }
+
+      await startAfterSpawn('threshold')
     })
 
     bot.on('messagestr', (message) => {
@@ -6591,8 +7371,8 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
       } finally {
         clearInterval(heartbeatTimer)
       }
-      const retryable = shouldRetryReconnect(session)
-      console.log(`[SESSION] attempt=${attempt} end=${session.endReason} retryable=${retryable}`)
+      const retryable = shouldRetryReconnect(session, workerConfig)
+      console.log(`[SESSION] attempt=${attempt} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
 
       if (!reconnect.enabled || !retryable || attempt >= reconnect.maxAttempts) {
         break
@@ -6600,7 +7380,12 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
 
       console.log(`[RECONNECT] Retrying in ${reconnect.delayMs}ms. reason=${session.endReason}`)
       await delay(reconnect.delayMs)
-      attempt += 1
+      if (session.successfulStartup === true) {
+        if (attempt > 1) console.log('[RECONNECT] Previous session reached startup; resetting reconnect attempt counter.')
+        attempt = 1
+      } else {
+        attempt += 1
+      }
     }
   })
 }
@@ -6717,8 +7502,8 @@ async function start() {
     }
 
     const session = await runSingleSession(config, attempt)
-    const retryable = shouldRetryReconnect(session)
-    console.log(`[SESSION] attempt=${attempt} end=${session.endReason} retryable=${retryable}`)
+    const retryable = shouldRetryReconnect(session, config)
+    console.log(`[SESSION] attempt=${attempt} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
 
     if (!reconnect.enabled) {
       break
@@ -6736,7 +7521,12 @@ async function start() {
 
     console.log(`[RECONNECT] Retrying in ${reconnect.delayMs}ms. reason=${session.endReason}`)
     await delay(reconnect.delayMs)
-    attempt += 1
+    if (session.successfulStartup === true) {
+      if (attempt > 1) console.log('[RECONNECT] Previous session reached startup; resetting reconnect attempt counter.')
+      attempt = 1
+    } else {
+      attempt += 1
+    }
   }
 }
 
