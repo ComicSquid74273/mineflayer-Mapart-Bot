@@ -26,6 +26,13 @@ const TEST_BOT_CONFIG_FILE = path.resolve(process.cwd(), 'config.test.json')
 const LOG_FILE = path.resolve(process.cwd(), 'logs', 'nerv-printer.log')
 const logContext = new AsyncLocalStorage()
 const botLogStreams = new Map()
+const stdinCommandState = {
+  initialized: false,
+  rl: null,
+  status: null,
+  queuedVerificationAction: null,
+  verificationWaiter: null
+}
 
 function formatLogArg(value) {
   if (typeof value === 'string') return value
@@ -7226,36 +7233,185 @@ function createStdinLineReader() {
   })
 }
 
+function setRuntimeCommandStatus(nextStatus) {
+  if (!nextStatus || typeof nextStatus !== 'object') return
+  stdinCommandState.status = {
+    ...(stdinCommandState.status || {}),
+    ...nextStatus,
+    updatedAt: Date.now()
+  }
+}
+
+function clearRuntimeCommandStatus() {
+  stdinCommandState.status = null
+}
+
+function formatRuntimeCommandStatus() {
+  const status = stdinCommandState.status
+  if (!status) return 'no active runtime status yet.'
+  const updatedAgoMs = Math.max(0, Date.now() - toNumber(status.updatedAt, Date.now()))
+  const updatedAgoSeconds = Math.round(updatedAgoMs / 1000)
+  return [
+    `phase=${status.phase || 'unknown'}`,
+    `account=${status.account || 'unknown'}`,
+    `host=${status.host || 'unknown'}`,
+    `version=${status.version || 'unknown'}`,
+    `session=${status.sessionNumber ?? 'unknown'}`,
+    `tokenWaiting=${status.tokenWaiting === true}`,
+    `code=${status.verificationCode || 'none'}`,
+    `updated=${updatedAgoSeconds}s-ago`
+  ].join(' ')
+}
+
+function ensureStdinCommandInterface() {
+  if (stdinCommandState.initialized) return stdinCommandState.rl
+  stdinCommandState.initialized = true
+
+  if (!process.stdin || typeof process.stdin.on !== 'function' || process.stdin.isTTY === false) {
+    console.log('[COMMAND] Interactive stdin is not available; terminal commands are disabled for this run.')
+    return null
+  }
+
+  const rl = createStdinLineReader()
+  stdinCommandState.rl = rl
+
+  rl.on('line', (line) => {
+    const value = String(line || '').trim().toLowerCase()
+    if (!value) return
+
+    if (value === 'status') {
+      console.log(`[COMMAND] ${formatRuntimeCommandStatus()}`)
+      return
+    }
+
+    if (value === 'help' || value === '?') {
+      console.log('[COMMAND] Commands: status, verified, refresh')
+      return
+    }
+
+    const verificationAction = (value === 'verified' || value === 'verify' || value === 'done')
+      ? 'verified'
+      : ((value === 'refresh' || value === 'retry') ? 'refresh' : '')
+
+    if (!verificationAction) {
+      if (stdinCommandState.verificationWaiter) {
+        console.log('[VERIFY] Waiting. Type "verified" after website verification, or "refresh" for a new code.')
+      }
+      return
+    }
+
+    if (stdinCommandState.verificationWaiter) {
+      const waiter = stdinCommandState.verificationWaiter
+      stdinCommandState.verificationWaiter = null
+      waiter(verificationAction)
+      return
+    }
+
+    stdinCommandState.queuedVerificationAction = {
+      action: verificationAction,
+      at: Date.now()
+    }
+    console.log(`[COMMAND] Stored ${verificationAction} for the next verification prompt.`)
+  })
+
+  console.log('[COMMAND] Interactive commands enabled. Type "status", "verified", or "refresh" while the bot is running.')
+  return rl
+}
+
 function waitForVerificationInput({ account, host, version, code, refreshMs = 9 * 60 * 1000 }) {
   const verifyUrl = 'https://6b6t.org/verify'
   console.log(`[VERIFY] account=${account} host=${host} version=${version} code=${code || 'unknown'} url=${verifyUrl}`)
   console.log('[VERIFY] Open the URL, verify this account/code, then type "verified" here. Type "refresh" to request a fresh code.')
 
   return new Promise((resolve) => {
-    const rl = createStdinLineReader()
+    ensureStdinCommandInterface()
+    const queued = stdinCommandState.queuedVerificationAction
+    if (queued && Date.now() - queued.at <= Math.max(30000, toNumber(refreshMs, 9 * 60 * 1000))) {
+      stdinCommandState.queuedVerificationAction = null
+      console.log(`[VERIFY] Using queued terminal command: ${queued.action}`)
+      resolve(queued.action)
+      return
+    }
     const timer = setTimeout(() => {
+      stdinCommandState.verificationWaiter = null
       console.log(`[VERIFY] Code for account=${account} is near expiry; refreshing by retrying the same test case.`)
-      cleanup('refresh')
+      resolve('refresh')
     }, Math.max(30000, toNumber(refreshMs, 9 * 60 * 1000)))
     timer.unref?.()
 
-    const cleanup = (value) => {
+    stdinCommandState.verificationWaiter = (value) => {
       clearTimeout(timer)
-      rl.close()
       resolve(value)
     }
-
-    rl.on('line', (line) => {
-      const value = String(line || '').trim().toLowerCase()
-      if (value === 'verified' || value === 'verify' || value === 'done') {
-        cleanup('verified')
-      } else if (value === 'refresh' || value === 'retry') {
-        cleanup('refresh')
-      } else {
-        console.log('[VERIFY] Waiting. Type "verified" after website verification, or "refresh" for a new code.')
-      }
-    })
   })
+}
+
+async function resolveTokenVerificationSession({
+  session,
+  account,
+  host,
+  version,
+  sessionNumber,
+  rerun,
+  retryDelayMs = 3000
+}) {
+  let current = session
+  setRuntimeCommandStatus({
+    phase: current?.tokenVerification ? 'token-verification' : 'running',
+    account,
+    host,
+    version,
+    sessionNumber,
+    tokenWaiting: current?.tokenVerification === true,
+    verificationCode: current?.verificationCode || ''
+  })
+  while (current?.tokenVerification) {
+    const refreshMs = Math.max(60000, toNumber(getCliValue('--verify-refresh-ms'), 9 * 60 * 1000))
+    setRuntimeCommandStatus({
+      phase: 'token-verification',
+      account,
+      host,
+      version,
+      sessionNumber,
+      tokenWaiting: true,
+      verificationCode: current?.verificationCode || ''
+    })
+    const action = await waitForVerificationInput({
+      account,
+      host,
+      version,
+      code: current.verificationCode,
+      refreshMs
+    })
+    console.log(action === 'verified'
+      ? `[VERIFY] account=${account} marked verified; retrying the same session.`
+      : `[VERIFY] account=${account} requested a fresh code; retrying the same session.`
+    )
+    setRuntimeCommandStatus({
+      phase: action === 'verified' ? 'retrying-after-verify' : 'retrying-after-refresh',
+      account,
+      host,
+      version,
+      sessionNumber,
+      tokenWaiting: false,
+      verificationCode: current?.verificationCode || ''
+    })
+    await delay(Math.max(1000, toNumber(getCliValue('--verify-retry-ms'), retryDelayMs)))
+    current = await rerun(action)
+    if (action === 'verified' && current?.tokenVerification) {
+      console.log(`[VERIFY] account=${account} still requires verification after retry; waiting for input again.`)
+    }
+  }
+  setRuntimeCommandStatus({
+    phase: current?.successfulStartup ? 'running' : 'reconnect-loop',
+    account,
+    host,
+    version,
+    sessionNumber,
+    tokenWaiting: false,
+    verificationCode: current?.verificationCode || ''
+  })
+  return current
 }
 
 function getRequiredSpawnCount(config) {
@@ -8460,6 +8616,7 @@ function runSingleSession(config, sessionNumber) {
     let spawnFallbackTimer = null
     let lastPlatformCacheLogKey = ''
     let lastPlatformCacheLogAt = 0
+    let verificationCode = ''
 
     const clonePos = (pos) => ({ x: Number(pos.x), y: Number(pos.y), z: Number(pos.z) })
     const recordPlatformPosition = (pos, source) => {
@@ -8511,8 +8668,15 @@ function runSingleSession(config, sessionNumber) {
         endReason: reason || 'disconnected',
         lastError: lastErrorText,
         kickedReason: kickedText,
-        successfulStartup
+        successfulStartup,
+        verificationCode: verificationCode || extractVerificationCode(`${reason || ''} ${lastErrorText} ${kickedText}`),
+        tokenVerification: isTokenVerificationText(`${reason || ''} ${lastErrorText} ${kickedText}`)
       })
+    }
+
+    const settleAndQuit = (reason) => {
+      settle(reason)
+      try { bot.quit(reason || 'token-verification-required') } catch { }
     }
 
     const startAfterSpawn = async (trigger = 'threshold') => {
@@ -8719,6 +8883,12 @@ function runSingleSession(config, sessionNumber) {
     })
 
     bot.on('messagestr', (message) => {
+      if (isTokenVerificationText(message)) {
+        verificationCode = extractVerificationCode(message)
+        console.log(`[VERIFY] token/web verification required: ${message}`)
+        settleAndQuit('token-verification-required')
+        return
+      }
       if (config.advanced?.debugPrints) {
         console.log(`[CHAT] ${message}`)
       }
@@ -8727,6 +8897,10 @@ function runSingleSession(config, sessionNumber) {
     bot.on('kicked', (reason) => {
       kickedText = typeof reason === 'string' ? reason : JSON.stringify(reason)
       console.log(`[KICKED] ${kickedText}`)
+      if (isTokenVerificationText(kickedText)) {
+        verificationCode = extractVerificationCode(kickedText)
+        settle('token-verification-required')
+      }
     })
 
     bot.on('error', (err) => {
@@ -9475,6 +9649,15 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
       const sessionConfig = activeHost ? makeHostConfig(workerConfig, activeHost) : workerConfig
       try {
         session = await runSingleSession(sessionConfig, attempt)
+        session = await resolveTokenVerificationSession({
+          session,
+          account: assignment.name || sessionConfig.bot?.username || 'MapartBot',
+          host: activeHost || sessionConfig.bot?.host || 'unknown-host',
+          version: sessionConfig.bot?.version || 'unknown-version',
+          sessionNumber: attempt,
+          retryDelayMs: Math.max(1000, Math.min(5000, toNumber(reconnect.delayMs, 3000))),
+          rerun: async () => await runSingleSession(sessionConfig, attempt)
+        })
       } finally {
         clearInterval(heartbeatTimer)
       }
@@ -9534,6 +9717,7 @@ async function runMultiUserLive(config, reconnect) {
 }
 
 async function start() {
+  ensureStdinCommandInterface()
   const config = loadConfig()
   const reconnect = getReconnectConfig(config)
   logStartupSummary(config, reconnect)
@@ -9640,7 +9824,16 @@ async function start() {
 
     const activeHost = runtimeHosts.length ? runtimeHosts[runtimeHostIndex] : config.bot?.host
     const sessionConfig = activeHost ? makeHostConfig(config, activeHost) : config
-    const session = await runSingleSession(sessionConfig, attempt)
+    let session = await runSingleSession(sessionConfig, attempt)
+    session = await resolveTokenVerificationSession({
+      session,
+      account: sessionConfig.bot?.username || 'MapartBot',
+      host: activeHost || sessionConfig.bot?.host || 'unknown-host',
+      version: sessionConfig.bot?.version || 'unknown-version',
+      sessionNumber: attempt,
+      retryDelayMs: Math.max(1000, Math.min(5000, toNumber(reconnect.delayMs, 3000))),
+      rerun: async () => await runSingleSession(sessionConfig, attempt)
+    })
     const retryable = shouldRetryReconnect(session, sessionConfig)
     console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
 
