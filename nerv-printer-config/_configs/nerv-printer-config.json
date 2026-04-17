@@ -14,13 +14,13 @@
           },
           {
             "name": "ComicBot002",
-            "enabled": true,
+            "enabled": false,
             "auth": "offline",
             "loginPassword": "gjZq56kCumgKp"
           },
           {
             "name": "ComicBot003",
-            "enabled": true,
+            "enabled": false,
             "auth": "offline",
             "loginPassword": "hGMsqs8vPt6w3"
           }
