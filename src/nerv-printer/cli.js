@@ -1773,15 +1773,22 @@ function stopMovementControls(bot) {
   }
 }
 
-function configurePathfinderMovements(bot, config) {
+function getPrinterSprintMode(config) {
+  return String(config?.printer?.sprintMode || 'notPlacing').toLowerCase()
+}
+
+function configurePathfinderMovements(bot, config, options = {}) {
   const printer = config.printer || {}
   const allowJump = printer.allowJump !== false
+  const allowSprint = options.allowSprint != null
+    ? options.allowSprint === true
+    : getPrinterSprintMode(config) !== 'off'
   const movements = new Movements(bot)
   movements.canDig = false
   movements.allow1by1towers = false
   movements.allowParkour = allowJump
-  movements.allowSprinting = true
-  movements.canSprint = true
+  movements.allowSprinting = allowSprint
+  movements.canSprint = allowSprint
   bot.pathfinder.setMovements(movements)
   return movements
 }
@@ -8228,10 +8235,10 @@ function isBotSessionLive(bot) {
   return bot?.__nervSessionActive !== false && bot?._client?.state !== 'disconnected'
 }
 
-async function holdForwardIntoPortal(bot, ms) {
+async function holdForwardIntoPortal(bot, config, ms) {
   const duration = Math.max(0, toNumber(ms, 3000))
   if (duration <= 0 || !isBotSessionLive(bot)) return
-  bot.setControlState('sprint', true)
+  bot.setControlState('sprint', getPrinterSprintMode(config) !== 'off')
   bot.setControlState('forward', true)
   await delay(duration)
   bot.setControlState('forward', false)
@@ -8278,7 +8285,7 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     } else {
       console.log(`[LOBBY-PORTAL-WARN] Leg ${legIndex}: no loaded nether_portal block found within ${searchRadius} blocks; walking forward like AutoPortal fallback.`)
     }
-    await holdForwardIntoPortal(bot, entryMs)
+    await holdForwardIntoPortal(bot, config, entryMs)
     await delay(waitAfterMs)
     return true
   }
@@ -8316,7 +8323,7 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
       return false
     }
 
-    await holdForwardIntoPortal(bot, entryMs)
+    await holdForwardIntoPortal(bot, config, entryMs)
     await delay(waitAfterMs)
     return true
   }
@@ -8736,8 +8743,11 @@ function runSingleSession(config, sessionNumber) {
       configurePathfinderMovements(bot, config)
 
       bot.on('physicsTick', () => {
-        if (String(printer.sprintMode || 'always').toLowerCase() === 'always') {
+        const sprintMode = getPrinterSprintMode(config)
+        if (sprintMode === 'always') {
           bot.setControlState('sprint', true)
+        } else if (sprintMode === 'off') {
+          bot.setControlState('sprint', false)
         }
 
         if (!allowJump) {
@@ -8745,7 +8755,7 @@ function runSingleSession(config, sessionNumber) {
         }
       })
 
-      bot.setControlState('sprint', true)
+      bot.setControlState('sprint', getPrinterSprintMode(config) === 'always')
       if (!allowJump) {
         bot.setControlState('jump', false)
       }

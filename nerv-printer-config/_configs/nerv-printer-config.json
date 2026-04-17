@@ -207,7 +207,7 @@
   "advanced": {
     "antiHunger": {
       "enabled": true,
-      "sprint": true,
+      "sprint": false,
       "onGround": true
     },
     "platformWatchdogEnabled": true,
