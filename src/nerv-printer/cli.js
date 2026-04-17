@@ -891,6 +891,11 @@ function createDefaultConfig() {
             spawnMissingPositionReconnectSeconds: 75,
             waitForPlatformPositionOnSpawn: true,
             seedPositionFromPlatformOnSpawn: true,
+            platformRecoveryTpa: {
+              enabled: true,
+              command: '/tpa ComicSquid74273',
+              retryMs: 300000
+            },
             chatLogin: {
               enabled: true,
               offlineOnly: true,
@@ -8461,6 +8466,54 @@ function isInsideLobbySpawnDisk(pos, portalConfig) {
   return distance2d(pos, toNumber(spawn.centerX, 0), toNumber(spawn.centerZ, 0)) <= radius
 }
 
+function getSpawnWaypointPoint(spawn, fallbackY = null) {
+  const waypoint = blockPosFromConfig(spawn?.waypoint)
+  if (waypoint) return waypoint
+  if (!Number.isFinite(Number(spawn?.centerX)) || !Number.isFinite(Number(spawn?.centerZ))) return null
+  return {
+    x: Number(spawn.centerX),
+    y: Number.isFinite(Number(fallbackY)) ? Number(fallbackY) : 20,
+    z: Number(spawn.centerZ)
+  }
+}
+
+function isNearSpawnWaypoint(pos, spawn) {
+  const waypoint = getSpawnWaypointPoint(spawn, pos?.y)
+  if (!waypoint) return false
+  const triggerRadius = Math.max(1, toNumber(spawn?.backoffTriggerRadius, 10))
+  return distance2d(pos, waypoint.x, waypoint.z) <= triggerRadius
+}
+
+function buildSpawnWaypointBackoffPoint(spawn, fallbackY = null) {
+  const waypoint = getSpawnWaypointPoint(spawn, fallbackY)
+  if (!waypoint) return null
+  const portal = blockPosFromConfig(spawn?.portal)
+  const backoffBlocks = Math.max(1, toNumber(spawn?.backoffBlocks, 5))
+  let stepX = 0
+  let stepZ = 0
+
+  if (portal) {
+    const deltaX = waypoint.x - portal.x
+    const deltaZ = waypoint.z - portal.z
+    if (Math.abs(deltaX) >= Math.abs(deltaZ) && deltaX !== 0) {
+      stepX = Math.sign(deltaX)
+    } else if (deltaZ !== 0) {
+      stepZ = Math.sign(deltaZ)
+    }
+  }
+
+  if (stepX === 0 && stepZ === 0) {
+    stepZ = 1
+  }
+
+  return {
+    x: waypoint.x + (stepX * backoffBlocks),
+    y: waypoint.y,
+    z: waypoint.z + (stepZ * backoffBlocks),
+    range: Math.max(1, toNumber(spawn?.backoffGoalRange, 1.5))
+  }
+}
+
 function isInsideLoginPortalZone(pos, portalConfig) {
   const login = portalConfig?.loginPortal || {}
   if (login.enabled === false) return false
@@ -9343,6 +9396,8 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
   const entryMs = Math.max(0, toNumber(portalConfig?.portalEntryMs, 3000))
   const waitAfterMs = Math.max(0, toNumber(portalConfig?.waitAfterPortalMs, 12000))
   const runtime = classifyRuntimePosition(bot, config, `lobby-portal-leg-${legIndex}`)
+  const matchedRegion = getMatchedLobbyRegion(pos, portalConfig)
+  const matchedSpawnRegion = matchedRegion?.action === 'spawn-portal' ? matchedRegion : null
   const sceneAction = String(runtime?.meteor?.best?.action || '')
   const scenePortalPoint = runtime?.meteor?.best?.portalPoint || buildMeteorScenePortalPoint(runtime?.meteor?.best?.scene)
   const savedSpatialEntry = chooseSavedSpatialPortalStep(
@@ -9381,14 +9436,25 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     return true
   }
 
-  if (isInsideLobbySpawnDisk(pos, portalConfig) || sceneAction === 'spawn-portal') {
+  if (matchedSpawnRegion || isInsideLobbySpawnDisk(pos, portalConfig) || sceneAction === 'spawn-portal') {
     const spawn = portalConfig.spawnDisk || {}
-    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: inside spawn disk or matched spawn scene; running spawn portal route.`)
+    const regionLabel = matchedSpawnRegion ? ` region=${matchedSpawnRegion.name}` : ''
+    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: matched spawn portal route${regionLabel}; running spawn portal route.`)
     await delay(Math.max(0, toNumber(spawn.waitBeforeMoveMs, 2500)))
     if (!isBotSessionLive(bot)) return false
-    if (!isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && sceneAction !== 'spawn-portal') {
+    const currentSpawnRegion = getMatchedLobbyRegion(bot?.entity?.position, portalConfig)
+    const stillInsideSpawnRegion = currentSpawnRegion?.action === 'spawn-portal'
+    if (!stillInsideSpawnRegion && !isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && sceneAction !== 'spawn-portal') {
       console.log(`[LOBBY-PORTAL] Leg ${legIndex}: left configured spawn disk before search; skipping portal movement.`)
       return false
+    }
+
+    if (spawn.backoffWhenNearWaypoint !== false && isNearSpawnWaypoint(bot?.entity?.position, spawn)) {
+      const backoffPoint = buildSpawnWaypointBackoffPoint(spawn, bot?.entity?.position?.y)
+      if (backoffPoint) {
+        console.log(`[LOBBY-PORTAL] Leg ${legIndex}: near spawn waypoint; backing off ${Math.max(1, toNumber(spawn.backoffBlocks, 5))} blocks before spawn portal walk.`)
+        await gotoLobbyPortalPoint(bot, config, backoffPoint, 'spawn waypoint backoff', timeoutMs, backoffPoint.range)
+      }
     }
 
     const portalBlock = findNearestNetherPortal(bot, searchRadius)
@@ -9514,6 +9580,43 @@ function getPlatformHoldReason(bot, config) {
   return ''
 }
 
+function getPlatformRecoveryTpaSettings(config) {
+  const recovery = config?.bot?.platformRecoveryTpa || {}
+  const command = String(recovery.command || '/tpa ComicSquid74273').trim()
+  return {
+    enabled: recovery.enabled !== false && command.length > 0,
+    command,
+    retryMs: Math.max(60000, toNumber(recovery.retryMs, 300000))
+  }
+}
+
+function shouldRequestPlatformRecoveryTpa(bot, config, runtime) {
+  if (bot.__nervAllowOffPlatformNavigation) return false
+  const settings = getPlatformRecoveryTpaSettings(config)
+  if (!settings.enabled) return false
+  const classification = runtime?.classification || classifyRuntimePosition(bot, config, 'platform-recovery-tpa').classification
+  if (classification?.platform === true) return false
+  return classification?.state === 'off-platform'
+}
+
+function maybeRequestPlatformRecoveryTpa(bot, config, reason, runtime) {
+  if (!shouldRequestPlatformRecoveryTpa(bot, config, runtime)) return false
+  const settings = getPlatformRecoveryTpaSettings(config)
+  const now = Date.now()
+  const retryMs = settings.retryMs
+  const lastAt = toNumber(bot.__nervPlatformRecoveryTpaLastAt, 0)
+  if (lastAt > 0 && now - lastAt < retryMs) return false
+  bot.__nervPlatformRecoveryTpaLastAt = now
+  try {
+    bot.chat(settings.command)
+    console.log(`[PLATFORM-TPA] Sent ${settings.command} because bot is off-platform in final world during ${reason}. Next retry in ${Math.round(retryMs / 60000)}m if still needed.`)
+    return true
+  } catch (err) {
+    console.log(`[PLATFORM-TPA-WARN] Failed to send ${settings.command} during ${reason}: ${err?.message || err}`)
+    return false
+  }
+}
+
 async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
   if (config.advanced?.platformWatchdogEnabled === false || getPlatformBounds(config) == null) return
   if (bot.__nervAllowOffPlatformNavigation) return
@@ -9548,6 +9651,7 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
       }
 
       stopBotMovement(bot)
+      maybeRequestPlatformRecoveryTpa(bot, config, reason, runtime)
       const now = Date.now()
       if (!announced || now - lastLog >= logMs) {
         console.log(`[PLATFORM-HOLD] Paused ${reason}; waiting for platform position. ${getPlatformHoldReason(bot, config)}`)

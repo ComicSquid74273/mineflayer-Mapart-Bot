@@ -14,9 +14,15 @@
           },
           {
             "name": "ComicBot002",
-            "enabled": false,
+            "enabled": true,
             "auth": "offline",
-            "loginPassword": "bot2_password"
+            "loginPassword": "gjZq56kCumgKp"
+          },
+          {
+            "name": "ComicBot003",
+            "enabled": true,
+            "auth": "offline",
+            "loginPassword": "hGMsqs8vPt6w3"
           }
 
     ],
@@ -68,6 +74,11 @@
           "spawnMissingPositionReconnectSeconds": 75,
           "waitForPlatformPositionOnSpawn": true,
           "seedPositionFromPlatformOnSpawn": true,
+          "platformRecoveryTpa": {
+            "enabled": true,
+            "command": "/tpa ComicSquid74273",
+            "retryMs": 300000
+          },
           "chatLogin": {
             "enabled": true,
             "offlineOnly": true,
@@ -126,6 +137,15 @@
                 "y": 20,
                 "z": 4,
                 "radius": 24
+              },
+              {
+                "name": "spawn-portal-overworld-33",
+                "type": "box",
+                "action": "spawn-portal",
+                "x": 33,
+                "y": 61,
+                "z": -53,
+                "radius": 16
               }
             ],
             "spawnDisk": {
@@ -134,6 +154,10 @@
               "centerZ": 4,
               "radius": 24,
               "waitBeforeMoveMs": 2500,
+              "backoffWhenNearWaypoint": true,
+              "backoffBlocks": 5,
+              "backoffTriggerRadius": 12,
+              "backoffGoalRange": 1.5,
               "twoStepRoute": false,
               "useConfiguredPortalTarget": true,
               "waypoint": {
@@ -206,7 +230,7 @@
     "northToSouth": true,
     "mapFillSquareSize": 4,
     "sprintMode": "off",
-    "fastTraversalEnabled": true,
+    "fastTraversalEnabled": false,
     "fastTraversalTickMs": 5,
     "fastTraversalCheckpointEveryRows": 10,
     "fastTraversalCatchupPasses": 2,
@@ -347,13 +371,13 @@
     }
   },
   "multiUser": {
-    "enabled": false,
+    "enabled": true,
     "mode": "file",
     "syncFolder": "./logs/nerv-printer-sync",
     "requireAllReady": true,
     "recoveryMarginBlocks": 20,
     "recoveryDelayMs": 2000,
-    "staleStateMs": 45000,
+    "staleStateMs": 50000,
     "heartbeatMs": 5000,
     "resumeExistingJob": true,
     "startAllOnMasterReady": true,
