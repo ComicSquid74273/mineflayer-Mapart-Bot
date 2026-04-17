@@ -197,7 +197,7 @@
     "northToSouth": true,
     "mapFillSquareSize": 4,
     "sprintMode": "off",
-    "fastTraversalEnabled": true,
+    "fastTraversalEnabled": false,
     "fastTraversalTickMs": 5,
     "fastTraversalCheckpointEveryRows": 10,
     "fastTraversalCatchupPasses": 2,
