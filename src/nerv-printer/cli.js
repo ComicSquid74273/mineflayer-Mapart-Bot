@@ -5,7 +5,7 @@ const path = require('path')
 const { AsyncLocalStorage } = require('async_hooks')
 const mineflayer = require('mineflayer')
 const nbt = require('prismarine-nbt')
-const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder')
+const { pathfinder, Movements, goals: { GoalNear, GoalBlock } } = require('mineflayer-pathfinder')
 const { createPlacementWorkload } = require('./placement/workload')
 
 const placementWorkload = createPlacementWorkload({
@@ -155,6 +155,609 @@ function writeJson(filePath, data) {
     fs.mkdirSync(dir, { recursive: true })
   }
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8')
+}
+
+function getMeteorSceneConfig(config) {
+  const raw = config?.advanced?.meteorSceneAwareness
+  if (raw === false) {
+    return {
+      enabled: false,
+      file: null,
+      minScore: 0.72,
+      labelHints: {}
+    }
+  }
+
+  return {
+    enabled: raw?.enabled !== false,
+    file: raw?.file || path.resolve(process.cwd(), 'spatial-awareness', 'meteor-scene-signatures.json'),
+    minScore: Math.max(0.45, Math.min(0.98, toNumber(raw?.minScore, 0.72))),
+    labelHints: raw?.labelHints && typeof raw.labelHints === 'object' ? raw.labelHints : {}
+  }
+}
+
+function getMeteorSceneNonAirBlocks(scene) {
+  return Math.max(0, toNumber(scene?.playerFingerprint?.nonAirBlocks, 0))
+}
+
+function isUsableMeteorScene(scene) {
+  if (!scene || typeof scene !== 'object') return false
+  const label = String(scene.label || '').trim().toLowerCase()
+  if (!label || label === 'scenes') return false
+  const nonAirBlocks = getMeteorSceneNonAirBlocks(scene)
+  const topBlocks = Array.isArray(scene?.playerFingerprint?.topBlocks) ? scene.playerFingerprint.topBlocks.length : 0
+  const hasPortalTarget = scene?.portalTarget?.found === true
+  const insidePortal = scene?.insidePortalBlock === true
+  return nonAirBlocks >= 24 || topBlocks > 0 || hasPortalTarget || insidePortal
+}
+
+function readMeteorSceneSnapshot(config) {
+  const meteor = getMeteorSceneConfig(config)
+  if (!meteor.enabled || !meteor.file) return null
+  const data = readOptionalJson(meteor.file)
+  if (!data || data.format !== 'comic-auto-portal-spatial-scenes-v1') return null
+  const scenes = Array.isArray(data.scenes) ? data.scenes.filter(isUsableMeteorScene) : []
+  if (!scenes.length) return null
+  return { ...data, scenes }
+}
+
+function countMapFromEntries(entries) {
+  const map = {}
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const name = String(entry?.name || '').trim()
+    if (!name) continue
+    map[name] = toNumber(entry?.count, 0)
+  }
+  return map
+}
+
+function sumCounts(map) {
+  return Object.values(map || {}).reduce((sum, value) => sum + Math.max(0, toNumber(value, 0)), 0)
+}
+
+function normalizeCountMap(map) {
+  const total = sumCounts(map)
+  if (total <= 0) return { total: 0, ratios: {} }
+  const ratios = {}
+  for (const [name, count] of Object.entries(map || {})) {
+    const ratio = Math.max(0, toNumber(count, 0)) / total
+    if (ratio > 0) ratios[name] = ratio
+  }
+  return { total, ratios }
+}
+
+function computeFingerprintOverlap(actualMap, expectedMap) {
+  const actual = normalizeCountMap(actualMap)
+  const expected = normalizeCountMap(expectedMap)
+  if (actual.total <= 0 || expected.total <= 0) return 0
+  const names = new Set([...Object.keys(actual.ratios), ...Object.keys(expected.ratios)])
+  let overlap = 0
+  for (const name of names) {
+    overlap += Math.min(actual.ratios[name] || 0, expected.ratios[name] || 0)
+  }
+  return Math.max(0, Math.min(1, overlap))
+}
+
+function extractRelevantChatMessages(scene) {
+  return (Array.isArray(scene?.recentServerMessages) ? scene.recentServerMessages : [])
+    .map((entry) => String(entry?.text || '').trim())
+    .filter(Boolean)
+}
+
+function topCountEntries(counts, limit = 14) {
+  return Object.entries(counts || {})
+    .filter(([name]) => name && name !== 'air' && name !== 'cave_air' && name !== 'void_air' && name !== 'unloaded')
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, Math.max(1, limit))
+    .map(([name, count]) => ({ name, count }))
+}
+
+function buildMeteorSignatureEntries(counts) {
+  const names = [
+    'nether_portal',
+    'obsidian',
+    'crying_obsidian',
+    'bedrock',
+    'end_stone',
+    'end_stone_bricks',
+    'stone_bricks',
+    'deepslate_tiles',
+    'sea_lantern',
+    'glowstone',
+    'glass',
+    'iron_bars',
+    'barrier',
+    'snow_block',
+    'blue_ice',
+    'smooth_stone',
+    'water',
+    'dispenser',
+    'repeater',
+    'redstone_wire'
+  ]
+  return names.map((name) => ({ name, count: toNumber(counts?.[name], 0) }))
+}
+
+function canReadBotWorld(bot) {
+  return Boolean(bot?.world && typeof bot.world.getBlock === 'function' && typeof bot?.blockAt === 'function')
+}
+
+function rememberRecentServerMessage(bot, message, source = 'chat') {
+  const text = String(message || '').trim()
+  if (!text) return
+  if (!Array.isArray(bot.__nervRecentServerMessages)) {
+    bot.__nervRecentServerMessages = []
+  }
+  bot.__nervRecentServerMessages.push({ text, source, at: Date.now() })
+  const max = 8
+  if (bot.__nervRecentServerMessages.length > max) {
+    bot.__nervRecentServerMessages.splice(0, bot.__nervRecentServerMessages.length - max)
+  }
+}
+
+function detectMeteorSceneAction(scene, config) {
+  const label = String(scene?.label || '').toLowerCase()
+  const loginSceneAwarenessEnabled = config?.advanced?.meteorSceneAwareness?.loginPortalEnabled === true
+  const explicit = String(getMeteorSceneConfig(config).labelHints?.[label] || '').trim().toLowerCase()
+  if (explicit) {
+    if (explicit === 'login-portal' && !loginSceneAwarenessEnabled) return 'unknown'
+    return explicit
+  }
+
+  const dimension = String(scene?.dimension || '').toLowerCase()
+  const portalFound = scene?.portalTarget?.found === true
+  const topBlocks = countMapFromEntries(scene?.playerFingerprint?.topBlocks)
+  const signatureBlocks = countMapFromEntries(scene?.playerFingerprint?.signatureBlocks)
+  const recentMessages = extractRelevantChatMessages(scene).join(' ').toLowerCase()
+  const looksLikeLoginPortal = recentMessages.includes('enter the server through the portal') || (dimension.includes('the_end') && portalFound)
+
+  if (label.includes('platform')) return 'platform'
+  if (looksLikeLoginPortal) return loginSceneAwarenessEnabled ? 'login-portal' : 'unknown'
+  if ((signatureBlocks.nether_portal || 0) >= 20 && (topBlocks.snow_block || 0) >= 100) return 'spawn-portal'
+  if (label.includes('spawn') && portalFound) return 'spawn-portal'
+  return portalFound ? 'spawn-portal' : 'unknown'
+}
+
+function buildMeteorScenePortalPoint(scene) {
+  const target = scene?.portalTarget
+  if (target?.found !== true || !target?.position) return null
+  if (!Number.isFinite(Number(target.position.x)) || !Number.isFinite(Number(target.position.y)) || !Number.isFinite(Number(target.position.z))) return null
+  return {
+    x: Number(target.position.x),
+    y: Number(target.position.y),
+    z: Number(target.position.z),
+    range: 2
+  }
+}
+
+function buildMeteorScenePlayerPoint(scene) {
+  const pos = scene?.playerPosition
+  if (!pos) return null
+  if (!Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.y)) || !Number.isFinite(Number(pos.z))) return null
+  return {
+    x: Number(pos.x),
+    y: Number(pos.y),
+    z: Number(pos.z)
+  }
+}
+
+function buildMeteorSceneMovementHint(scene) {
+  const hint = scene?.movementHint
+  if (!hint || hint.enabled === false) return null
+  return {
+    enabled: hint.enabled !== false,
+    lookAtPortal: hint.lookAtPortal !== false,
+    forwardMs: Math.max(0, toNumber(hint.forwardMs, 0)),
+    strafe: String(hint.strafe || 'none').trim().toLowerCase(),
+    jump: hint.jump === true,
+    sprint: hint.sprint === true,
+    capturedYaw: Number.isFinite(Number(hint.capturedYaw)) ? Number(hint.capturedYaw) : null,
+    capturedPitch: Number.isFinite(Number(hint.capturedPitch)) ? Number(hint.capturedPitch) : null
+  }
+}
+
+function getMeteorSceneCapturedAtMs(scene) {
+  const value = Date.parse(String(scene?.capturedAt || ''))
+  return Number.isFinite(value) ? value : 0
+}
+
+function getMeteorSceneFlowStage(label) {
+  const text = String(label || '').toLowerCase()
+  if (text.includes('portal-enter')) return 3
+  if (text.includes('dimension-change') || text.includes('post-portal')) return 2
+  if (text.includes('teleport')) return 1
+  if (text.includes('start')) return 0
+  return -1
+}
+
+function getMeteorSceneFlowFamily(label) {
+  const text = String(label || '').trim().toLowerCase()
+  if (!text) return ''
+  const match = text.match(/^(.*?)-\d+-(start|teleport|portal-enter|dimension-change|post-portal)$/)
+  return match ? match[1] : text
+}
+
+function captureMeteorSceneFingerprint(bot, config) {
+  if (!canReadBotWorld(bot)) {
+    return {
+      topBlocks: {},
+      signatureBlocks: {},
+      insidePortalBlock: false,
+      recentMessages: Array.isArray(bot?.__nervRecentServerMessages)
+        ? bot.__nervRecentServerMessages.slice(-5).map((entry) => String(entry?.text || '').trim()).filter(Boolean)
+        : [],
+      worldReady: false
+    }
+  }
+
+  const radius = Math.max(4, Math.min(32, toNumber(config?.advanced?.meteorSceneAwareness?.scanRadius, 20)))
+  const verticalRadius = Math.max(2, Math.min(8, toNumber(config?.advanced?.meteorSceneAwareness?.verticalRadius, 5)))
+  const scan = scanSpatialBlocks(bot, {
+    ...config,
+    advanced: {
+      ...(config.advanced || {}),
+      spatialAwareness: {
+        ...(config.advanced?.spatialAwareness || {}),
+        scanRadius: radius,
+        verticalRadius
+      }
+    }
+  })
+
+  return {
+    topBlocks: countMapFromEntries(topCountEntries(scan.counts, 14)),
+    signatureBlocks: countMapFromEntries(buildMeteorSignatureEntries(scan.counts)),
+    insidePortalBlock: getBlockNameAt(bot, bot?.entity?.position) === 'nether_portal',
+    recentMessages: Array.isArray(bot.__nervRecentServerMessages)
+      ? bot.__nervRecentServerMessages.slice(-5).map((entry) => String(entry?.text || '').trim()).filter(Boolean)
+      : [],
+    worldReady: true
+  }
+}
+
+function scoreMeteorScene(scene, actualFingerprint, bot, config) {
+  const expectedTop = countMapFromEntries(scene?.playerFingerprint?.topBlocks)
+  const expectedSignature = countMapFromEntries(scene?.playerFingerprint?.signatureBlocks)
+  const topScore = computeFingerprintOverlap(actualFingerprint.topBlocks, expectedTop)
+  const signatureScore = computeFingerprintOverlap(actualFingerprint.signatureBlocks, expectedSignature)
+  const actualDimension = String(bot?.game?.dimension || '').toLowerCase()
+  const expectedDimension = String(scene?.dimension || '').toLowerCase()
+  const dimensionScore = actualDimension && expectedDimension ? (actualDimension === expectedDimension ? 1 : 0) : 0.5
+  const actualInsidePortal = actualFingerprint.insidePortalBlock === true
+  const expectedInsidePortal = scene?.insidePortalBlock === true
+  const portalStateScore = actualInsidePortal === expectedInsidePortal ? 1 : 0
+
+  const chatText = actualFingerprint.recentMessages.join(' ').toLowerCase()
+  const expectedChats = extractRelevantChatMessages(scene).map((value) => value.toLowerCase())
+  const chatScore = !expectedChats.length ? 0.5 : (expectedChats.some((value) => chatText.includes(value)) ? 1 : 0)
+  const score = (signatureScore * 0.4) + (topScore * 0.3) + (dimensionScore * 0.1) + (chatScore * 0.1) + (portalStateScore * 0.1)
+
+  return {
+    label: String(scene?.label || 'unknown'),
+    action: detectMeteorSceneAction(scene, config),
+    score,
+    topScore,
+    signatureScore,
+    dimensionScore,
+    chatScore,
+    portalStateScore,
+    capturedAtMs: getMeteorSceneCapturedAtMs(scene),
+    flowStage: getMeteorSceneFlowStage(scene?.label),
+    portalPoint: buildMeteorScenePortalPoint(scene),
+    playerPoint: buildMeteorScenePlayerPoint(scene),
+    movementHint: buildMeteorSceneMovementHint(scene),
+    scene
+  }
+}
+
+function isTrustedMeteorSceneMatch(match, positionMissing = false) {
+  if (!match?.best) return false
+  if (match.matched) return true
+
+  const best = match.best
+  if (!positionMissing) return false
+
+  if (best.action === 'spawn-portal' && best.score >= 0.55 && best.portalPoint && best.playerPoint) {
+    return true
+  }
+
+  if (best.action === 'platform' && best.score >= 0.82 && best.playerPoint) {
+    return true
+  }
+
+  return false
+}
+
+function matchMeteorScene(bot, config) {
+  const snapshot = readMeteorSceneSnapshot(config)
+  if (!snapshot?.scenes?.length) return null
+  if (!isBotSessionLive(bot)) return null
+  if (!canReadBotWorld(bot)) return null
+
+  const actualFingerprint = captureMeteorSceneFingerprint(bot, config)
+  const candidates = snapshot.scenes
+    .map((scene) => scoreMeteorScene(scene, actualFingerprint, bot, config))
+    .sort((a, b) => {
+      const scoreDelta = b.score - a.score
+      if (Math.abs(scoreDelta) > 0.0001) return scoreDelta
+      const stageDelta = b.flowStage - a.flowStage
+      if (stageDelta !== 0) return stageDelta
+      return b.capturedAtMs - a.capturedAtMs
+    })
+
+  if (!candidates.length) return null
+  const minScore = getMeteorSceneConfig(config).minScore
+  return {
+    matched: candidates[0].score >= minScore,
+    minScore,
+    best: candidates[0],
+    candidates: candidates.slice(0, 3)
+  }
+}
+
+function getMostRecentMeteorSceneByAction(config, action) {
+  const snapshot = readMeteorSceneSnapshot(config)
+  const wantedAction = String(action || '').trim().toLowerCase()
+  if (!snapshot?.scenes?.length || !wantedAction) return null
+
+  const candidates = snapshot.scenes
+    .map((scene) => ({
+      label: String(scene?.label || 'unknown'),
+      action: detectMeteorSceneAction(scene, config),
+      score: 1,
+      topScore: 1,
+      signatureScore: 1,
+      dimensionScore: 1,
+      chatScore: 1,
+      portalStateScore: scene?.insidePortalBlock === true ? 1 : 0,
+      capturedAtMs: getMeteorSceneCapturedAtMs(scene),
+      flowStage: getMeteorSceneFlowStage(scene?.label),
+      portalPoint: buildMeteorScenePortalPoint(scene),
+      playerPoint: buildMeteorScenePlayerPoint(scene),
+      movementHint: buildMeteorSceneMovementHint(scene),
+      scene
+    }))
+    .filter((entry) => entry.action === wantedAction)
+    .sort((a, b) => b.capturedAtMs - a.capturedAtMs)
+
+  if (!candidates.length) return null
+
+  return {
+    matched: true,
+    minScore: getMeteorSceneConfig(config).minScore,
+    best: candidates[0],
+    candidates: candidates.slice(0, 3)
+  }
+}
+
+function getHighestScoredMeteorSceneByAction(bot, config, action) {
+  const snapshot = readMeteorSceneSnapshot(config)
+  const wantedAction = String(action || '').trim().toLowerCase()
+  if (!snapshot?.scenes?.length || !wantedAction || !isBotSessionLive(bot)) return null
+  if (!canReadBotWorld(bot)) return null
+
+  const actualFingerprint = captureMeteorSceneFingerprint(bot, config)
+  const candidates = snapshot.scenes
+    .map((scene) => scoreMeteorScene(scene, actualFingerprint, bot, config))
+    .filter((entry) => entry.action === wantedAction)
+    .sort((a, b) => {
+      const scoreDelta = b.score - a.score
+      if (Math.abs(scoreDelta) > 0.0001) return scoreDelta
+      const stageDelta = b.flowStage - a.flowStage
+      if (stageDelta !== 0) return stageDelta
+      return b.capturedAtMs - a.capturedAtMs
+    })
+
+  if (!candidates.length) return null
+  return {
+    matched: candidates[0].score >= getMeteorSceneConfig(config).minScore,
+    minScore: getMeteorSceneConfig(config).minScore,
+    best: candidates[0],
+    candidates: candidates.slice(0, 3)
+  }
+}
+
+function summarizeCountMap(map, limit = 5) {
+  const entries = Object.entries(map || {})
+    .filter(([, count]) => toNumber(count, 0) > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, Math.max(1, limit))
+  return entries.length ? entries.map(([name, count]) => `${name}:${count}`).join(', ') : 'none'
+}
+
+function collectMeteorSceneFlowEntries(match, config) {
+  const best = match?.best
+  if (!best?.scene) return []
+
+  const snapshot = readMeteorSceneSnapshot(config)
+  const bestFamily = getMeteorSceneFlowFamily(best.label)
+  const bestDimension = String(best.scene?.dimension || '').toLowerCase()
+  const bestPortalPoint = best.portalPoint || null
+  const bestCapturedAt = toNumber(best.capturedAtMs, 0)
+  const bestStage = toNumber(best.flowStage, -1)
+
+  const entries = Array.isArray(snapshot?.scenes)
+    ? snapshot.scenes
+      .map((scene) => ({
+        label: String(scene?.label || 'unknown'),
+        action: detectMeteorSceneAction(scene, config),
+        dimension: String(scene?.dimension || '').toLowerCase(),
+        playerPoint: buildMeteorScenePlayerPoint(scene),
+        portalPoint: buildMeteorScenePortalPoint(scene),
+        movementHint: buildMeteorSceneMovementHint(scene),
+        insidePortalBlock: scene?.insidePortalBlock === true,
+        capturedAtMs: getMeteorSceneCapturedAtMs(scene),
+        flowStage: getMeteorSceneFlowStage(scene?.label),
+        scene
+      }))
+      .filter((entry) => entry.action === best.action)
+      .filter((entry) => !bestDimension || !entry.dimension || entry.dimension === bestDimension)
+      .filter((entry) => {
+        const sameFamily = bestFamily && getMeteorSceneFlowFamily(entry.label) === bestFamily
+        const samePortal = bestPortalPoint && entry.portalPoint && distanceToPoint(bestPortalPoint, entry.portalPoint) <= 3.5
+        return sameFamily || samePortal || entry.label === best.label
+      })
+      .filter((entry) => entry.flowStage >= bestStage)
+      .filter((entry) => entry.capturedAtMs >= Math.max(0, bestCapturedAt - 15000) && entry.capturedAtMs <= bestCapturedAt + 45000)
+    : []
+
+  if (!entries.length) return []
+
+  const newestCapture = entries.reduce((maxValue, entry) => Math.max(maxValue, toNumber(entry.capturedAtMs, 0)), 0)
+  const recentWindowStart = Math.max(0, newestCapture - 60000)
+
+  return entries
+    .filter((entry) => entry.capturedAtMs >= recentWindowStart)
+    .sort((a, b) => {
+      const stageDelta = a.flowStage - b.flowStage
+      if (stageDelta !== 0) return stageDelta
+      return a.capturedAtMs - b.capturedAtMs
+    })
+}
+
+function buildMeteorSceneRoute(match, config) {
+  const best = match?.best
+  if (!best?.scene || !best.playerPoint) return []
+
+  const scoredRoute = collectMeteorSceneFlowEntries(match, config)
+    .filter((entry) => entry.playerPoint)
+
+  const route = []
+  for (const entry of scoredRoute) {
+    const point = {
+      ...entry.playerPoint,
+      range: entry.insidePortalBlock ? 0 : 1.5,
+      exact: entry.insidePortalBlock,
+      label: entry.label,
+      insidePortalBlock: entry.insidePortalBlock
+    }
+    const duplicate = route.some((existing) => distanceToPoint(existing, point) <= 1.25)
+    if (!duplicate) route.push(point)
+  }
+
+  if (!route.length) {
+    route.push({ ...best.playerPoint, range: 1.5, exact: false, label: best.label, insidePortalBlock: false })
+  }
+
+  return route
+}
+
+function buildMeteorSceneMovementSequence(match, config) {
+  return collectMeteorSceneFlowEntries(match, config)
+    .filter((entry) => entry.movementHint)
+    .map((entry) => ({
+      label: entry.label,
+      action: entry.action,
+      portalPoint: entry.portalPoint,
+      movementHint: entry.movementHint,
+      insidePortalBlock: entry.insidePortalBlock,
+      flowStage: entry.flowStage,
+      capturedAtMs: entry.capturedAtMs
+    }))
+}
+
+function describeLobbyPortalSurroundings(bot, config) {
+  const fingerprint = captureMeteorSceneFingerprint(bot, config)
+  const match = matchMeteorScene(bot, config)
+  const top = summarizeCountMap(fingerprint.topBlocks, 6)
+  const signature = summarizeCountMap(fingerprint.signatureBlocks, 6)
+  const sceneLabel = match?.best?.label || 'none'
+  const sceneAction = match?.best?.action || 'unknown'
+  const sceneScore = Number.isFinite(match?.best?.score) ? match.best.score.toFixed(3) : 'n/a'
+  const sourceTop = top !== 'none'
+    ? top
+    : summarizeCountMap(countMapFromEntries(match?.best?.scene?.playerFingerprint?.topBlocks), 6)
+  const sourceSignature = signature !== 'none'
+    ? signature
+    : summarizeCountMap(countMapFromEntries(match?.best?.scene?.playerFingerprint?.signatureBlocks), 6)
+  const insidePortal = fingerprint.insidePortalBlock === true
+  return `insidePortal=${insidePortal} top=${sourceTop} signature=${sourceSignature} scene=${sceneLabel} action=${sceneAction} score=${sceneScore}`
+}
+
+function logMeteorSceneMatch(match, reason = 'meteor-scene') {
+  if (!match?.best) return
+  const best = match.best
+  const key = `${reason}|${match.matched ? 'matched' : 'weak'}|${best.label}|${best.action}`
+  const now = Date.now()
+  const previous = logMeteorSceneMatch._last || {}
+  if (previous.key === key && now - toNumber(previous.at, 0) < 15000) return
+  logMeteorSceneMatch._last = { key, at: now }
+  const qualifier = match.matched ? 'matched' : (isTrustedMeteorSceneMatch(match, true) ? 'trusted-fallback' : 'weak-match')
+  console.log(`[METEOR-SCENE] ${qualifier} reason=${reason} label=${best.label} action=${best.action} score=${best.score.toFixed(3)} top=${best.topScore.toFixed(3)} signature=${best.signatureScore.toFixed(3)} dimension=${best.dimensionScore.toFixed(3)} chat=${best.chatScore.toFixed(3)} threshold=${match.minScore.toFixed(3)}`)
+}
+
+function seedBotPositionFromMeteorScene(bot, match, reason = 'meteor-scene-seed') {
+  if (!match?.best?.playerPoint) return false
+  return seedBotPosition(bot, match.best.playerPoint, `${reason}: seeded from meteor scene '${match.best.label}' action=${match.best.action} score=${match.best.score.toFixed(3)}`)
+}
+
+function updateLobbyPortalConfigFromMeteorScene(config, match) {
+  if ((!match?.matched && !isTrustedMeteorSceneMatch(match, true)) || !match.best?.portalPoint) return false
+  const portalConfig = getLobbyPortalConfig(config)
+  if (!portalConfig?.enabled) return false
+
+  if (match.best.action === 'spawn-portal') {
+    const spawn = portalConfig.spawnDisk || (portalConfig.spawnDisk = {})
+    spawn.useConfiguredPortalTarget = true
+    spawn.portal = {
+      x: match.best.portalPoint.x,
+      y: match.best.portalPoint.y,
+      z: match.best.portalPoint.z
+    }
+    return true
+  }
+
+  if (match.best.action === 'login-portal') {
+    const login = portalConfig.loginPortal || (portalConfig.loginPortal = {})
+    login.enabled = true
+    login.x = match.best.portalPoint.x
+    login.y = match.best.portalPoint.y
+    login.z = match.best.portalPoint.z
+    return true
+  }
+
+  return false
+}
+
+function classifyRuntimePosition(bot, config, reason = 'runtime-classify') {
+  const position = getSpatialReferencePosition(bot, config, reason)
+  const classification = classifySpatialPosition(position, config)
+  if (classification.state !== 'off-platform' && classification.state !== 'missing-position') {
+    return { source: 'coords', classification, meteor: null }
+  }
+
+  const meteor = matchMeteorScene(bot, config)
+  if (!meteor?.best) return { source: 'coords', classification, meteor: null }
+  logMeteorSceneMatch(meteor, reason)
+  if (!meteor.matched && !isTrustedMeteorSceneMatch(meteor, classification.state === 'missing-position')) {
+    return { source: 'coords', classification, meteor }
+  }
+
+  if (meteor.best.action === 'platform') {
+    return {
+      source: 'meteor',
+      classification: { state: 'platform', platform: true, meteorLabel: meteor.best.label },
+      meteor
+    }
+  }
+
+  if (meteor.best.action === 'login-portal') {
+    return {
+      source: 'meteor',
+      classification: { state: 'login-portal-scene', platform: false, meteorLabel: meteor.best.label },
+      meteor
+    }
+  }
+
+  if (meteor.best.action === 'spawn-portal') {
+    return {
+      source: 'meteor',
+      classification: { state: 'spawn-portal-scene', platform: false, meteorLabel: meteor.best.label },
+      meteor
+    }
+  }
+
+  return { source: 'coords', classification, meteor }
 }
 
 function cloneJson(value) {
@@ -1787,6 +2390,7 @@ function getPrinterSprintMode(config) {
 }
 
 function configurePathfinderMovements(bot, config, options = {}) {
+  ensureUsableEntityState(bot, config, 'configure-pathfinder', { allowPlatformSeed: false, log: false })
   const printer = config.printer || {}
   const allowJump = printer.allowJump !== false
   const allowSprint = options.allowSprint != null
@@ -1803,6 +2407,7 @@ function configurePathfinderMovements(bot, config, options = {}) {
 }
 
 async function gotoWithTemporaryThinkTimeout(bot, goal, timeoutMs) {
+  ensureUsableEntityState(bot, null, 'goto-think-timeout', { allowPlatformSeed: false, log: false })
   const pathfinderApi = bot.pathfinder || {}
   const previous = pathfinderApi.thinkTimeout
   if (Number.isFinite(timeoutMs)) {
@@ -4400,6 +5005,7 @@ async function waitForStartupSupport(bot, config, targets) {
 }
 
 async function runPrint(bot, config) {
+  ensureUsableEntityState(bot, config, 'run-print-start', { allowPlatformSeed: true, log: false })
   const files = config.files || {}
   const printer = config.printer || {}
   const progressEnabled = files.resumeProgress !== false
@@ -5232,6 +5838,20 @@ async function waitForOfflineChatLogin(bot, config, context = 'startup') {
   }
 
   return state.loggedIn === true
+}
+
+function getOfflineChatLoginSettleMs(config) {
+  const login = config?.bot?.chatLogin || config?.chatLogin || {}
+  return Math.max(0, toNumber(login.postSuccessDelayMs, 5000))
+}
+
+async function waitForOfflineChatLoginSettle(bot, config, context = 'startup') {
+  if (!shouldHoldForOfflineChatLogin(bot)) return
+  if (!bot?.__nervChatLogin?.loggedIn) return
+  const settleMs = getOfflineChatLoginSettleMs(config)
+  if (settleMs <= 0) return
+  console.log(`[CHAT-LOGIN] Login confirmed; waiting ${settleMs}ms before ${context} scene checks.`)
+  await delay(settleMs)
 }
 
 function installChatLogin(bot, config) {
@@ -7563,7 +8183,7 @@ function seedBotPositionFromPlatform(bot, config, reason = 'position-seed') {
   return seedBotPosition(bot, seed, `${reason}: seeded internal Mineflayer position to ${seed?.x?.toFixed?.(1) ?? seed?.x},${seed?.y?.toFixed?.(1) ?? seed?.y},${seed?.z?.toFixed?.(1) ?? seed?.z} from platform config.`)
 }
 
-function seedBotPosition(bot, seed, reason = 'position-seed') {
+function seedBotPosition(bot, seed, reason = 'position-seed', options = {}) {
   if (!seed || !bot?.entity?.position) return false
   if (!Number.isFinite(seed.x) || !Number.isFinite(seed.y) || !Number.isFinite(seed.z)) return false
 
@@ -7578,7 +8198,9 @@ function seedBotPosition(bot, seed, reason = 'position-seed') {
     if (bot.entity.velocity && typeof bot.entity.velocity.set === 'function') {
       bot.entity.velocity.set(0, 0, 0)
     }
-    console.log(`[POSITION-SEED] ${reason}`)
+    if (options.log !== false) {
+      console.log(`[POSITION-SEED] ${reason}`)
+    }
     return true
   } catch (err) {
     console.log(`[POSITION-SEED-WARN] Could not seed internal position: ${err?.message || err}`)
@@ -7586,7 +8208,7 @@ function seedBotPosition(bot, seed, reason = 'position-seed') {
   }
 }
 
-function rescueBotPositionFromPlatformCache(bot, config, source = 'position-cache') {
+function rescueBotPositionFromPlatformCache(bot, config, source = 'position-cache', options = {}) {
   if (!isPositionMissing(bot?.entity?.position)) return false
   const cached = bot?.__nervLastPlatformPosition
   if (!cached || !Number.isFinite(cached.x) || !Number.isFinite(cached.y) || !Number.isFinite(cached.z)) return false
@@ -7595,9 +8217,148 @@ function rescueBotPositionFromPlatformCache(bot, config, source = 'position-cach
   const ageMs = Date.now() - toNumber(cached.at, 0)
   if (ageMs > maxAgeMs) return false
   const restored = { x: cached.x, y: cached.y, z: cached.z }
-  if (!seedBotPosition(bot, restored, `${source}: restored Mineflayer position from cached platform coord ${restored.x.toFixed(1)},${restored.y.toFixed(1)},${restored.z.toFixed(1)} ageMs=${ageMs}`)) return false
-  console.log(`[POSITION-RESCUE] Restored null platform position from cached ${cached.source || 'unknown'} coord.`)
+  if (!seedBotPosition(bot, restored, `${source}: restored Mineflayer position from cached platform coord ${restored.x.toFixed(1)},${restored.y.toFixed(1)},${restored.z.toFixed(1)} ageMs=${ageMs}`, { log: options.log !== false })) return false
+  if (options.log !== false) {
+    console.log(`[POSITION-RESCUE] Restored null platform position from cached ${cached.source || 'unknown'} coord.`)
+  }
   return true
+}
+
+function cloneFinitePosition(pos) {
+  if (isPositionMissing(pos)) return null
+  return {
+    x: Number(pos.x),
+    y: Number(pos.y),
+    z: Number(pos.z)
+  }
+}
+
+function hasInvalidVector(vec) {
+  if (!vec) return false
+  return !Number.isFinite(vec.x) || !Number.isFinite(vec.y) || !Number.isFinite(vec.z)
+}
+
+function repairInvalidEntityVelocity(bot, reason = 'velocity-repair', options = {}) {
+  const velocity = bot?.entity?.velocity
+  if (!hasInvalidVector(velocity)) return false
+  try {
+    if (typeof velocity?.set === 'function') velocity.set(0, 0, 0)
+    else if (velocity) {
+      velocity.x = 0
+      velocity.y = 0
+      velocity.z = 0
+    } else {
+      return false
+    }
+    if (options.log === true) {
+      console.log(`[VELOCITY-RESCUE] ${reason}: reset invalid velocity to 0,0,0.`)
+    }
+    return true
+  } catch (err) {
+    console.log(`[VELOCITY-RESCUE-WARN] ${reason}: could not reset invalid velocity: ${err?.message || err}`)
+    return false
+  }
+}
+
+function getPhysicsProbePacketMaxAgeMs(config) {
+  return Math.max(1000, toNumber(config.bot?.physicsRepairPacketMaxAgeMs, toNumber(config.bot?.physicsTestPacketMaxAgeMs, 15000)))
+}
+
+function rescueBotPositionFromLatestPacket(bot, config, source = 'position-packet', options = {}) {
+  if (!isPositionMissing(bot?.entity?.position)) return false
+  const state = bot?.__nervPhysicsProbe
+  const packetPos = cloneFinitePosition(state?.lastPacketPosition)
+  if (!packetPos) return false
+  const ageMs = Date.now() - toNumber(state?.lastPacketAt, 0)
+  if (ageMs > getPhysicsProbePacketMaxAgeMs(config)) return false
+  const packetName = state?.lastPacketName || 'position'
+  if (!seedBotPosition(bot, packetPos, `${source}: restored Mineflayer position from latest ${packetName} packet ${packetPos.x.toFixed(1)},${packetPos.y.toFixed(1)},${packetPos.z.toFixed(1)} ageMs=${ageMs}`, { log: options.log !== false })) return false
+  if (options.log !== false) {
+    console.log(`[POSITION-RESCUE] Restored null position from latest ${packetName} packet.`)
+  }
+  return true
+}
+
+function ensureUsableEntityState(bot, config, reason = 'entity-state', options = {}) {
+  repairInvalidEntityVelocity(bot, reason, { log: options.log === true })
+  if (!isPositionMissing(bot?.entity?.position)) return true
+  if (rescueBotPositionFromLatestPacket(bot, config || {}, reason, { log: options.log === true })) return true
+  if (config && rescueBotPositionFromPlatformCache(bot, config, reason, { log: options.log === true })) return true
+  if (config && options.allowPlatformSeed === true && seedBotPositionFromPlatform(bot, config, reason)) return true
+  return !isPositionMissing(bot?.entity?.position)
+}
+
+function formatVec3ForLog(vec) {
+  if (!vec) return 'x=null y=null z=null'
+  const fmt = (value) => Number.isFinite(value) ? Number(value).toFixed(3) : 'NaN'
+  return `x=${fmt(vec.x)} y=${fmt(vec.y)} z=${fmt(vec.z)}`
+}
+
+function installPhysicsNaNProbe(bot, config, label = 'physics-test', options = {}) {
+  const logPackets = options.logPackets !== false
+  const logRepairs = options.logRepairs !== false
+  bot.__nervPhysicsProbe = {
+    label,
+    packetPositions: 0,
+    positionRepairs: 0,
+    velocityRepairs: 0,
+    lastPacketPosition: null,
+    lastPacketName: '',
+    lastPacketAt: 0,
+    lastRepairAt: 0
+  }
+
+  const recordPacket = (packetName, packet) => {
+    if (!packet || !Number.isFinite(packet.x) || !Number.isFinite(packet.y) || !Number.isFinite(packet.z)) return
+    const pos = { x: Number(packet.x), y: Number(packet.y), z: Number(packet.z) }
+    bot.__nervPhysicsProbe.packetPositions += 1
+    bot.__nervPhysicsProbe.lastPacketPosition = pos
+    bot.__nervPhysicsProbe.lastPacketName = packetName
+    bot.__nervPhysicsProbe.lastPacketAt = Date.now()
+    if (logPackets) {
+      console.log(`[PHYSICS-PACKET] ${label} ${packetName} pos=${formatVec3ForLog(pos)} entity=${formatBotPosition(bot)} vel=${formatVec3ForLog(bot?.entity?.velocity)}`)
+    }
+  }
+
+  for (const packetName of ['position', 'position_look']) {
+    bot._client?.on(packetName, (packet) => recordPacket(packetName, packet))
+  }
+
+  bot.on('physicsTick', () => {
+    const state = bot.__nervPhysicsProbe
+    if (!state) return
+
+    const velocity = bot?.entity?.velocity
+    if (hasInvalidVector(velocity)) {
+      state.velocityRepairs += 1
+      try {
+        if (typeof velocity.set === 'function') velocity.set(0, 0, 0)
+        else {
+          velocity.x = 0
+          velocity.y = 0
+          velocity.z = 0
+        }
+        if (logRepairs) {
+          console.log(`[PHYSICS-FIX] ${label} reset invalid velocity repair=${state.velocityRepairs}`)
+        }
+      } catch (err) {
+        console.log(`[PHYSICS-FIX-WARN] ${label} could not reset invalid velocity: ${err?.message || err}`)
+      }
+    }
+
+    const pos = bot?.entity?.position
+    if (!isPositionMissing(pos)) return
+    const repairNo = state.positionRepairs + 1
+    const repaired = rescueBotPositionFromLatestPacket(bot, config, `physics-test:${label}: repaired invalid entity position repair=${repairNo}`, { log: false })
+    if (!repaired) return
+    state.positionRepairs = repairNo
+    state.lastRepairAt = Date.now()
+    if (logRepairs) {
+      console.log(`[PHYSICS-FIX] ${label} repaired invalid entity position from latest ${state.lastPacketName || 'position'} packet repair=${state.positionRepairs}`)
+    }
+  })
+
+  return bot.__nervPhysicsProbe
 }
 
 function isPlatformNearby(bot, config) {
@@ -7844,7 +8605,11 @@ function readSavedSpatialSnapshot(config) {
 function getSpatialReferencePosition(bot, config, reason = 'spatial-reference') {
   let pos = bot?.entity?.position
   if (!isPositionMissing(pos)) return pos
-  if (rescueBotPositionFromPlatformCache(bot, config, reason)) {
+  if (rescueBotPositionFromLatestPacket(bot, config, reason, { log: false })) {
+    pos = bot?.entity?.position
+    if (!isPositionMissing(pos)) return pos
+  }
+  if (rescueBotPositionFromPlatformCache(bot, config, reason, { log: false })) {
     pos = bot?.entity?.position
     if (!isPositionMissing(pos)) return pos
   }
@@ -8050,7 +8815,7 @@ function isSpatialInterestingBlock(name) {
 
 function scanSpatialBlocks(bot, config, anchor = getSpatialAnchor(config)) {
   const spatial = getSpatialAwarenessConfig(config)
-  const center = bot?.entity?.position
+  const center = getSpatialReferencePosition(bot, config, 'spatial-scan')
   if (isPositionMissing(center)) return { radius: spatial.scanRadius, verticalRadius: spatial.verticalRadius, counts: {}, interesting: [], scanned: 0 }
   const base = {
     x: Math.floor(center.x),
@@ -8336,6 +9101,82 @@ function findNearestNetherPortal(bot, maxDistance) {
   }
 }
 
+function getBlockAtPosition(bot, pos) {
+  try {
+    const Vec3 = bot?.entity?.position?.constructor
+    if (typeof Vec3 !== 'function' || !pos) return null
+    return bot.blockAt(new Vec3(Number(pos.x), Number(pos.y), Number(pos.z)))
+  } catch {
+    return null
+  }
+}
+
+function isPortalWalkableAir(block) {
+  const name = String(block?.name || '')
+  return !name || name === 'air' || name === 'cave_air' || name === 'void_air' || name.endsWith('_carpet')
+}
+
+function isPortalSupportBlock(block) {
+  const name = String(block?.name || '')
+  if (!name) return false
+  if (name === 'air' || name === 'cave_air' || name === 'void_air' || name === 'nether_portal') return false
+  return true
+}
+
+function buildPortalApproachCandidates(portalPos) {
+  const baseY = Number(portalPos.y) - 1
+  return [
+    { x: Number(portalPos.x) + 1, y: baseY, z: Number(portalPos.z), face: { x: Number(portalPos.x), y: Number(portalPos.y), z: Number(portalPos.z) } },
+    { x: Number(portalPos.x) - 1, y: baseY, z: Number(portalPos.z), face: { x: Number(portalPos.x), y: Number(portalPos.y), z: Number(portalPos.z) } },
+    { x: Number(portalPos.x), y: baseY, z: Number(portalPos.z) + 1, face: { x: Number(portalPos.x), y: Number(portalPos.y), z: Number(portalPos.z) } },
+    { x: Number(portalPos.x), y: baseY, z: Number(portalPos.z) - 1, face: { x: Number(portalPos.x), y: Number(portalPos.y), z: Number(portalPos.z) } }
+  ]
+}
+
+function getPortalApproachPoint(bot, portalPos, preferredPoint = null) {
+  if (!portalPos) return null
+  const candidates = buildPortalApproachCandidates(portalPos)
+    .map((candidate) => {
+      const dx = Math.sign(Number(candidate.face.x) - Number(candidate.x))
+      const dz = Math.sign(Number(candidate.face.z) - Number(candidate.z))
+      const floorBlock = getBlockAtPosition(bot, { x: candidate.x, y: candidate.y - 1, z: candidate.z })
+      const feetBlock = getBlockAtPosition(bot, { x: candidate.x, y: candidate.y, z: candidate.z })
+      const headBlock = getBlockAtPosition(bot, { x: candidate.x, y: candidate.y + 1, z: candidate.z })
+      const approachFeetBlock = getBlockAtPosition(bot, { x: candidate.x - dx, y: candidate.y, z: candidate.z - dz })
+      const approachHeadBlock = getBlockAtPosition(bot, { x: candidate.x - dx, y: candidate.y + 1, z: candidate.z - dz })
+      const portalNeighbor = getBlockAtPosition(bot, {
+        x: candidate.face.x + (candidate.face.x - candidate.x),
+        y: candidate.face.y,
+        z: candidate.face.z + (candidate.face.z - candidate.z)
+      })
+      const hasFloor = isPortalSupportBlock(floorBlock)
+      const feetOpen = isPortalWalkableAir(feetBlock)
+      const headOpen = isPortalWalkableAir(headBlock) || String(headBlock?.name || '') === 'nether_portal'
+      const approachFeetOpen = isPortalWalkableAir(approachFeetBlock)
+      const approachHeadOpen = isPortalWalkableAir(approachHeadBlock)
+      const facesPortal = String(portalNeighbor?.name || '') === 'nether_portal' || String(getBlockAtPosition(bot, candidate.face)?.name || '') === 'nether_portal'
+      if (!hasFloor || !feetOpen || !headOpen || !facesPortal || !approachFeetOpen || !approachHeadOpen) return null
+      return {
+        ...candidate,
+        range: 0.5,
+        distanceToPreferred: preferredPoint
+          ? Math.sqrt(((Number(candidate.x) - Number(preferredPoint.x)) ** 2) + ((Number(candidate.y) - Number(preferredPoint.y)) ** 2) + ((Number(candidate.z) - Number(preferredPoint.z)) ** 2))
+          : 0,
+        distanceToBot: bot?.entity?.position
+          ? Math.sqrt(((Number(candidate.x) - Number(bot.entity.position.x)) ** 2) + ((Number(candidate.y) - Number(bot.entity.position.y)) ** 2) + ((Number(candidate.z) - Number(bot.entity.position.z)) ** 2))
+          : 0
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const preferredDelta = a.distanceToPreferred - b.distanceToPreferred
+      if (Math.abs(preferredDelta) > 0.001) return preferredDelta
+      return a.distanceToBot - b.distanceToBot
+    })
+
+  return candidates[0] || null
+}
+
 function getPortalCount(portalConfig, config = null) {
   const explicit = toNumber(portalConfig?.portalCount, NaN)
   if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit)
@@ -8353,21 +9194,109 @@ function isBotSessionLive(bot) {
   return bot?.__nervSessionActive !== false && bot?._client?.state !== 'disconnected'
 }
 
+function distanceToPoint(pos, point) {
+  if (!pos || !point) return Number.POSITIVE_INFINITY
+  if (!Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.y)) || !Number.isFinite(Number(pos.z))) return Number.POSITIVE_INFINITY
+  if (!Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y)) || !Number.isFinite(Number(point.z))) return Number.POSITIVE_INFINITY
+  const dx = Number(pos.x) - Number(point.x)
+  const dy = Number(pos.y) - Number(point.y)
+  const dz = Number(pos.z) - Number(point.z)
+  return Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+}
+
 async function holdForwardIntoPortal(bot, config, ms) {
   const duration = Math.max(0, toNumber(ms, 3000))
   if (duration <= 0 || !isBotSessionLive(bot)) return
+  console.log(`[LOBBY-PORTAL] Holding forward into portal for ${duration}ms.`)
   bot.setControlState('sprint', getPrinterSprintMode(config) !== 'off')
   bot.setControlState('forward', true)
   await delay(duration)
   bot.setControlState('forward', false)
+  const insidePortal = getBlockNameAt(bot, bot?.entity?.position) === 'nether_portal'
+  console.log(`[LOBBY-PORTAL] Forward hold finished. insidePortal=${insidePortal}`)
+}
+
+async function replayMeteorSceneMovement(bot, config, match, fallbackMs = 3000, context = 'scene-replay') {
+  const hint = match?.best?.movementHint
+  const portalPoint = match?.best?.portalPoint
+  const duration = Math.max(0, toNumber(hint?.forwardMs, fallbackMs))
+  if (duration <= 0 || !isBotSessionLive(bot)) return false
+
+  const recordedAim = minecraftYawPitchToMineflayerRadians(hint?.capturedYaw, hint?.capturedPitch, config?.advanced || {})
+  const hasRecordedLook = recordedAim != null
+
+  if (hasRecordedLook) {
+    try {
+      await bot.look(recordedAim.yawRad, recordedAim.pitchRad, true)
+    } catch { }
+  } else if (hint?.lookAtPortal !== false && portalPoint) {
+    try {
+      const Vec3 = bot.entity.position.constructor
+      await bot.lookAt(new Vec3(Number(portalPoint.x) + 0.5, Number(portalPoint.y) + 0.5, Number(portalPoint.z) + 0.5), true)
+    } catch { }
+  }
+
+  const strafe = String(hint?.strafe || 'none').toLowerCase()
+  const useSprint = hint?.sprint === true && getPrinterSprintMode(config) !== 'off'
+  const useJump = hint?.jump === true
+  console.log(`[METEOR-SCENE] replay reason=${context} label=${match?.best?.label || 'unknown'} durationMs=${duration} strafe=${strafe} jump=${useJump} sprint=${useSprint} look=${hasRecordedLook ? 'recorded' : (hint?.lookAtPortal !== false && portalPoint ? 'portal' : 'unchanged')}`)
+
+  bot.setControlState('sprint', useSprint)
+  bot.setControlState('forward', true)
+  bot.setControlState('back', strafe === 'back')
+  bot.setControlState('left', strafe === 'left')
+  bot.setControlState('right', strafe === 'right')
+  bot.setControlState('jump', useJump)
+
+  try {
+    await delay(duration)
+  } finally {
+    bot.setControlState('forward', false)
+    bot.setControlState('back', false)
+    bot.setControlState('left', false)
+    bot.setControlState('right', false)
+    bot.setControlState('jump', false)
+    bot.setControlState('sprint', false)
+  }
+  const insidePortal = getBlockNameAt(bot, bot?.entity?.position) === 'nether_portal'
+  console.log(`[METEOR-SCENE] replay finished reason=${context} label=${match?.best?.label || 'unknown'} insidePortal=${insidePortal}`)
+  return true
+}
+
+async function replayMeteorSceneMovementSequence(bot, config, match, fallbackMs = 3000, context = 'scene-sequence') {
+  const sequence = buildMeteorSceneMovementSequence(match, config)
+  if (!sequence.length || !isBotSessionLive(bot)) return false
+
+  let used = false
+  for (let index = 0; index < sequence.length; index += 1) {
+    if (!isBotSessionLive(bot)) break
+    const insidePortalBeforeStep = getBlockNameAt(bot, bot?.entity?.position) === 'nether_portal'
+    if (insidePortalBeforeStep) return true
+    const step = sequence[index]
+    const moved = await replayMeteorSceneMovement(bot, config, { best: step }, fallbackMs, `${context}-${index + 1}`)
+    used = used || moved
+    const insidePortalAfterStep = getBlockNameAt(bot, bot?.entity?.position) === 'nether_portal'
+    if (insidePortalAfterStep || step.insidePortalBlock === true) return true
+    await delay(150)
+  }
+
+  return used
 }
 
 async function gotoLobbyPortalPoint(bot, config, point, label, timeoutMs, defaultRange = 2) {
   if (!point || !isBotSessionLive(bot)) return false
   configurePathfinderMovements(bot, config)
   const range = Math.max(0.5, toNumber(point.range, defaultRange))
-  console.log(`[LOBBY-PORTAL] Walking to ${label}: ${Math.round(point.x)} ${Math.round(point.y)} ${Math.round(point.z)} range=${range}`)
-  await gotoWithTemporaryThinkTimeout(bot, new GoalNear(point.x, point.y, point.z, range), timeoutMs)
+  const useExactGoal = point.exact === true
+  console.log(`[LOBBY-PORTAL] Walking to ${label}: ${Math.round(point.x)} ${Math.round(point.y)} ${Math.round(point.z)}${useExactGoal ? ' exact' : ` range=${range}`}`)
+  await gotoWithTemporaryThinkTimeout(
+    bot,
+    useExactGoal
+      ? new GoalBlock(Math.floor(point.x), Math.floor(point.y), Math.floor(point.z))
+      : new GoalNear(point.x, point.y, point.z, range),
+    timeoutMs
+  )
+  console.log(`[LOBBY-PORTAL] Reached ${label}.`)
   if (!isBotSessionLive(bot)) return false
   try {
     const Vec3 = bot.entity.position.constructor
@@ -8377,43 +9306,57 @@ async function gotoLobbyPortalPoint(bot, config, point, label, timeoutMs, defaul
 }
 
 async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
-  const pos = bot?.entity?.position
-  const timeoutMs = Math.max(5000, toNumber(portalConfig?.pathTimeoutMs, 60000))
+  ensureUsableEntityState(bot, config, `lobby-portal-leg-${legIndex}`, { allowPlatformSeed: false, log: false })
+  const pos = getSpatialReferencePosition(bot, config, `lobby-portal-leg-${legIndex}`)
   const searchRadius = Math.max(8, toNumber(portalConfig?.portalSearchRadius, 96))
+  const timeoutMs = Math.max(5000, toNumber(portalConfig?.pathTimeoutMs, 60000))
   const entryMs = Math.max(0, toNumber(portalConfig?.portalEntryMs, 3000))
   const waitAfterMs = Math.max(0, toNumber(portalConfig?.waitAfterPortalMs, 12000))
+  const runtime = classifyRuntimePosition(bot, config, `lobby-portal-leg-${legIndex}`)
+  const sceneAction = String(runtime?.meteor?.best?.action || '')
+  const scenePortalPoint = runtime?.meteor?.best?.portalPoint || buildMeteorScenePortalPoint(runtime?.meteor?.best?.scene)
+  const savedSpatialEntry = chooseSavedSpatialPortalStep(
+    bot,
+    config,
+    legIndex === 1 ? ['login-portal'] : ['spawn-portal']
+  )
 
-  if (isInsideLoginPortalZone(pos, portalConfig)) {
+  if (isInsideLoginPortalZone(pos, portalConfig) || sceneAction === 'login-portal') {
     const login = portalConfig.loginPortal || {}
-    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: inside login portal zone; using nearest nether portal if loaded.`)
+    const loginScene = getHighestScoredMeteorSceneByAction(bot, config, 'login-portal') || runtime?.meteor
+    const sceneMovementSequence = buildMeteorSceneMovementSequence(loginScene, config)
     await delay(Math.max(0, toNumber(login.waitBeforeMoveMs, 5000)))
     if (!isBotSessionLive(bot)) return false
-    if (!isInsideLoginPortalZone(bot?.entity?.position, portalConfig)) {
+    if (!isInsideLoginPortalZone(bot?.entity?.position, portalConfig) && sceneAction !== 'login-portal') {
       console.log(`[LOBBY-PORTAL] Leg ${legIndex}: left configured login portal zone before search; skipping portal movement.`)
       return false
     }
-    const portalBlock = findNearestNetherPortal(bot, searchRadius)
-    if (portalBlock?.position) {
-      await gotoLobbyPortalPoint(bot, config, {
-        x: portalBlock.position.x,
-        y: portalBlock.position.y,
-        z: portalBlock.position.z,
-        range: toNumber(login.goalRange, 2)
-      }, 'login nether portal block', timeoutMs, toNumber(login.goalRange, 2))
-    } else {
-      console.log(`[LOBBY-PORTAL-WARN] Leg ${legIndex}: no loaded nether_portal block found within ${searchRadius} blocks; walking forward like AutoPortal fallback.`)
+
+    let usedSceneMovement = false
+    if (sceneMovementSequence.length) {
+      usedSceneMovement = await replayMeteorSceneMovementSequence(bot, config, loginScene, entryMs, `login-leg-${legIndex}`)
     }
-    await holdForwardIntoPortal(bot, config, entryMs)
+
+    const insidePortalBeforeMove = String(bot?.blockAt?.(bot?.entity?.position)?.name || '') === 'nether_portal'
+    const moved = insidePortalBeforeMove
+      ? true
+      : (usedSceneMovement || await replayMeteorSceneMovement(bot, config, loginScene, entryMs, `login-leg-${legIndex}-fallback`))
+    if (!insidePortalBeforeMove && !moved) {
+      await holdForwardIntoPortal(bot, config, entryMs)
+    }
+    const insidePortalAfterMove = String(bot?.blockAt?.(bot?.entity?.position)?.name || '') === 'nether_portal'
+    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: after movement insidePortal=${insidePortalAfterMove} pos=${formatBotPosition(bot)}`)
     await delay(waitAfterMs)
+    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: waitAfterPortal complete. pos=${formatBotPosition(bot)}`)
     return true
   }
 
-  if (isInsideLobbySpawnDisk(pos, portalConfig)) {
+  if (isInsideLobbySpawnDisk(pos, portalConfig) || sceneAction === 'spawn-portal') {
     const spawn = portalConfig.spawnDisk || {}
-    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: inside spawn disk; running spawn portal route.`)
+    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: inside spawn disk or matched spawn scene; running spawn portal route.`)
     await delay(Math.max(0, toNumber(spawn.waitBeforeMoveMs, 2500)))
     if (!isBotSessionLive(bot)) return false
-    if (!isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig)) {
+    if (!isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && sceneAction !== 'spawn-portal') {
       console.log(`[LOBBY-PORTAL] Leg ${legIndex}: left configured spawn disk before search; skipping portal movement.`)
       return false
     }
@@ -8426,6 +9369,8 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
         z: portalBlock.position.z,
         range: toNumber(spawn.goalRange, 2)
       }, 'spawn nether portal block', timeoutMs, toNumber(spawn.goalRange, 2))
+    } else if (scenePortalPoint) {
+      await gotoLobbyPortalPoint(bot, config, { ...scenePortalPoint, range: toNumber(spawn.goalRange, 2) }, 'scene-matched spawn portal', timeoutMs, toNumber(spawn.goalRange, 2))
     } else if (spawn.useConfiguredPortalTarget === true) {
       if (spawn.twoStepRoute === true) {
         await gotoLobbyPortalPoint(bot, config, blockPosFromConfig(spawn.waypoint), 'spawn portal waypoint', timeoutMs, 2)
@@ -8446,6 +9391,13 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     return true
   }
 
+  if (savedSpatialEntry) {
+    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: using saved spatial portal route label=${savedSpatialEntry.step.label} action=${savedSpatialEntry.step.action} distance=${savedSpatialEntry.distance.toFixed(2)} file=${savedSpatialEntry.file}`)
+    await runSpatialPortalStep(bot, config, savedSpatialEntry, legIndex)
+    await delay(waitAfterMs)
+    return true
+  }
+
   console.log(`[LOBBY-PORTAL] Leg ${legIndex}: current position is not in a configured lobby portal zone. p=${JSON.stringify(pos)}`)
   return false
 }
@@ -8453,11 +9405,30 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
 async function runLobbyPortalAutomation(bot, config) {
   const portalConfig = getLobbyPortalConfig(config)
   if (!portalConfig?.enabled) return false
-  if (!isPositionUsable(bot?.entity?.position)) return false
-  if (isPositionInsidePlatformBounds(bot.entity.position, config)) return false
-  const region = getMatchedLobbyRegion(bot.entity.position, portalConfig)
+  ensureUsableEntityState(bot, config, 'lobby-portal-preflight', { allowPlatformSeed: false, log: false })
+  const currentPos = getSpatialReferencePosition(bot, config, 'lobby-portal-preflight')
+  if (!isPositionUsable(currentPos)) return false
+  if (isPositionInsidePlatformBounds(currentPos, config)) return false
+  const region = getMatchedLobbyRegion(currentPos, portalConfig)
+  const runtime = classifyRuntimePosition(bot, config, 'lobby-portal-preflight')
+  const sceneAction = String(runtime?.meteor?.best?.action || '')
+  const savedLoginStep = chooseSavedSpatialPortalStep(bot, config, ['login-portal'])
+  const savedSpawnStep = chooseSavedSpatialPortalStep(bot, config, ['spawn-portal'])
   if (region?.action === 'wait-transfer') {
     logLobbyRegionIfMatched(bot, config, 'transfer-wait')
+    return false
+  }
+
+  if (
+    !region &&
+    !isInsideLoginPortalZone(currentPos, portalConfig) &&
+    !isInsideLobbySpawnDisk(currentPos, portalConfig) &&
+    sceneAction !== 'login-portal' &&
+    sceneAction !== 'spawn-portal' &&
+    !savedLoginStep &&
+    !savedSpawnStep
+  ) {
+    console.log(`[LOBBY-PORTAL] Skipping portal automation: no configured zone or saved spatial route matched current position. p=${JSON.stringify(currentPos)}`)
     return false
   }
 
@@ -8501,6 +9472,10 @@ async function runLobbyPortalAutomation(bot, config) {
 }
 
 function getPlatformHoldReason(bot, config) {
+  const runtime = classifyRuntimePosition(bot, config, 'platform-hold')
+  if (runtime?.classification?.platform === true && runtime.source === 'meteor') {
+    return `meteor-platform-match label=${runtime.meteor?.best?.label || 'unknown'} score=${runtime.meteor?.best?.score?.toFixed?.(3) || 'n/a'}`
+  }
   const pos = bot?.entity?.position
   if (!isPositionUsable(pos)) return `position-not-ready p=${JSON.stringify(pos)}`
   const transferRegion = getTransferLobbyRegion(pos, config)
@@ -8512,7 +9487,10 @@ function getPlatformHoldReason(bot, config) {
 async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
   if (config.advanced?.platformWatchdogEnabled === false || getPlatformBounds(config) == null) return
   if (bot.__nervAllowOffPlatformNavigation) return
+  if (rescueBotPositionFromLatestPacket(bot, config, reason, { log: false })) return
   if (rescueBotPositionFromPlatformCache(bot, config, reason)) return
+  const runtime = classifyRuntimePosition(bot, config, reason)
+  if (runtime?.classification?.platform === true) return
   if (isPositionUsable(bot?.entity?.position) && isPositionInsidePlatformBounds(bot.entity.position, config)) return
 
   if (bot.__nervPlatformHoldPromise) {
@@ -8527,7 +9505,10 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
 
     while (bot?._client && bot._client.state !== 'disconnected' && bot.__nervSessionActive !== false) {
       if (bot.__nervAllowOffPlatformNavigation) return
+      if (rescueBotPositionFromLatestPacket(bot, config, reason, { log: false })) return
       if (rescueBotPositionFromPlatformCache(bot, config, reason)) return
+      const runtime = classifyRuntimePosition(bot, config, reason)
+      if (runtime?.classification?.platform === true) return
       const pos = bot?.entity?.position
       if (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)) {
         if (announced) {
@@ -8563,8 +9544,11 @@ function installPlatformSafety(bot, config) {
     if (!bot.__nervPlatformWatchdogActive) return
     if (bot.__nervAllowOffPlatformNavigation) return
     if (!getPlatformBounds(config)) return
+    const runtime = classifyRuntimePosition(bot, config, 'runtime-watchdog')
+    if (runtime?.classification?.platform === true) return
     const pos = bot?.entity?.position
     if (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)) return
+    if (rescueBotPositionFromLatestPacket(bot, config, 'runtime-watchdog', { log: false })) return
     if (rescueBotPositionFromPlatformCache(bot, config, 'runtime-watchdog')) return
     stopBotMovement(bot)
     void waitForPlatformReady(bot, config, 'runtime-watchdog')
@@ -8670,6 +9654,9 @@ function runSingleSession(config, sessionNumber) {
     bot.__nervSessionActive = true
     bot.loadPlugin(pathfinder)
     installPlatformSafety(bot, config)
+    if (is6b6tConfig(config)) {
+      installPhysicsNaNProbe(bot, config, `main-session-${sessionNumber}`, { logPackets: false, logRepairs: false })
+    }
 
     let lastErrorText = ''
     let kickedText = ''
@@ -8703,6 +9690,7 @@ function runSingleSession(config, sessionNumber) {
     }
     const tryRescuePositionFromCache = (source) => {
       if (spawnedCount < getRequiredSpawnCount(config)) return false
+      if (rescueBotPositionFromLatestPacket(bot, config, source, { log: false })) return true
       return rescueBotPositionFromPlatformCache(bot, config, source)
     }
 
@@ -8769,6 +9757,7 @@ function runSingleSession(config, sessionNumber) {
         settle('chat-login-timeout')
         return
       }
+      await waitForOfflineChatLoginSettle(bot, config, 'spawn-startup')
 
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 60)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 0)) * 2
@@ -8786,7 +9775,20 @@ function runSingleSession(config, sessionNumber) {
         if (isPositionMissing(p) && tryRescuePositionFromCache('spawn-wait')) {
           p = bot?.entity?.position
         }
-        const positionMissing = isPositionMissing(p)
+        let positionMissing = isPositionMissing(p)
+        let runtime = classifyRuntimePosition(bot, config, 'spawn-wait')
+        if (positionMissing && isTrustedMeteorSceneMatch(runtime?.meteor, true)) {
+          updateLobbyPortalConfigFromMeteorScene(config, runtime.meteor)
+          if (seedBotPositionFromMeteorScene(bot, runtime.meteor, 'spawn-wait')) {
+            p = bot?.entity?.position
+            positionMissing = isPositionMissing(p)
+            runtime = classifyRuntimePosition(bot, config, 'spawn-wait-seeded')
+          }
+        }
+        const runtimeClassification = runtime.classification || classifySpatialPosition(p, config)
+        if (runtime?.meteor?.matched) {
+          updateLobbyPortalConfigFromMeteorScene(config, runtime.meteor)
+        }
 
         if (positionMissing) {
           missingPositionAttempts += 1
@@ -8794,10 +9796,9 @@ function runSingleSession(config, sessionNumber) {
           missingPositionAttempts = 0
         }
 
-        const transferRegion = getTransferLobbyRegion(p, config)
-        transferWaitAttempts = transferRegion ? (transferWaitAttempts + 1) : 0
+        transferWaitAttempts = runtimeClassification.state === 'transfer-lobby' ? (transferWaitAttempts + 1) : 0
 
-        if (isPositionUsable(p) && (!waitForPlatformPosition || isPositionInsidePlatformBounds(p, config))) {
+        if (runtimeClassification.platform === true || (isPositionUsable(p) && (!waitForPlatformPosition || isPositionInsidePlatformBounds(p, config)))) {
           break
         }
 
@@ -8821,15 +9822,21 @@ function runSingleSession(config, sessionNumber) {
           return
         }
 
-        if (waitForPlatformPosition && isLobbyPortalEnabled(config) && isPositionUsable(p) && !isPositionInsidePlatformBounds(p, config) && lobbyPortalAttempts < maxLobbyPortalRuns) {
-          const lobbyRegion = getMatchedLobbyRegion(p, getLobbyPortalConfig(config))
-          if (lobbyRegion?.action === 'wait-transfer') {
+        if (waitForPlatformPosition && isLobbyPortalEnabled(config) && runtimeClassification.platform !== true && lobbyPortalAttempts < maxLobbyPortalRuns) {
+          const action = runtime?.meteor?.matched ? String(runtime?.meteor?.best?.action || '') : ''
+          const inTransfer = runtimeClassification.state === 'transfer-lobby'
+          if (inTransfer) {
+            await delay(500)
+            attempts++
+            continue
+          }
+          if (!isPositionUsable(p) && action !== 'login-portal' && action !== 'spawn-portal') {
             await delay(500)
             attempts++
             continue
           }
           lobbyPortalAttempts += 1
-          console.log(`[LOBBY-PORTAL] Position is outside platform during startup; trying lobby portal automation (${lobbyPortalAttempts}/${maxLobbyPortalRuns}).`)
+          console.log(`[LOBBY-PORTAL] Position is outside platform during startup; trying lobby portal automation (${lobbyPortalAttempts}/${maxLobbyPortalRuns}). state=${runtimeClassification.state}${action ? ` scene=${action}` : ''}`)
           const attempted = await runLobbyPortalAutomation(bot, config)
           if (attempted) {
             attempts = 0
@@ -8839,8 +9846,8 @@ function runSingleSession(config, sessionNumber) {
         }
 
         if (attempts > 0 && attempts % 10 === 0) {
-          const reason = isPositionUsable(p) ? 'not near platform yet' : 'missing or resetting'
-          console.log(`[SPAWN] Coordinates ${reason}... (${attempts}/${maxAttempts}) p=${JSON.stringify(p)}`)
+          const reason = runtimeClassification.platform ? 'platform-detected' : (isPositionUsable(p) ? 'not near platform yet' : 'missing or resetting')
+          console.log(`[SPAWN] Coordinates ${reason}... (${attempts}/${maxAttempts}) p=${JSON.stringify(p)} state=${runtimeClassification.state}`)
         }
         await delay(500)
         attempts++
@@ -8853,7 +9860,8 @@ function runSingleSession(config, sessionNumber) {
         }
       }
 
-      if (!isPositionUsable(bot?.entity?.position) || !isPositionInsidePlatformBounds(bot.entity.position, config)) {
+      const finalRuntime = classifyRuntimePosition(bot, config, 'spawn-final')
+      if (!isPositionUsable(bot?.entity?.position) || (finalRuntime.classification?.platform !== true && !isPositionInsidePlatformBounds(bot.entity.position, config))) {
         console.log(`[SPAWN-HOLD] Position was not ready/on-platform after ${Math.round(maxAttempts / 2)}s. Holding instead of quitting.`)
         await waitForPlatformReady(bot, config, 'spawn')
       }
@@ -8974,6 +9982,7 @@ function runSingleSession(config, sessionNumber) {
     })
 
     bot.on('messagestr', (message) => {
+      rememberRecentServerMessage(bot, message, 'messagestr')
       if (isTokenVerificationText(message)) {
         verificationCode = extractVerificationCode(message)
         console.log(`[VERIFY] token/web verification required: ${message}`)
@@ -9195,6 +10204,7 @@ function runSpatialAwarenessTestSession(config) {
         finishAndQuit({ endReason: 'chat-login-timeout' })
         return
       }
+      await waitForOfflineChatLoginSettle(bot, config, 'spatial-startup')
 
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 180)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 45)) * 2
@@ -9366,7 +10376,17 @@ function get6b6tTestAccounts(config) {
     enabled: true,
     botOverrides: {}
   }]
-  return accounts.filter((entry) => entry.name.toLowerCase() === String(accountName).toLowerCase())
+  const enabledMatches = accounts.filter((entry) => entry.name.toLowerCase() === String(accountName).toLowerCase())
+  if (enabledMatches.length) return enabledMatches
+
+  const multi = config.multiUser || {}
+  const configured = Array.isArray(config.bot?.usernames) && config.bot.usernames.length
+    ? config.bot.usernames
+    : (Array.isArray(multi.bots) ? multi.bots : [])
+  const allMatches = configured
+    .map((entry, index) => normalizeSimpleBotEntry(entry, index, multi))
+    .filter((entry) => entry && entry.name.toLowerCase() === String(accountName).toLowerCase())
+  return allMatches
 }
 
 function getAccountAuthLabel(config, account) {
@@ -9516,6 +10536,7 @@ function run6b6tLobbyTestSession(config, label) {
         finishAndQuit({ endReason: 'chat-login-timeout' })
         return
       }
+      await waitForOfflineChatLoginSettle(bot, config, `${label}:startup`)
 
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 180)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 45)) * 2
@@ -9750,6 +10771,736 @@ async function run6b6tLobbyMatrixTest(config) {
   return results
 }
 
+function make6b6tPhysicsTestConfig(baseConfig, account, host, version) {
+  const config = make6b6tTestConfig(baseConfig, account, host, version)
+  config.bot.requiredSpawnCountBeforeStartup = Math.max(1, toNumber(config.bot.requiredSpawnCountBeforeStartup, 1))
+  config.bot.spawnPositionTimeoutSeconds = Math.max(60, toNumber(config.bot.spawnPositionTimeoutSeconds, 120))
+  config.bot.physicsTestPacketMaxAgeMs = Math.max(1000, toNumber(config.bot.physicsTestPacketMaxAgeMs, 15000))
+  if (hasCliFlag('--physics-disable-antihunger') || hasCliFlag('--physics-no-antihunger')) {
+    config.advanced = { ...(config.advanced || {}), antiHunger: false }
+  }
+  return config
+}
+
+function run6b6tPhysicsTestSession(config, label) {
+  return new Promise((resolve) => {
+    const bot = createBot(config)
+    bot.__nervSessionActive = true
+    const probe = installPhysicsNaNProbe(bot, config, label)
+
+    let settled = false
+    let kickedText = ''
+    let lastErrorText = ''
+    let spawnedCount = 0
+    let loginSeen = false
+    let verificationCode = ''
+    const startedAt = Date.now()
+    const durationMs = Math.max(10000, toNumber(getCliValue('--physics-test-ms'), toNumber(getCliValue('--physics-duration-ms'), toNumber(getCliValue('--physics-seconds'), 120) * 1000)))
+
+    const settle = (result = {}) => {
+      if (settled) return
+      settled = true
+      clearInterval(heartbeatTimer)
+      bot.__nervSessionActive = false
+      const current = bot.__nervPhysicsProbe || probe || {}
+      resolve({
+        label,
+        success: result.success === true,
+        endReason: result.endReason || 'physics-ended',
+        spawnedCount,
+        loginSeen,
+        lastError: lastErrorText,
+        kickedReason: kickedText,
+        verificationCode: result.verificationCode || verificationCode || extractVerificationCode(`${kickedText} ${lastErrorText}`),
+        packetPositions: current.packetPositions || 0,
+        positionRepairs: current.positionRepairs || 0,
+        velocityRepairs: current.velocityRepairs || 0,
+        finalPosition: cloneFinitePosition(bot?.entity?.position),
+        finalVelocityInvalid: hasInvalidVector(bot?.entity?.velocity),
+        tokenVerification: isTokenVerificationText(`${result.endReason || ''} ${kickedText} ${lastErrorText}`),
+        ddos: isDdosProtectionText(`${result.endReason || ''} ${kickedText} ${lastErrorText}`)
+      })
+    }
+
+    const finishAndQuit = (result) => {
+      settle(result)
+      try { bot.quit(result?.endReason || 'physics-test-complete') } catch { }
+    }
+
+    const heartbeatTimer = setInterval(() => {
+      if (settled) return
+      const elapsed = Date.now() - startedAt
+      const state = bot.__nervPhysicsProbe || probe || {}
+      const packetAge = state.lastPacketAt ? Date.now() - state.lastPacketAt : -1
+      console.log(`[PHYSICS-STATE] ${label} elapsed=${Math.round(elapsed / 1000)}s clientState=${bot?._client?.state || 'unknown'} spawned=${spawnedCount} login=${loginSeen} chatLogin=${bot.__nervChatLogin?.loggedIn === true} entity=${formatBotPosition(bot)} vel=${formatVec3ForLog(bot?.entity?.velocity)} packetAgeMs=${packetAge} packetPositions=${state.packetPositions || 0} posRepairs=${state.positionRepairs || 0} velRepairs=${state.velocityRepairs || 0}`)
+      if (elapsed >= durationMs) {
+        const invalidPos = isPositionMissing(bot?.entity?.position)
+        const invalidVel = hasInvalidVector(bot?.entity?.velocity)
+        finishAndQuit({
+          success: !invalidPos && !invalidVel && (state.packetPositions || 0) > 0,
+          endReason: invalidPos || invalidVel ? 'physics-invalid-after-test' : 'physics-test-complete'
+        })
+      }
+    }, Math.max(500, toNumber(getCliValue('--physics-log-ms'), 1000)))
+    heartbeatTimer.unref?.()
+
+    bot.on('login', () => {
+      loginSeen = true
+      console.log(`[PHYSICS] ${label} login event.`)
+    })
+
+    bot.on('spawn', () => {
+      spawnedCount += 1
+      console.log(`[PHYSICS] ${label} spawn event ${spawnedCount}. entity=${formatBotPosition(bot)} vel=${formatVec3ForLog(bot?.entity?.velocity)}`)
+    })
+
+    bot.on('nerv-chat-login-success', (info) => {
+      console.log(`[PHYSICS] ${label} offline chat login confirmed reason=${info?.reason || 'unknown'}. entity=${formatBotPosition(bot)} vel=${formatVec3ForLog(bot?.entity?.velocity)}`)
+    })
+
+    bot.on('messagestr', (message) => {
+      if (isTokenVerificationText(message)) {
+        verificationCode = extractVerificationCode(message)
+        console.log(`[PHYSICS-STOP] ${label} token/web verification detected code=${verificationCode || 'unknown'}.`)
+        finishAndQuit({ endReason: 'token-verification-required', verificationCode })
+      }
+    })
+
+    bot.on('kicked', (reason) => {
+      kickedText = typeof reason === 'string' ? reason : JSON.stringify(reason)
+      console.log(`[KICKED] ${kickedText}`)
+      if (isTokenVerificationText(kickedText)) {
+        verificationCode = extractVerificationCode(kickedText)
+        settle({ endReason: 'token-verification-required', verificationCode })
+      }
+    })
+
+    bot.on('error', (err) => {
+      lastErrorText = err?.message || String(err)
+      console.log('[ERROR]', lastErrorText)
+    })
+
+    bot.on('end', (reason) => {
+      const text = reason || 'disconnected'
+      console.log(`[END] ${text}`)
+      settle({ endReason: text })
+    })
+  })
+}
+
+async function run6b6tPhysicsMatrixTest(config) {
+  const accounts = get6b6tTestAccounts(config)
+  if (!accounts.length) {
+    throw new Error('No account found for --test-6b6t-physics. Use --test-account=<name> or enable one account.')
+  }
+
+  const hosts = get6b6tTestHosts(config)
+  const versions = get6b6tTestVersions(config)
+  const maxCases = Math.max(1, toNumber(getCliValue('--max-cases'), accounts.length * hosts.length * versions.length))
+  const normalDelayMs = Math.max(10000, toNumber(getCliValue('--normal-retry-ms'), 10000))
+  const ddosDelayMs = Math.max(31000, toNumber(getCliValue('--ddos-retry-ms'), 32000))
+  const results = []
+  let caseNo = 0
+
+  console.log(`[TEST-6B6T-PHYSICS] Matrix starting. accounts=${accounts.map((a) => `${a.name}/${getAccountAuthLabel(config, a)} passwordConfigured=${Boolean(a.botOverrides?.loginPassword || a.botOverrides?.password || a.botOverrides?.chatLoginPassword)}`).join(', ')} hosts=${hosts.join(', ')} versions=${versions.join(', ')} maxCases=${maxCases} antiHungerDisabled=${hasCliFlag('--physics-disable-antihunger') || hasCliFlag('--physics-no-antihunger')}`)
+
+  for (const version of versions) {
+    for (const host of hosts) {
+      for (const account of accounts) {
+        if (caseNo >= maxCases) break
+        caseNo += 1
+        const label = `case=${caseNo} account=${account.name} auth=${getAccountAuthLabel(config, account)} host=${host} version=${version}`
+        const testConfig = make6b6tPhysicsTestConfig(config, account, host, version)
+        console.log(`[TEST-6B6T-PHYSICS-CONFIG] ${label} config=${JSON.stringify({
+          host,
+          username: testConfig.bot.username,
+          auth: testConfig.bot.auth,
+          version: testConfig.bot.version,
+          loginPasswordConfigured: Boolean(testConfig.bot.loginPassword || testConfig.bot.password || testConfig.bot.chatLoginPassword),
+          antiHunger: testConfig.advanced?.antiHunger !== false,
+          durationMs: Math.max(10000, toNumber(getCliValue('--physics-test-ms'), toNumber(getCliValue('--physics-duration-ms'), toNumber(getCliValue('--physics-seconds'), 120) * 1000)))
+        })}`)
+        const result = await run6b6tPhysicsTestSession(testConfig, label)
+        results.push(result)
+        console.log(`[TEST-6B6T-PHYSICS-RESULT] ${label} success=${result.success} end=${result.endReason} packets=${result.packetPositions} posRepairs=${result.positionRepairs} velRepairs=${result.velocityRepairs} finalPos=${JSON.stringify(result.finalPosition)} finalVelocityInvalid=${result.finalVelocityInvalid} ddos=${result.ddos} tokenVerification=${result.tokenVerification} verificationCode=${result.verificationCode || ''}`)
+        if (result.success) {
+          console.log(`[TEST-6B6T-PHYSICS-DONE] Physics test passed with ${label}.`)
+          return results
+        }
+        if (caseNo >= maxCases) break
+        const waitMs = result.ddos ? ddosDelayMs : normalDelayMs
+        console.log(`[TEST-6B6T-PHYSICS] Waiting ${waitMs}ms before next case. reason=${result.ddos ? 'ddos-protection' : result.endReason}`)
+        await delay(waitMs)
+      }
+      if (caseNo >= maxCases) break
+    }
+    if (caseNo >= maxCases) break
+  }
+
+  console.log(`[TEST-6B6T-PHYSICS-DONE] Matrix finished. cases=${results.length}`)
+  return results
+}
+
+function make6b6tPortalTestConfig(baseConfig, account, host, version) {
+  const config = make6b6tPhysicsTestConfig(baseConfig, account, host, version)
+  config.printer = {
+    ...(config.printer || {}),
+    startOnSpawn: false
+  }
+  config.files = {
+    ...(config.files || {}),
+    resumeProgress: false
+  }
+  return config
+}
+
+function run6b6tPortalTestSession(config, label) {
+  return new Promise((resolve) => {
+    const bot = createBot(config)
+    bot.__nervSessionActive = true
+    bot.loadPlugin(pathfinder)
+    installPlatformSafety(bot, config)
+    installPhysicsNaNProbe(bot, config, `${label} portal`)
+
+    let settled = false
+    let kickedText = ''
+    let lastErrorText = ''
+    let verificationCode = ''
+    let spawnedCount = 0
+    let portalAttempts = 0
+    let portalSuccess = false
+    let portalLoopBusy = false
+    let lastClassificationState = ''
+    const startedAt = Date.now()
+    const maxMs = Math.max(30000, toNumber(getCliValue('--portal-test-ms'), toNumber(getCliValue('--portal-seconds'), 180) * 1000))
+    const maxPortalAttempts = Math.max(1, toNumber(getCliValue('--portal-attempts'), toNumber(getLobbyPortalConfig(config)?.maxSessionRuns, 4)))
+
+    const settle = (result = {}) => {
+      if (settled) return
+      settled = true
+      clearInterval(loopTimer)
+      bot.__nervSessionActive = false
+      bot.__nervAllowOffPlatformNavigation = false
+      const probe = bot.__nervPhysicsProbe || {}
+      resolve({
+        label,
+        success: result.success === true,
+        endReason: result.endReason || 'portal-test-ended',
+        spawnedCount,
+        portalAttempts,
+        portalSuccess,
+        lastClassificationState,
+        lastError: lastErrorText,
+        kickedReason: kickedText,
+        verificationCode: result.verificationCode || verificationCode || extractVerificationCode(`${kickedText} ${lastErrorText}`),
+        packetPositions: probe.packetPositions || 0,
+        positionRepairs: probe.positionRepairs || 0,
+        velocityRepairs: probe.velocityRepairs || 0,
+        finalPosition: cloneFinitePosition(bot?.entity?.position),
+        tokenVerification: isTokenVerificationText(`${result.endReason || ''} ${kickedText} ${lastErrorText}`),
+        ddos: isDdosProtectionText(`${result.endReason || ''} ${kickedText} ${lastErrorText}`)
+      })
+    }
+
+    const finishAndQuit = (result) => {
+      settle(result)
+      try { bot.quit(result?.endReason || 'portal-test-complete') } catch { }
+    }
+
+    const loopTimer = setInterval(() => {
+      void (async () => {
+        if (settled || !isBotSessionLive(bot) || portalLoopBusy) return
+        portalLoopBusy = true
+        try {
+        const elapsedMs = Date.now() - startedAt
+        const runtime = classifyRuntimePosition(bot, config, 'portal-test-loop')
+        const classification = runtime?.classification || { state: 'unknown', platform: false }
+        lastClassificationState = classification.state
+        const region = logLobbyRegionIfMatched(bot, config, 'portal-test-loop')
+        const regionText = region ? ` region=${region.name}${region.action ? ` action=${region.action}` : ''}` : ''
+        const sceneText = runtime?.meteor?.best
+          ? ` scene=${runtime.meteor.best.label} action=${runtime.meteor.best.action} score=${runtime.meteor.best.score.toFixed(3)}`
+          : ''
+        console.log(`[PORTAL-TEST] ${label} elapsed=${Math.round(elapsedMs / 1000)}s state=${classification.state}${regionText}${sceneText} spawned=${spawnedCount} chatLogin=${bot.__nervChatLogin?.loggedIn === true} pos=${formatBotPosition(bot)} vel=${formatVec3ForLog(bot?.entity?.velocity)} attempts=${portalAttempts}/${maxPortalAttempts}`)
+
+        if (classification.platform === true || (isPositionUsable(bot?.entity?.position) && isPositionInsidePlatformBounds(bot.entity.position, config))) {
+          finishAndQuit({ success: true, endReason: 'portal-test-platform-reached' })
+          return
+        }
+
+        if (elapsedMs >= maxMs) {
+          finishAndQuit({ success: false, endReason: 'portal-test-timeout' })
+          return
+        }
+
+        if (shouldHoldForOfflineChatLogin(bot) && !bot.__nervChatLogin?.loggedIn) {
+          trySendChatLoginCommand(bot, 'portal-test-loop')
+          return
+        }
+
+        if (classification.state === 'transfer-lobby') return
+
+        const action = String(runtime?.meteor?.best?.action || region?.action || '').toLowerCase()
+        const shouldTryPortal = action === 'login-portal' || action === 'spawn-portal' || classification.state === 'lobby-region' || classification.state.endsWith('-scene')
+        if (!shouldTryPortal || portalAttempts >= maxPortalAttempts) return
+
+        portalAttempts += 1
+        console.log(`[PORTAL-TEST] ${label} attempting portal automation ${portalAttempts}/${maxPortalAttempts}. state=${classification.state}${action ? ` action=${action}` : ''}`)
+        try {
+          const attempted = await runLobbyPortalAutomation(bot, config)
+          portalSuccess = portalSuccess || attempted
+          console.log(`[PORTAL-TEST] ${label} portal automation result=${attempted} pos=${formatBotPosition(bot)}`)
+        } catch (err) {
+          console.log(`[PORTAL-TEST-WARN] ${label} portal automation failed: ${err?.message || err}`)
+          stopBotMovement(bot)
+        }
+        } finally {
+          portalLoopBusy = false
+        }
+      })()
+    }, Math.max(500, toNumber(getCliValue('--portal-log-ms'), 1500)))
+    loopTimer.unref?.()
+
+    bot.on('spawn', () => {
+      spawnedCount += 1
+      console.log(`[PORTAL-TEST] ${label} spawn event ${spawnedCount}. pos=${formatBotPosition(bot)} vel=${formatVec3ForLog(bot?.entity?.velocity)}`)
+    })
+
+    bot.on('nerv-chat-login-success', (info) => {
+      console.log(`[PORTAL-TEST] ${label} offline chat login confirmed reason=${info?.reason || 'unknown'}. Waiting for portal scene/position.`)
+    })
+
+    bot.on('messagestr', (message) => {
+      if (isTokenVerificationText(message)) {
+        verificationCode = extractVerificationCode(message)
+        console.log(`[PORTAL-TEST-STOP] ${label} token/web verification detected code=${verificationCode || 'unknown'}.`)
+        finishAndQuit({ endReason: 'token-verification-required', verificationCode })
+      }
+    })
+
+    bot.on('kicked', (reason) => {
+      kickedText = typeof reason === 'string' ? reason : JSON.stringify(reason)
+      console.log(`[KICKED] ${kickedText}`)
+      if (isTokenVerificationText(kickedText)) {
+        verificationCode = extractVerificationCode(kickedText)
+        settle({ endReason: 'token-verification-required', verificationCode })
+      }
+    })
+
+    bot.on('error', (err) => {
+      lastErrorText = err?.message || String(err)
+      console.log('[ERROR]', lastErrorText)
+    })
+
+    bot.on('end', (reason) => {
+      const text = reason || 'disconnected'
+      console.log(`[END] ${text}`)
+      settle({ endReason: text })
+    })
+  })
+}
+
+async function run6b6tPortalMatrixTest(config) {
+  const accounts = get6b6tTestAccounts(config)
+  if (!accounts.length) {
+    throw new Error('No account found for --test-6b6t-portal. Use --test-account=<name> or enable one account.')
+  }
+
+  const hosts = get6b6tTestHosts(config)
+  const versions = get6b6tTestVersions(config)
+  const maxCases = Math.max(1, toNumber(getCliValue('--max-cases'), accounts.length * hosts.length * versions.length))
+  const normalDelayMs = Math.max(10000, toNumber(getCliValue('--normal-retry-ms'), 10000))
+  const ddosDelayMs = Math.max(31000, toNumber(getCliValue('--ddos-retry-ms'), 32000))
+  const results = []
+  let caseNo = 0
+
+  console.log(`[TEST-6B6T-PORTAL] Matrix starting. accounts=${accounts.map((a) => `${a.name}/${getAccountAuthLabel(config, a)} passwordConfigured=${Boolean(a.botOverrides?.loginPassword || a.botOverrides?.password || a.botOverrides?.chatLoginPassword)}`).join(', ')} hosts=${hosts.join(', ')} versions=${versions.join(', ')} maxCases=${maxCases}`)
+
+  for (const version of versions) {
+    for (const host of hosts) {
+      for (const account of accounts) {
+        if (caseNo >= maxCases) break
+        caseNo += 1
+        const label = `case=${caseNo} account=${account.name} auth=${getAccountAuthLabel(config, account)} host=${host} version=${version}`
+        const testConfig = make6b6tPortalTestConfig(config, account, host, version)
+        console.log(`[TEST-6B6T-PORTAL-CONFIG] ${label} config=${JSON.stringify({
+          host,
+          username: testConfig.bot.username,
+          auth: testConfig.bot.auth,
+          version: testConfig.bot.version,
+          portalCount: getPortalCount(getLobbyPortalConfig(testConfig), testConfig),
+          loginPasswordConfigured: Boolean(testConfig.bot.loginPassword || testConfig.bot.password || testConfig.bot.chatLoginPassword),
+          lobbyPortal: testConfig.bot.lobbyPortal
+        })}`)
+        const result = await run6b6tPortalTestSession(testConfig, label)
+        results.push(result)
+        console.log(`[TEST-6B6T-PORTAL-RESULT] ${label} success=${result.success} end=${result.endReason} portalAttempts=${result.portalAttempts} portalSuccess=${result.portalSuccess} lastState=${result.lastClassificationState} packets=${result.packetPositions} posRepairs=${result.positionRepairs} velRepairs=${result.velocityRepairs} finalPos=${JSON.stringify(result.finalPosition)} ddos=${result.ddos} tokenVerification=${result.tokenVerification} verificationCode=${result.verificationCode || ''}`)
+        if (result.success) {
+          console.log(`[TEST-6B6T-PORTAL-DONE] Portal test reached final platform with ${label}.`)
+          return results
+        }
+        if (caseNo >= maxCases) break
+        const waitMs = result.ddos ? ddosDelayMs : normalDelayMs
+        console.log(`[TEST-6B6T-PORTAL] Waiting ${waitMs}ms before next case. reason=${result.ddos ? 'ddos-protection' : result.endReason}`)
+        await delay(waitMs)
+      }
+      if (caseNo >= maxCases) break
+    }
+    if (caseNo >= maxCases) break
+  }
+
+  console.log(`[TEST-6B6T-PORTAL-DONE] Matrix finished. cases=${results.length}`)
+  return results
+}
+
+function getSpatialPortalFile(config) {
+  const explicit = getCliValue('--spatial-portal-file') || getCliValue('--portal-spatial-file')
+  if (explicit) return path.resolve(process.cwd(), explicit)
+  const meteorFile = config?.advanced?.meteorSceneAwareness?.file
+  if (meteorFile) return path.resolve(process.cwd(), meteorFile)
+  return getSpatialAwarenessFile(config)
+}
+
+function inferSpatialPortalSceneAction(scene) {
+  const dimension = String(scene?.dimension || '').toLowerCase()
+  const position = buildMeteorScenePlayerPoint(scene)
+  const portalPoint = buildMeteorScenePortalPoint(scene)
+  const label = String(scene?.label || '').toLowerCase()
+  if (dimension.includes('the_end')) return 'login-portal'
+  if (dimension.includes('overworld') && portalPoint && Math.abs(portalPoint.x) < 5000 && Math.abs(portalPoint.z) < 5000) return 'spawn-portal'
+  if (label.includes('login')) return 'login-portal'
+  if (label.includes('spawn')) return 'spawn-portal'
+  if (position && Math.abs(position.x) < 5000 && Math.abs(position.z) < 5000) return 'spawn-portal'
+  return 'unknown'
+}
+
+function getSpatialPortalSceneStage(scene) {
+  const label = String(scene?.label || '').toLowerCase()
+  if (scene?.insidePortalBlock === true || label.includes('portal-enter')) return 3
+  if (label.includes('teleport')) return 2
+  if (label.includes('start')) return 1
+  return 0
+}
+
+function loadSpatialPortalSteps(config) {
+  const file = getSpatialPortalFile(config)
+  const snapshot = readOptionalJson(file)
+  const scenes = [
+    ...(Array.isArray(snapshot?.scenes) ? snapshot.scenes : []),
+    ...(snapshot?.lastScene ? [snapshot.lastScene] : [])
+  ]
+
+  const seen = new Set()
+  const steps = []
+  for (const scene of scenes) {
+    const playerPoint = buildMeteorScenePlayerPoint(scene)
+    const movementHint = buildMeteorSceneMovementHint(scene)
+    const portalPoint = buildMeteorScenePortalPoint(scene)
+    if (!playerPoint || (!movementHint && !portalPoint)) continue
+    const action = inferSpatialPortalSceneAction(scene)
+    if (action !== 'login-portal' && action !== 'spawn-portal') continue
+    const dimension = String(scene?.dimension || '').toLowerCase()
+    const key = [
+      action,
+      dimension,
+      Math.round(playerPoint.x),
+      Math.round(playerPoint.y),
+      Math.round(playerPoint.z),
+      portalPoint ? `${Math.round(portalPoint.x)},${Math.round(portalPoint.y)},${Math.round(portalPoint.z)}` : 'no-portal',
+      scene?.insidePortalBlock === true ? 'inside' : 'outside'
+    ].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+    steps.push({
+      label: String(scene?.label || 'spatial-portal-step'),
+      action,
+      dimension,
+      score: 1,
+      topScore: 1,
+      signatureScore: 1,
+      dimensionScore: 1,
+      chatScore: 1,
+      portalStateScore: scene?.insidePortalBlock === true ? 1 : 0,
+      flowStage: getSpatialPortalSceneStage(scene),
+      capturedAtMs: getMeteorSceneCapturedAtMs(scene),
+      playerPoint,
+      portalPoint,
+      movementHint,
+      insidePortalBlock: scene?.insidePortalBlock === true,
+      scene
+    })
+  }
+
+  return {
+    file,
+    steps: steps.sort((a, b) => {
+      const actionDelta = (a.action === 'login-portal' ? 0 : 1) - (b.action === 'login-portal' ? 0 : 1)
+      if (actionDelta !== 0) return actionDelta
+      const dimensionDelta = a.dimension.localeCompare(b.dimension)
+      if (dimensionDelta !== 0) return dimensionDelta
+      const stageDelta = a.flowStage - b.flowStage
+      if (stageDelta !== 0) return stageDelta
+      return a.capturedAtMs - b.capturedAtMs
+    })
+  }
+}
+
+function chooseSpatialPortalStep(bot, config, steps) {
+  const pos = getSpatialReferencePosition(bot, config, 'choose-spatial-portal-step')
+  if (isPositionMissing(pos) || !Array.isArray(steps) || !steps.length) return null
+  const currentDimension = String(bot?.game?.dimension || '').toLowerCase()
+  const radius = Math.max(4, toNumber(getCliValue('--spatial-portal-radius'), 96))
+  const candidates = steps
+    .map((step) => {
+      const distance = distanceToPoint(pos, step.playerPoint)
+      const dimensionBonus = currentDimension && step.dimension && currentDimension === step.dimension ? -1000 : 0
+      const insidePenalty = step.insidePortalBlock ? 4 : 0
+      return { step, distance, score: distance + dimensionBonus + insidePenalty }
+    })
+    .filter((entry) => entry.distance <= radius || (currentDimension && entry.step.dimension === currentDimension && entry.distance <= radius * 4))
+    .sort((a, b) => a.score - b.score)
+  return candidates[0] || null
+}
+
+function chooseSavedSpatialPortalStep(bot, config, allowedActions = null) {
+  const portalData = loadSpatialPortalSteps(config)
+  const allowed = Array.isArray(allowedActions) && allowedActions.length
+    ? new Set(allowedActions.map((value) => String(value || '').toLowerCase()).filter(Boolean))
+    : null
+  const steps = allowed
+    ? portalData.steps.filter((step) => allowed.has(String(step?.action || '').toLowerCase()))
+    : portalData.steps
+  const entry = chooseSpatialPortalStep(bot, config, steps)
+  if (!entry) return null
+  return {
+    ...entry,
+    file: portalData.file,
+    totalSteps: portalData.steps.length
+  }
+}
+
+async function runSpatialPortalStep(bot, config, entry, attempt) {
+  const step = entry?.step
+  if (!step || !isBotSessionLive(bot)) return false
+  ensureUsableEntityState(bot, config, `spatial-portal-${attempt}`, { allowPlatformSeed: false, log: false })
+  const timeoutMs = Math.max(5000, toNumber(getCliValue('--spatial-portal-path-ms'), toNumber(getLobbyPortalConfig(config)?.pathTimeoutMs, 60000)))
+  const entryMs = Math.max(250, toNumber(getCliValue('--spatial-portal-entry-ms'), toNumber(getLobbyPortalConfig(config)?.portalEntryMs, 3000)))
+  const runtimePos = getSpatialReferencePosition(bot, config, `spatial-portal-${attempt}`)
+  const portalDistance = step.portalPoint ? distanceToPoint(runtimePos, step.portalPoint) : Number.POSITIVE_INFINITY
+  console.log(`[SPATIAL-PORTAL] attempt=${attempt} selected label=${step.label} action=${step.action} dimension=${step.dimension || 'unknown'} distance=${entry.distance.toFixed(2)} portalDistance=${Number.isFinite(portalDistance) ? portalDistance.toFixed(2) : 'n/a'} pos=${formatBotPosition(bot)}`)
+
+  bot.__nervAllowOffPlatformNavigation = true
+  bot.__nervPlatformWatchdogActive = false
+
+  if (step.portalPoint && portalDistance > 3.5) {
+    await gotoLobbyPortalPoint(bot, config, { ...step.portalPoint, range: 2, exact: false }, `spatial portal ${step.label}`, timeoutMs, 2)
+  }
+
+  const replayed = await replayMeteorSceneMovementSequence(bot, config, { best: step }, entryMs, `spatial-portal-${attempt}`)
+    || await replayMeteorSceneMovement(bot, config, { best: step }, entryMs, `spatial-portal-${attempt}-fallback`)
+  if (!replayed) await holdForwardIntoPortal(bot, config, entryMs)
+  return true
+}
+
+function run6b6tSpatialPortalTestSession(config, label) {
+  return new Promise((resolve) => {
+    const bot = createBot(config)
+    bot.__nervSessionActive = true
+    bot.loadPlugin(pathfinder)
+    installPlatformSafety(bot, config)
+    installPhysicsNaNProbe(bot, config, `${label} spatial-portal`)
+
+    const portalData = loadSpatialPortalSteps(config)
+    let settled = false
+    let kickedText = ''
+    let lastErrorText = ''
+    let verificationCode = ''
+    let spawnedCount = 0
+    let portalAttempts = 0
+    let portalLoopBusy = false
+    let lastState = ''
+    const startedAt = Date.now()
+    const maxMs = Math.max(30000, toNumber(getCliValue('--spatial-portal-ms'), toNumber(getCliValue('--portal-seconds'), 180) * 1000))
+    const maxPortalAttempts = Math.max(1, toNumber(getCliValue('--spatial-portal-attempts'), 8))
+
+    console.log(`[SPATIAL-PORTAL] ${label} loaded file=${portalData.file} steps=${portalData.steps.length}`)
+    for (const step of portalData.steps.slice(0, 12)) {
+      const pos = step.playerPoint
+      const portal = step.portalPoint
+      console.log(`[SPATIAL-PORTAL-STEP] action=${step.action} label=${step.label} dim=${step.dimension || 'unknown'} player=${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)} portal=${portal ? `${Math.round(portal.x)},${Math.round(portal.y)},${Math.round(portal.z)}` : 'none'} inside=${step.insidePortalBlock}`)
+    }
+
+    const settle = (result = {}) => {
+      if (settled) return
+      settled = true
+      clearInterval(loopTimer)
+      bot.__nervSessionActive = false
+      bot.__nervAllowOffPlatformNavigation = false
+      stopBotMovement(bot)
+      const probe = bot.__nervPhysicsProbe || {}
+      resolve({
+        label,
+        success: result.success === true,
+        endReason: result.endReason || 'spatial-portal-ended',
+        spawnedCount,
+        portalAttempts,
+        lastState,
+        lastError: lastErrorText,
+        kickedReason: kickedText,
+        verificationCode: result.verificationCode || verificationCode || extractVerificationCode(`${kickedText} ${lastErrorText}`),
+        packetPositions: probe.packetPositions || 0,
+        positionRepairs: probe.positionRepairs || 0,
+        velocityRepairs: probe.velocityRepairs || 0,
+        finalPosition: cloneFinitePosition(bot?.entity?.position),
+        tokenVerification: isTokenVerificationText(`${result.endReason || ''} ${kickedText} ${lastErrorText}`),
+        ddos: isDdosProtectionText(`${result.endReason || ''} ${kickedText} ${lastErrorText}`),
+        spatialFile: portalData.file,
+        spatialSteps: portalData.steps.length
+      })
+    }
+
+    const finishAndQuit = (result) => {
+      settle(result)
+      try { bot.quit(result?.endReason || 'spatial-portal-complete') } catch { }
+    }
+
+    const loopTimer = setInterval(() => {
+      void (async () => {
+        if (settled || !isBotSessionLive(bot) || portalLoopBusy) return
+        portalLoopBusy = true
+        try {
+          const elapsedMs = Date.now() - startedAt
+          const pos = bot?.entity?.position
+          const classification = classifySpatialPosition(pos, config)
+          lastState = classification.state
+          const region = logLobbyRegionIfMatched(bot, config, 'spatial-portal-loop')
+          const regionText = region ? ` region=${region.name}${region.action ? ` action=${region.action}` : ''}` : ''
+          const chosen = chooseSpatialPortalStep(bot, config, portalData.steps)
+          const chosenText = chosen ? ` chosen=${chosen.step.label}/${chosen.step.action} dist=${chosen.distance.toFixed(1)}` : ''
+          console.log(`[SPATIAL-PORTAL] ${label} elapsed=${Math.round(elapsedMs / 1000)}s state=${classification.state}${regionText}${chosenText} spawned=${spawnedCount} chatLogin=${bot.__nervChatLogin?.loggedIn === true} pos=${formatBotPosition(bot)} vel=${formatVec3ForLog(bot?.entity?.velocity)} attempts=${portalAttempts}/${maxPortalAttempts}`)
+
+          if (classification.platform === true || (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config))) {
+            finishAndQuit({ success: true, endReason: 'spatial-portal-platform-reached' })
+            return
+          }
+
+          if (elapsedMs >= maxMs) {
+            finishAndQuit({ success: false, endReason: 'spatial-portal-timeout' })
+            return
+          }
+
+          if (shouldHoldForOfflineChatLogin(bot) && !bot.__nervChatLogin?.loggedIn) {
+            trySendChatLoginCommand(bot, 'spatial-portal-loop')
+            return
+          }
+
+          if (classification.state === 'transfer-lobby') return
+          if (!chosen || portalAttempts >= maxPortalAttempts) return
+
+          portalAttempts += 1
+          const moved = await runSpatialPortalStep(bot, config, chosen, portalAttempts)
+          console.log(`[SPATIAL-PORTAL] ${label} movement result=${moved} pos=${formatBotPosition(bot)}`)
+        } catch (err) {
+          console.log(`[SPATIAL-PORTAL-WARN] ${label} failed: ${err?.message || err}`)
+          stopBotMovement(bot)
+        } finally {
+          portalLoopBusy = false
+        }
+      })()
+    }, Math.max(500, toNumber(getCliValue('--spatial-portal-log-ms'), 1500)))
+    loopTimer.unref?.()
+
+    bot.on('spawn', () => {
+      spawnedCount += 1
+      console.log(`[SPATIAL-PORTAL] ${label} spawn event ${spawnedCount}. pos=${formatBotPosition(bot)} vel=${formatVec3ForLog(bot?.entity?.velocity)}`)
+    })
+
+    bot.on('nerv-chat-login-success', (info) => {
+      console.log(`[SPATIAL-PORTAL] ${label} offline chat login confirmed reason=${info?.reason || 'unknown'}.`)
+    })
+
+    bot.on('messagestr', (message) => {
+      if (isTokenVerificationText(message)) {
+        verificationCode = extractVerificationCode(message)
+        console.log(`[SPATIAL-PORTAL-STOP] ${label} token/web verification detected code=${verificationCode || 'unknown'}.`)
+        finishAndQuit({ endReason: 'token-verification-required', verificationCode })
+      }
+    })
+
+    bot.on('kicked', (reason) => {
+      kickedText = typeof reason === 'string' ? reason : JSON.stringify(reason)
+      console.log(`[KICKED] ${kickedText}`)
+      if (isTokenVerificationText(kickedText)) {
+        verificationCode = extractVerificationCode(kickedText)
+        settle({ endReason: 'token-verification-required', verificationCode })
+      }
+    })
+
+    bot.on('error', (err) => {
+      lastErrorText = err?.message || String(err)
+      console.log('[ERROR]', lastErrorText)
+    })
+
+    bot.on('end', (reason) => {
+      const text = reason || 'disconnected'
+      console.log(`[END] ${text}`)
+      settle({ endReason: text })
+    })
+  })
+}
+
+async function run6b6tSpatialPortalMatrixTest(config) {
+  const accounts = get6b6tTestAccounts(config)
+  if (!accounts.length) {
+    throw new Error('No account found for --test-spatial-portal. Use --test-account=<name> or enable one account.')
+  }
+
+  const hosts = get6b6tTestHosts(config)
+  const versions = get6b6tTestVersions(config)
+  const maxCases = Math.max(1, toNumber(getCliValue('--max-cases'), accounts.length * hosts.length * versions.length))
+  const normalDelayMs = Math.max(10000, toNumber(getCliValue('--normal-retry-ms'), 10000))
+  const ddosDelayMs = Math.max(31000, toNumber(getCliValue('--ddos-retry-ms'), 32000))
+  const results = []
+  let caseNo = 0
+
+  console.log(`[TEST-SPATIAL-PORTAL] Matrix starting. accounts=${accounts.map((a) => `${a.name}/${getAccountAuthLabel(config, a)}`).join(', ')} hosts=${hosts.join(', ')} versions=${versions.join(', ')} maxCases=${maxCases}`)
+
+  for (const version of versions) {
+    for (const host of hosts) {
+      for (const account of accounts) {
+        if (caseNo >= maxCases) break
+        caseNo += 1
+        const label = `case=${caseNo} account=${account.name} auth=${getAccountAuthLabel(config, account)} host=${host} version=${version}`
+        const testConfig = make6b6tPortalTestConfig(config, account, host, version)
+        console.log(`[TEST-SPATIAL-PORTAL-CONFIG] ${label} config=${JSON.stringify({
+          host,
+          username: testConfig.bot.username,
+          auth: testConfig.bot.auth,
+          version: testConfig.bot.version,
+          spatialPortalFile: getSpatialPortalFile(testConfig),
+          loginPasswordConfigured: Boolean(testConfig.bot.loginPassword || testConfig.bot.password || testConfig.bot.chatLoginPassword)
+        })}`)
+        const result = await run6b6tSpatialPortalTestSession(testConfig, label)
+        results.push(result)
+        console.log(`[TEST-SPATIAL-PORTAL-RESULT] ${label} success=${result.success} end=${result.endReason} attempts=${result.portalAttempts} steps=${result.spatialSteps} file=${result.spatialFile} packets=${result.packetPositions} posRepairs=${result.positionRepairs} velRepairs=${result.velocityRepairs} finalPos=${JSON.stringify(result.finalPosition)} ddos=${result.ddos} tokenVerification=${result.tokenVerification} verificationCode=${result.verificationCode || ''}`)
+        if (result.success) {
+          console.log(`[TEST-SPATIAL-PORTAL-DONE] Reached final platform with ${label}.`)
+          return results
+        }
+        if (caseNo >= maxCases) break
+        const waitMs = result.ddos ? ddosDelayMs : normalDelayMs
+        console.log(`[TEST-SPATIAL-PORTAL] Waiting ${waitMs}ms before next case. reason=${result.ddos ? 'ddos-protection' : result.endReason}`)
+        await delay(waitMs)
+      }
+      if (caseNo >= maxCases) break
+    }
+    if (caseNo >= maxCases) break
+  }
+
+  console.log(`[TEST-SPATIAL-PORTAL-DONE] Matrix finished. cases=${results.length}`)
+  return results
+}
+
 async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
   return logContext.run({ botName: assignment.name }, async () => {
     await delay(Math.max(0, toNumber(assignment.joinDelayMs, 0)))
@@ -9918,6 +11669,27 @@ async function start() {
   if (hasCliFlag('--test-6b6t-lobby')) {
     console.log('[TEST-6B6T] Running isolated 6b6t host/version/lobby matrix test only. Printer will not start.')
     await run6b6tLobbyMatrixTest(config)
+    setTimeout(() => process.exit(0), 100)
+    return
+  }
+
+  if (hasCliFlag('--test-6b6t-physics') || hasCliFlag('--test-physics-naN') || hasCliFlag('--test-physics-nan')) {
+    console.log('[TEST-6B6T-PHYSICS] Running isolated 6b6t physics/NaN diagnostic test only. Printer will not start.')
+    await run6b6tPhysicsMatrixTest(config)
+    setTimeout(() => process.exit(0), 100)
+    return
+  }
+
+  if (hasCliFlag('--test-6b6t-portal') || hasCliFlag('--test-portal')) {
+    console.log('[TEST-6B6T-PORTAL] Running isolated 6b6t portal automation test only. Printer/spatial will not start.')
+    await run6b6tPortalMatrixTest(config)
+    setTimeout(() => process.exit(0), 100)
+    return
+  }
+
+  if (hasCliFlag('--test-spatial-portal') || hasCliFlag('--test-6b6t-spatial-portal')) {
+    console.log('[TEST-SPATIAL-PORTAL] Running isolated saved spatial portal route test only. Printer/spatial scan will not start.')
+    await run6b6tSpatialPortalMatrixTest(config)
     setTimeout(() => process.exit(0), 100)
     return
   }

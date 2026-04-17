@@ -20,7 +20,10 @@
     "test:repair": "node nerv-printer.js --test-repair",
     "test:multi-user-plan": "node nerv-printer.js --test-multi-user-plan",
     "test:6b6t-lobby": "node nerv-printer.js --connection=6b6t --test-6b6t-lobby",
+    "test:6b6t-portal": "node nerv-printer.js --connection=6b6t --test-6b6t-portal",
+    "test:spatial-portal": "node nerv-printer.js --connection=6b6t --test-spatial-portal",
     "test:spatial": "node nerv-printer.js --connection=6b6t --test-spatial",
+    "test:move5": "node src/nerv-printer/diagnostics/move-test.js",
     "start:broadcast": "set ENABLE_QUOTE_BROADCAST=true&& node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

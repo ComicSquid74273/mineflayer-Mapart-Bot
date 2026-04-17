@@ -32,6 +32,16 @@ function createPlacementWorkload(deps) {
     })
   }
 
+  function getTargetKey(target) {
+    return `${target.position.x}:${target.position.y}:${target.position.z}`
+  }
+
+  function confirmTargetPlaced(bot, target) {
+    const Vec3 = bot.entity.position.constructor
+    const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
+    return actual?.name === target.blockName
+  }
+
   function applyAdaptiveSlowdown(config, missingCount, batchSize, label) {
     const advanced = config.advanced || {}
     if (advanced.scannerAdaptiveSlowdown === false || batchSize <= 0) return false
@@ -77,10 +87,12 @@ function createPlacementWorkload(deps) {
     if (!batchTargets.length) return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0 }
 
     const printer = config.printer || {}
+    const advanced = config.advanced || {}
     const tickMs = Math.max(10, toNumber(printer.fastTraversalTickMs, 40))
     const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
     const lineEndSettleMs = Math.max(0, toNumber(config.advanced?.scannerLineEndSettleMs, toNumber(printer.fastTraversalCatchupStallMs, 0)))
     const checkpointBuffer = Math.max(0.5, toNumber(config.advanced?.checkpointBuffer, 0.8))
+    const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
     const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide)
     const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
     const neededByBlock = estimateNeededFromLookahead(batchTargets)
@@ -94,24 +106,48 @@ function createPlacementWorkload(deps) {
     let skipped = 0
     let emergencyRestockBlock = null
     const seen = new Set()
+    const pendingUntil = new Map()
 
     const placementLoop = (async () => {
       while (active) {
         const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
         if (allowPlacement) {
+          const now = Date.now()
+          const burstExcluded = new Set(seen)
+          for (const [key, until] of pendingUntil.entries()) {
+            if (until > now) burstExcluded.add(key)
+            else pendingUntil.delete(key)
+          }
+
           for (let i = 0; i < maxPerTick; i += 1) {
-            const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, seen, currentActiveCols)
+            const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded, currentActiveCols)
             if (!target) break
 
-            const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-            seen.add(key)
+            const key = getTargetKey(target)
+            burstExcluded.add(key)
 
             try {
               const result = await placeNervScannerTarget(bot, config, target)
-              if (result.state === 'placed') placed += 1
-              else if (result.state === 'already') already += 1
-              else {
+              const confirmed = confirmTargetPlaced(bot, target)
+
+              if (confirmed) {
+                seen.add(key)
+                pendingUntil.delete(key)
+              } else if (result.state === 'placed') {
+                pendingUntil.set(key, Date.now() + retryCooldownMs)
+              }
+
+              if (result.state === 'placed') {
+                placed += 1
+              } else if (result.state === 'already') {
+                already += 1
+                seen.add(key)
+                pendingUntil.delete(key)
+              } else {
                 skipped += 1
+                if (!String(result.reason || '').startsWith('missing-item-')) {
+                  pendingUntil.set(key, Date.now() + retryCooldownMs)
+                }
                 if (config.errorHandling?.logErrors !== false) {
                   console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
                 }
@@ -123,6 +159,7 @@ function createPlacementWorkload(deps) {
               }
             } catch (err) {
               skipped += 1
+              pendingUntil.set(key, Date.now() + retryCooldownMs)
               if (config.errorHandling?.logErrors !== false) {
                 console.log(`[NERV-SCANNER-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
               }
@@ -237,15 +274,15 @@ function createPlacementWorkload(deps) {
             const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded, currentActiveCols)
             if (!target) break
 
-            const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+            const key = getTargetKey(target)
             const neededSwap = String(bot.heldItem?.name || '') !== target.blockName
             burstExcluded.add(key)
 
             try {
               const result = await placeNervScannerTarget(bot, config, target)
-              const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
+              const confirmed = confirmTargetPlaced(bot, target)
 
-              if (actual?.name === target.blockName) {
+              if (confirmed) {
                 seen.add(key)
                 pendingUntil.delete(key)
               } else if (result.state === 'placed') {
@@ -260,6 +297,9 @@ function createPlacementWorkload(deps) {
                 pendingUntil.delete(key)
               } else {
                 skipped += 1
+                if (!String(result.reason || '').startsWith('missing-item-')) {
+                  pendingUntil.set(key, Date.now() + retryCooldownMs)
+                }
                 if (config.errorHandling?.logErrors !== false) {
                   console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
                 }

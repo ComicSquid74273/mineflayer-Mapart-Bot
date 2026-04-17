@@ -3,12 +3,12 @@
     "usernames": [
       {
         "name": "ComicSquid007",
-        "enabled": false,
+        "enabled": true,
         "auth": "microsoft"
       },
       {
             "name": "ComicBot001",
-            "enabled": true,
+            "enabled": false,
             "auth": "offline",
             "loginPassword": "zKoUufW3hb71u"
           },
@@ -110,27 +110,36 @@
                 "radius": 192
               },
               {
-                "name": "login-portal-999",
+                "name": "login-portal-neg999",
                 "type": "box",
                 "action": "login-portal",
-                "x": 1000,
+                "x": -1000,
                 "y": 100,
-                "z": 1000,
+                "z": -1000,
                 "radius": 16
+              },
+              {
+                "name": "spawn-portal-overworld-0",
+                "type": "box",
+                "action": "spawn-portal",
+                "x": 0,
+                "y": 20,
+                "z": 4,
+                "radius": 24
               }
             ],
             "spawnDisk": {
-              "enabled": false,
-              "centerX": 1000,
-              "centerZ": 1000,
-              "radius": 192,
+              "enabled": true,
+              "centerX": 0,
+              "centerZ": 4,
+              "radius": 24,
               "waitBeforeMoveMs": 2500,
               "twoStepRoute": false,
-              "useConfiguredPortalTarget": false,
+              "useConfiguredPortalTarget": true,
               "waypoint": {
-                "x": 7,
-                "y": 18,
-                "z": 61
+                "x": 0,
+                "y": 20,
+                "z": 4
               },
               "portal": {
                 "x": 0,
@@ -141,9 +150,9 @@
             },
             "loginPortal": {
               "enabled": true,
-              "x": 1000,
+              "x": -1000,
               "y": 100,
-              "z": 1000,
+              "z": -1000,
               "radius": 16,
               "waitBeforeMoveMs": 5000,
               "portalTargetZ": -989,
@@ -197,7 +206,7 @@
     "northToSouth": true,
     "mapFillSquareSize": 4,
     "sprintMode": "off",
-    "fastTraversalEnabled": false,
+    "fastTraversalEnabled": true,
     "fastTraversalTickMs": 5,
     "fastTraversalCheckpointEveryRows": 10,
     "fastTraversalCatchupPasses": 2,
@@ -209,6 +218,19 @@
       "enabled": true,
       "sprint": false,
       "onGround": true
+    },
+    "meteorSceneAwareness": {
+      "enabled": true,
+      "loginPortalEnabled": false,
+      "file": "d:\\PrismLauncher\\instances\\Bot 001 1.0.0(1)\\minecraft\\spatial-awareness\\meteor-scene-signatures.json",
+      "minScore": 0.72,
+      "scanRadius": 20,
+      "verticalRadius": 5,
+      "labelHints": {
+        "spawn1": "login-portal",
+        "spawn2": "spawn-portal",
+        "printer-platform": "platform"
+      }
     },
     "platformWatchdogEnabled": true,
     "platformWatchdogPollMs": 1000,
