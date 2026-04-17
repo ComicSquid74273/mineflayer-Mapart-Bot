@@ -8,12 +8,12 @@
       },
       {
             "name": "ComicBot001",
-            "enabled": false,
+            "enabled": true,
             "auth": "offline",
             "loginPassword": "zKoUufW3hb71u"
           },
           {
-            "name": "MapartBot2",
+            "name": "ComicBot002",
             "enabled": false,
             "auth": "offline",
             "loginPassword": "bot2_password"
@@ -197,7 +197,7 @@
       "y": 0,
       "z": -1
     },
-    "linesPerRun": 4,
+    "linesPerRun": 3,
     "placeRange": 4,
     "minPlaceDistance": 0.8,
     "ignoredBlocks": [],

@@ -3910,11 +3910,31 @@ function requiresSneakPlacementSupport(block) {
   return name === 'dispenser' || name === 'dropper'
 }
 
+function isTargetBlockPlaced(bot, targetPos, blockName) {
+  const placed = bot?.blockAt?.(targetPos)
+  return placed?.name === blockName
+}
+
+async function waitForTargetBlockPlaced(bot, targetPos, blockName, waitMs = 0, pollMs = 15) {
+  if (isTargetBlockPlaced(bot, targetPos, blockName)) return true
+  const timeoutAt = Date.now() + Math.max(0, toNumber(waitMs, 0))
+  const stepMs = Math.max(5, toNumber(pollMs, 15))
+  while (Date.now() < timeoutAt) {
+    await delay(Math.min(stepMs, Math.max(1, timeoutAt - Date.now())))
+    if (isTargetBlockPlaced(bot, targetPos, blockName)) return true
+  }
+  return isTargetBlockPlaced(bot, targetPos, blockName)
+}
+
 async function placeTarget(bot, config, target, isRepairPass = false) {
   const printer = config.printer || {}
   const errors = config.errorHandling || {}
   const Vec3 = bot.entity.position.constructor
   const noWaitForBlockUpdate = isRepairPass === true || isRepairPass === 'noWait'
+  const fastConfirmMs = noWaitForBlockUpdate
+    ? Math.max(0, toNumber(config.advanced?.scannerPlaceConfirmMs, Math.max(45, toNumber(config.advanced?.scannerWorkloadPollMs, 10) * 4)))
+    : 0
+  const fastConfirmPollMs = Math.max(5, toNumber(config.advanced?.scannerPlaceConfirmPollMs, 15))
 
   if (isRepairPass === 'noWait') {
     ensureUsableEntityState(bot, config, 'before-place-fast', { allowPlatformSeed: false, log: false })
@@ -4033,16 +4053,17 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
       }
-      placedSuccessfully = true
-      break
+      if (!noWaitForBlockUpdate || await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
+        placedSuccessfully = true
+        break
+      }
     } catch (err) {
       lastPlaceError = err
       const errMsg = String(err?.message || '').toLowerCase()
       if (errMsg.includes('must be holding an item')) {
         return { state: 'skip', reason: `missing-item-${target.blockName}` }
       }
-      const afterPlace = bot.blockAt(targetPos)
-      if (afterPlace?.name === target.blockName) {
+      if (await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
         placedSuccessfully = true
         if (config.advanced?.debugPrints) {
           console.log(`[PLACE-WARN] Placement timeout but block is present at ${target.position.x} ${target.position.y} ${target.position.z}`)
@@ -4057,6 +4078,9 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   }
 
   if (!placedSuccessfully) {
+    if (noWaitForBlockUpdate) {
+      return { state: 'skip', reason: 'unconfirmed-place' }
+    }
     throw lastPlaceError || new Error('placement failed with all faces')
   }
 

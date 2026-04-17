@@ -42,6 +42,11 @@ function createPlacementWorkload(deps) {
     return actual?.name === target.blockName
   }
 
+  function isTransientPlacementReason(reason) {
+    const text = String(reason || '')
+    return text === 'unconfirmed-place'
+  }
+
   function applyAdaptiveSlowdown(config, missingCount, batchSize, label) {
     const advanced = config.advanced || {}
     if (advanced.scannerAdaptiveSlowdown === false || batchSize <= 0) return false
@@ -144,11 +149,13 @@ function createPlacementWorkload(deps) {
                 seen.add(key)
                 pendingUntil.delete(key)
               } else {
-                skipped += 1
+                if (!isTransientPlacementReason(result.reason)) {
+                  skipped += 1
+                }
                 if (!String(result.reason || '').startsWith('missing-item-')) {
                   pendingUntil.set(key, Date.now() + retryCooldownMs)
                 }
-                if (config.errorHandling?.logErrors !== false) {
+                if (config.errorHandling?.logErrors !== false && !isTransientPlacementReason(result.reason)) {
                   console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
                 }
                 if (allowEmergencyRestock && String(result.reason || '').startsWith('missing-item-')) {
@@ -296,11 +303,13 @@ function createPlacementWorkload(deps) {
                 seen.add(key)
                 pendingUntil.delete(key)
               } else {
-                skipped += 1
+                if (!isTransientPlacementReason(result.reason)) {
+                  skipped += 1
+                }
                 if (!String(result.reason || '').startsWith('missing-item-')) {
                   pendingUntil.set(key, Date.now() + retryCooldownMs)
                 }
-                if (config.errorHandling?.logErrors !== false) {
+                if (config.errorHandling?.logErrors !== false && !isTransientPlacementReason(result.reason)) {
                   console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
                 }
 
