@@ -3911,12 +3911,16 @@ function requiresSneakPlacementSupport(block) {
 }
 
 async function placeTarget(bot, config, target, isRepairPass = false) {
-  await waitForPlatformReady(bot, config, 'before-place')
-
   const printer = config.printer || {}
   const errors = config.errorHandling || {}
   const Vec3 = bot.entity.position.constructor
   const noWaitForBlockUpdate = isRepairPass === true || isRepairPass === 'noWait'
+
+  if (isRepairPass === 'noWait') {
+    ensureUsableEntityState(bot, config, 'before-place-fast', { allowPlatformSeed: false, log: false })
+  } else {
+    await waitForPlatformReady(bot, config, 'before-place')
+  }
 
   const { targetPos } = resolveTargetPlacementPosition(bot, target, config)
 
@@ -4056,7 +4060,9 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     throw lastPlaceError || new Error('placement failed with all faces')
   }
 
-  await delay(toNumber(printer.placeDelayMs, 50))
+  if (!noWaitForBlockUpdate) {
+    await delay(toNumber(printer.placeDelayMs, 50))
+  }
   return { state: 'placed' }
 }
 
