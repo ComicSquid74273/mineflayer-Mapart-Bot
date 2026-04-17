@@ -292,13 +292,22 @@ function createDefaultConfig() {
               enabled: true,
               offlineOnly: true,
               command: '/login',
+              autoSendOnSpawn: true,
+              autoSendInitialDelayMs: 2500,
+              holdStartupUntilLoggedIn: true,
+              waitTimeoutMs: 30000,
               promptPatterns: [
                 'please login with the command',
-                '/login <password>'
+                '/login <password>',
+                'please login',
+                'use /login',
+                'log in with /login'
               ],
               successPatterns: [
                 'you are now logged in',
-                'successfully logged in'
+                'successfully logged in',
+                'logged in successfully',
+                'you have been logged in'
               ],
               minDelayMs: 750,
               retryMs: 5000,
@@ -5143,56 +5152,159 @@ function getChatLoginPassword(config) {
   )
 }
 
+function isOfflineAuthConfig(config) {
+  return String(config?.bot?.auth || 'offline').toLowerCase() === 'offline'
+}
+
+function shouldHoldForOfflineChatLogin(bot) {
+  const state = bot?.__nervChatLogin
+  return state?.enabled === true && state?.required === true && state?.holdStartupUntilLoggedIn !== false
+}
+
+function markChatLoginSuccess(bot, reason = 'chat-success') {
+  const state = bot?.__nervChatLogin
+  if (!state || state.loggedIn) return false
+  state.loggedIn = true
+  state.successReason = reason
+  state.successAt = Date.now()
+  console.log(`[CHAT-LOGIN] Login confirmed via ${reason}.`)
+  try {
+    bot.emit('nerv-chat-login-success', { reason, at: state.successAt })
+  } catch { }
+  return true
+}
+
+function canBypassRemainingSpawnGate(bot, config, spawnedCount, requiredSpawnCount) {
+  if (!isOfflineAuthConfig(config)) return false
+  if (requiredSpawnCount <= 1) return false
+  if (spawnedCount < 1) return false
+  return bot?.__nervChatLogin?.loggedIn === true
+}
+
+function trySendChatLoginCommand(bot, reason = 'prompt') {
+  const state = bot?.__nervChatLogin
+  if (!state?.enabled || !state.required || state.loggedIn) return false
+  if (bot.__nervSessionActive === false || bot?._client?.state === 'disconnected') return false
+
+  const now = Date.now()
+  if (state.attempts >= state.maxAttempts) return false
+  if (now - state.lastSentAt < state.retryMs) return false
+
+  state.attempts += 1
+  state.lastSentAt = now
+  state.lastReason = reason
+  console.log(`[CHAT-LOGIN] Sending ${state.command} command attempt ${state.attempts}/${state.maxAttempts} reason=${reason}.`)
+  setTimeout(() => {
+    if (bot.__nervSessionActive === false || bot?._client?.state === 'disconnected') return
+    if (state.loggedIn) return
+    try {
+      bot.chat(`${state.command} ${state.password}`)
+    } catch (err) {
+      console.log(`[CHAT-LOGIN-WARN] Could not send login command: ${err?.message || err}`)
+    }
+  }, state.minDelayMs)
+  return true
+}
+
+async function waitForOfflineChatLogin(bot, config, context = 'startup') {
+  const state = bot?.__nervChatLogin
+  if (!shouldHoldForOfflineChatLogin(bot)) return true
+  if (state.loggedIn) return true
+
+  const timeoutMs = Math.max(0, toNumber(state.waitTimeoutMs, 30000))
+  const startedAt = Date.now()
+  let lastLogAt = 0
+
+  trySendChatLoginCommand(bot, `${context}-initial`)
+
+  while (isBotSessionLive(bot) && !state.loggedIn) {
+    const elapsedMs = Date.now() - startedAt
+    if (timeoutMs > 0 && elapsedMs >= timeoutMs) break
+
+    if (Date.now() - lastLogAt >= 5000) {
+      const attemptsLeft = Math.max(0, state.maxAttempts - state.attempts)
+      console.log(`[CHAT-LOGIN] Waiting for offline login before ${context}. elapsed=${Math.round(elapsedMs / 1000)}s attemptsLeft=${attemptsLeft}`)
+      lastLogAt = Date.now()
+    }
+
+    trySendChatLoginCommand(bot, `${context}-retry`)
+    await delay(500)
+  }
+
+  return state.loggedIn === true
+}
+
 function installChatLogin(bot, config) {
   const botCfg = config.bot || {}
   const login = botCfg.chatLogin || config.chatLogin || {}
+  const connectionIs6b6t = config.connection?.active === '6b6t' || config.connection?.selected === '6b6t'
+  const required = login.enabled !== false && connectionIs6b6t && (login.offlineOnly === false || isOfflineAuthConfig(config))
+
+  bot.__nervChatLogin = {
+    enabled: login.enabled !== false,
+    required,
+    loggedIn: false,
+    attempts: 0,
+    lastSentAt: 0,
+    lastReason: '',
+    successReason: '',
+    successAt: 0,
+    holdStartupUntilLoggedIn: login.holdStartupUntilLoggedIn !== false,
+    waitTimeoutMs: Math.max(0, toNumber(login.waitTimeoutMs, 30000))
+  }
+
   if (login.enabled === false) return
-  if (config.connection?.active !== '6b6t' && config.connection?.selected !== '6b6t') return
-  if (login.offlineOnly !== false && String(botCfg.auth || 'offline').toLowerCase() !== 'offline') return
+  if (!connectionIs6b6t) return
+  if (!required) return
 
   const password = String(getChatLoginPassword(config) || '').trim()
   if (!password) {
     console.log('[CHAT-LOGIN] Enabled for offline 6b6t account, but no password is configured. Add loginPassword to this account entry.')
+    bot.__nervChatLogin.enabled = false
     return
   }
 
   const command = String(login.command || '/login').trim() || '/login'
   const promptPatterns = Array.isArray(login.promptPatterns) && login.promptPatterns.length
     ? login.promptPatterns.map((value) => String(value).toLowerCase())
-    : ['please login with the command', '/login <password>']
+    : ['please login with the command', '/login <password>', 'please login', 'use /login', 'log in with /login']
   const successPatterns = Array.isArray(login.successPatterns)
     ? login.successPatterns.map((value) => String(value).toLowerCase()).filter(Boolean)
-    : []
+    : ['you are now logged in', 'successfully logged in', 'logged in successfully', 'you have been logged in']
   const minDelayMs = Math.max(0, toNumber(login.minDelayMs, 750))
   const retryMs = Math.max(1000, toNumber(login.retryMs, 5000))
   const maxAttempts = Math.max(1, toNumber(login.maxAttempts, 5))
-  let attempts = 0
-  let lastSentAt = 0
-  let loggedIn = false
+  const autoSendOnSpawn = login.autoSendOnSpawn !== false
+  const autoSendInitialDelayMs = Math.max(0, toNumber(login.autoSendInitialDelayMs, Math.max(minDelayMs, 1500)))
+
+  Object.assign(bot.__nervChatLogin, {
+    password,
+    command,
+    promptPatterns,
+    successPatterns,
+    minDelayMs,
+    retryMs,
+    maxAttempts,
+    autoSendOnSpawn,
+    autoSendInitialDelayMs
+  })
 
   bot.on('messagestr', (message) => {
     const text = String(message || '').toLowerCase()
     if (successPatterns.some((pattern) => text.includes(pattern))) {
-      loggedIn = true
-      console.log('[CHAT-LOGIN] Login success message detected.')
+      markChatLoginSuccess(bot, 'success-message')
       return
     }
-    if (loggedIn) return
+    if (bot.__nervChatLogin?.loggedIn) return
     if (!promptPatterns.some((pattern) => text.includes(pattern))) return
+    trySendChatLoginCommand(bot, 'prompt-detected')
+  })
 
-    const now = Date.now()
-    if (attempts >= maxAttempts || now - lastSentAt < retryMs) return
-    attempts += 1
-    lastSentAt = now
-    console.log(`[CHAT-LOGIN] Login prompt detected; sending ${command} command attempt ${attempts}/${maxAttempts}.`)
+  bot.on('spawn', () => {
+    if (!autoSendOnSpawn) return
     setTimeout(() => {
-      if (bot.__nervSessionActive === false || bot?._client?.state === 'disconnected') return
-      try {
-        bot.chat(`${command} ${password}`)
-      } catch (err) {
-        console.log(`[CHAT-LOGIN-WARN] Could not send login command: ${err?.message || err}`)
-      }
-    }, minDelayMs)
+      trySendChatLoginCommand(bot, 'spawn-auto')
+    }, autoSendInitialDelayMs)
   })
 }
 
@@ -7368,6 +7480,12 @@ function getTransferWaitReconnectMs(config) {
   return Math.max(1000, toNumber(config.bot?.requiredSpawnFallbackSeconds, 25) * 1000)
 }
 
+function getLobbyPortalMaxSessionRuns(config) {
+  const explicit = toNumber(getLobbyPortalConfig(config)?.maxSessionRuns, NaN)
+  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit)
+  return isOfflineAuthConfig(config) ? 4 : 2
+}
+
 function getPlatformBounds(config) {
   const mapCorner = config.machine?.mapCorner
   if (!mapCorner || !Number.isFinite(mapCorner.x) || !Number.isFinite(mapCorner.z)) {
@@ -8644,6 +8762,14 @@ function runSingleSession(config, sessionNumber) {
       const printer = config.printer || {}
       await delay(toNumber(printer.startDelayMs, 1500))
 
+      if (!await waitForOfflineChatLogin(bot, config, 'spawn-startup')) {
+        lastErrorText = `offline chat login not confirmed within ${Math.round(toNumber(bot.__nervChatLogin?.waitTimeoutMs, 30000) / 1000)}s`
+        console.log(`[CHAT-LOGIN-RECONNECT] ${lastErrorText}; reconnecting before portal/startup flow.`)
+        try { bot.quit('chat-login-timeout') } catch { }
+        settle('chat-login-timeout')
+        return
+      }
+
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 60)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 0)) * 2
       const waitForPlatformPosition = config.bot?.waitForPlatformPositionOnSpawn !== false && getPlatformBounds(config) != null
@@ -8652,7 +8778,7 @@ function runSingleSession(config, sessionNumber) {
       let missingPositionAttempts = 0
       let transferWaitAttempts = 0
       let lobbyPortalAttempts = 0
-      const maxLobbyPortalRuns = Math.max(1, toNumber(getLobbyPortalConfig(config)?.maxSessionRuns, 2))
+      const maxLobbyPortalRuns = getLobbyPortalMaxSessionRuns(config)
       while (attempts < maxAttempts) {
         if (settled || bot.__nervSessionActive === false) return
         let p = bot?.entity?.position
@@ -8809,6 +8935,11 @@ function runSingleSession(config, sessionNumber) {
         await startAfterSpawn('zone-auto')
         return
       }
+      if (canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) {
+        console.log(`[SPAWN] Offline login confirmed; bypassing remaining spawn gate at ${spawnedCount}/${reqSpawn}.`)
+        await startAfterSpawn('offline-login')
+        return
+      }
       if (spawnedCount < reqSpawn) {
         console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
         if (!spawnFallbackTimer) {
@@ -8832,6 +8963,14 @@ function runSingleSession(config, sessionNumber) {
       }
 
       await startAfterSpawn('threshold')
+    })
+
+    bot.on('nerv-chat-login-success', async () => {
+      if (printerStarted || startupPending) return
+      const reqSpawn = getRequiredSpawnCount(config)
+      if (!canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) return
+      console.log(`[SPAWN] Offline login completed after spawn ${spawnedCount}/${reqSpawn}; resuming startup without waiting for more spawn events.`)
+      await startAfterSpawn('offline-login')
     })
 
     bot.on('messagestr', (message) => {
@@ -9051,11 +9190,17 @@ function runSpatialAwarenessTestSession(config) {
             : `Spawn gate reached (${spawnedCount}/${reqSpawn}).`)
       console.log(`[SPATIAL] ${triggerText} Waiting for final platform; printer will not start.`)
 
+      if (!await waitForOfflineChatLogin(bot, config, 'spatial-startup')) {
+        console.log(`[SPATIAL-STOP] offline chat login not confirmed within ${Math.round(toNumber(bot.__nervChatLogin?.waitTimeoutMs, 30000) / 1000)}s; ending spatial run.`)
+        finishAndQuit({ endReason: 'chat-login-timeout' })
+        return
+      }
+
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 180)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 45)) * 2
       const waitForPlatformPosition = config.bot?.waitForPlatformPositionOnSpawn !== false && getPlatformBounds(config) != null
       const transferReconnectAttempts = Math.max(1, Math.floor(getTransferWaitReconnectMs(config) / 500))
-      const maxLobbyPortalRuns = Math.max(1, toNumber(getLobbyPortalConfig(config)?.maxSessionRuns, 2))
+      const maxLobbyPortalRuns = getLobbyPortalMaxSessionRuns(config)
       let attempts = 0
       let missingAttempts = 0
       let transferWaitAttempts = 0
@@ -9153,6 +9298,11 @@ function runSpatialAwarenessTestSession(config) {
         void startSpatialWait('zone-auto')
         return
       }
+      if (canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) {
+        console.log(`[SPATIAL] Offline login confirmed; bypassing remaining spawn gate at ${spawnedCount}/${reqSpawn}.`)
+        void startSpatialWait('offline-login')
+        return
+      }
       if (spawnedCount < reqSpawn) {
         console.log(`[SPATIAL] spawn event ${spawnedCount}/${reqSpawn}; waiting for backend/world transfer.`)
         if (!spawnFallbackTimer) {
@@ -9170,6 +9320,13 @@ function runSpatialAwarenessTestSession(config) {
         return
       }
       void startSpatialWait('threshold')
+    })
+
+    bot.on('nerv-chat-login-success', () => {
+      if (started || settled) return
+      if (!canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) return
+      console.log(`[SPATIAL] Offline login completed after spawn ${spawnedCount}/${reqSpawn}; resuming spatial wait without more spawn events.`)
+      void startSpatialWait('offline-login')
     })
 
     bot.on('messagestr', (message) => {
@@ -9353,6 +9510,13 @@ function run6b6tLobbyTestSession(config, label) {
             : `Threshold reached (${spawnedCount}/${reqSpawn}).`)
       console.log(`[TEST-6B6T] ${label}: ${triggerLabel} Waiting for final destination only; printer will not start.`)
 
+      if (!await waitForOfflineChatLogin(bot, config, `${label}:startup`)) {
+        lastErrorText = `offline chat login not confirmed within ${Math.round(toNumber(bot.__nervChatLogin?.waitTimeoutMs, 30000) / 1000)}s`
+        console.log(`[TEST-6B6T-STOP] ${label}: ${lastErrorText}.`)
+        finishAndQuit({ endReason: 'chat-login-timeout' })
+        return
+      }
+
       const maxAttempts = Math.max(1, toNumber(config.bot?.spawnPositionTimeoutSeconds, 180)) * 2
       const missingReconnectAttempts = Math.max(0, toNumber(config.bot?.spawnMissingPositionReconnectSeconds, 45)) * 2
       const transferReconnectAttempts = Math.max(1, Math.floor(getTransferWaitReconnectMs(config) / 500))
@@ -9360,7 +9524,7 @@ function run6b6tLobbyTestSession(config, label) {
       let missingPositionAttempts = 0
       let transferWaitAttempts = 0
       let lobbyPortalAttempts = 0
-      const maxLobbyPortalRuns = Math.max(1, toNumber(getLobbyPortalConfig(config)?.maxSessionRuns, 2))
+      const maxLobbyPortalRuns = getLobbyPortalMaxSessionRuns(config)
 
       while (attempts < maxAttempts && !settled && isBotSessionLive(bot)) {
         let pos = bot?.entity?.position
@@ -9426,6 +9590,11 @@ function run6b6tLobbyTestSession(config, label) {
         await startTestWait('zone-auto')
         return
       }
+      if (canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) {
+        console.log(`[TEST-6B6T] ${label}: offline login confirmed; bypassing remaining spawn gate at ${spawnedCount}/${reqSpawn}.`)
+        await startTestWait('offline-login')
+        return
+      }
       if (spawnedCount < reqSpawn) {
         console.log(`[TEST-6B6T] ${label}: spawn event ${spawnedCount}/${reqSpawn}; waiting for transfer/backend spawn.`)
         if (!spawnFallbackTimer) {
@@ -9439,6 +9608,14 @@ function run6b6tLobbyTestSession(config, label) {
             }
             void startTestWait('fallback')
           }, fallbackMs)
+
+                bot.on('nerv-chat-login-success', async () => {
+                  if (started || settled) return
+                  const reqSpawn = getRequiredSpawnCount(config)
+                  if (!canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) return
+                  console.log(`[TEST-6B6T] ${label}: offline login completed after spawn ${spawnedCount}/${reqSpawn}; resuming destination wait without more spawn events.`)
+                  await startTestWait('offline-login')
+                })
           spawnFallbackTimer.unref?.()
         }
         return

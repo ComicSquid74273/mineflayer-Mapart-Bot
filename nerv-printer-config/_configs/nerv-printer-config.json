@@ -3,12 +3,12 @@
     "usernames": [
       {
         "name": "ComicSquid007",
-        "enabled": true,
+        "enabled": false,
         "auth": "microsoft"
       },
       {
             "name": "ComicBot001",
-            "enabled": false,
+            "enabled": true,
             "auth": "offline",
             "loginPassword": "zKoUufW3hb71u"
           },
