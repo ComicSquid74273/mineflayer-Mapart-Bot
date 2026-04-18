@@ -957,6 +957,7 @@ function getMeteorSceneConfig(config) {
   if (raw === false) {
     return {
       enabled: false,
+      platformEnabled: false,
       file: null,
       minScore: 0.72,
       labelHints: {}
@@ -965,10 +966,15 @@ function getMeteorSceneConfig(config) {
 
   return {
     enabled: raw?.enabled !== false,
+    platformEnabled: raw?.platformEnabled !== false,
     file: raw?.file || path.resolve(process.cwd(), 'spatial-awareness', 'meteor-scene-signatures.json'),
     minScore: Math.max(0.45, Math.min(0.98, toNumber(raw?.minScore, 0.72))),
     labelHints: raw?.labelHints && typeof raw.labelHints === 'object' ? raw.labelHints : {}
   }
+}
+
+function isPlatformPositionCacheEnabled(config) {
+  return config?.bot?.platformPositionCacheEnabled !== false
 }
 
 function getMeteorSceneNonAirBlocks(scene) {
@@ -1093,8 +1099,10 @@ function rememberRecentServerMessage(bot, message, source = 'chat') {
 function detectMeteorSceneAction(scene, config) {
   const label = String(scene?.label || '').toLowerCase()
   const loginSceneAwarenessEnabled = config?.advanced?.meteorSceneAwareness?.loginPortalEnabled === true
+  const platformSceneAwarenessEnabled = getMeteorSceneConfig(config).platformEnabled !== false
   const explicit = String(getMeteorSceneConfig(config).labelHints?.[label] || '').trim().toLowerCase()
   if (explicit) {
+    if (explicit === 'platform' && !platformSceneAwarenessEnabled) return 'unknown'
     if (explicit === 'login-portal' && !loginSceneAwarenessEnabled) return 'unknown'
     return explicit
   }
@@ -1106,7 +1114,7 @@ function detectMeteorSceneAction(scene, config) {
   const recentMessages = extractRelevantChatMessages(scene).join(' ').toLowerCase()
   const looksLikeLoginPortal = recentMessages.includes('enter the server through the portal') || (dimension.includes('the_end') && portalFound)
 
-  if (label.includes('platform')) return 'platform'
+  if (label.includes('platform')) return platformSceneAwarenessEnabled ? 'platform' : 'unknown'
   if (looksLikeLoginPortal) return loginSceneAwarenessEnabled ? 'login-portal' : 'unknown'
   if ((signatureBlocks.nether_portal || 0) >= 20 && (topBlocks.snow_block || 0) >= 100) return 'spawn-portal'
   if (label.includes('spawn') && portalFound) return 'spawn-portal'
@@ -2810,15 +2818,22 @@ function calibrateTargetsForWorld(bot, targets, config) {
   }))
 }
 
-async function equipMaterial(bot, config, blockName) {
+async function equipMaterial(bot, config, blockName, options = {}) {
   const advanced = config.advanced || {}
+  const fastSwap = options.fastSwap === true
   const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
   const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
 
   if (inventoryItem) {
-    await delay(toNumber(advanced.preSwapDelayMs, 100))
+    const preSwapDelayMs = fastSwap
+      ? toNumber(advanced.scannerPreSwapDelayMs, 0)
+      : toNumber(advanced.preSwapDelayMs, 100)
+    const postSwapDelayMs = fastSwap
+      ? toNumber(advanced.scannerPostSwapDelayMs, 0)
+      : toNumber(advanced.postSwapDelayMs, 100)
+    if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
     await bot.equip(inventoryItem, 'hand')
-    await delay(toNumber(advanced.postSwapDelayMs, 100))
+    if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
     unavailableMaterialCache.delete(blockName)
     return true
   }
@@ -4290,6 +4305,17 @@ async function dumpNervInventorySlots(bot, config, dumpSlots, reasonLabel = 'ner
   return await dumpCarpetStacks(bot, config, stacks, reasonLabel)
 }
 
+async function tossStackWithTimeout(bot, config, stack, reasonLabel = 'inventory-toss') {
+  const timeoutMs = Math.max(250, toNumber(config.advanced?.inventoryTossTimeoutMs, toNumber(config.advanced?.retryInteractTimeoutMs, 800) * 2))
+  await Promise.race([
+    bot.tossStack(stack),
+    (async () => {
+      await delay(timeoutMs)
+      throw new Error(`toss-timeout-${timeoutMs}ms`)
+    })()
+  ])
+}
+
 function inventoryHasRoomForItem(bot, itemName) {
   const itemInfo = bot.registry.itemsByName[itemName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
@@ -4423,10 +4449,13 @@ async function dumpCarpetStacksForSpace(bot, config, keepNames = new Set(), maxS
       if (reaimEvery > 0 && dumped > 0 && dumped % reaimEvery === 0) {
         await maintainDumpAim(bot, config, targetStation)
       }
-      await bot.tossStack(stack)
+      await tossStackWithTimeout(bot, config, stack, 'space-cleanup')
       dumped += 1
       await delay(toNumber(config.advanced?.inventoryActionDelayMs, 100))
     } catch (err) {
+      if (config.errorHandling?.logErrors !== false) {
+        console.log(`[PREDUMP-WARN] space-cleanup could not toss ${stack?.name || 'unknown'}x${toNumber(stack?.count, 0)}: ${err?.message || err}`)
+      }
       if (config.advanced?.debugPrints) {
         console.log(`[PREDUMP-DEBUG] space-cleanup ${stack?.name || 'unknown'} -> ${err?.message || err}`)
       }
@@ -4504,9 +4533,13 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       if (!didRestockThisWindow && options.dumpWithoutRestock === true && advanced.dumpUnneededBeforeRefill !== false && plan.dumpSlots.length > 0) {
         console.log(`[NERV-DUMP] Dumping ${plan.dumpSlots.length} slot(s) before next chunk: ${formatDumpSlots(plan.dumpSlots)}`)
         const dumped = await dumpNervInventorySlots(bot, config, plan.dumpSlots, 'nervDumpBeforeNextChunk')
-        if (dumped <= 0) return false
-        await delay(toNumber(advanced.inventoryActionDelayMs, 100))
-        continue
+        if (dumped > 0) {
+          await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+          continue
+        }
+        if (config.errorHandling?.logErrors !== false) {
+          console.log('[NERV-DUMP-WARN] Optional before-next-chunk dump failed or timed out; continuing with current inventory.')
+        }
       }
       return true
     }
@@ -4732,6 +4765,19 @@ function isTargetBlockPlaced(bot, targetPos, blockName) {
   return placed?.name === blockName
 }
 
+function getPlacementAttemptPriority(bot, targetPos, face) {
+  const entityPos = bot?.entity?.position
+  if (!entityPos || !face) return 0
+
+  const eyeHeight = toNumber(bot?.entity?.height, 1.62)
+  const eyePos = entityPos.offset(0, eyeHeight, 0)
+  const targetCenter = targetPos.offset(0.5, 0.5, 0.5)
+  const lookVec = targetCenter.minus(eyePos)
+  const targetSide = face.scaled(-1)
+
+  return (lookVec.x * targetSide.x) + (lookVec.y * targetSide.y) + (lookVec.z * targetSide.z)
+}
+
 async function waitForTargetBlockPlaced(bot, targetPos, blockName, waitMs = 0, pollMs = 15) {
   if (isTargetBlockPlaced(bot, targetPos, blockName)) return true
   const timeoutAt = Date.now() + Math.max(0, toNumber(waitMs, 0))
@@ -4747,13 +4793,13 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   const printer = config.printer || {}
   const errors = config.errorHandling || {}
   const Vec3 = bot.entity.position.constructor
-  const noWaitForBlockUpdate = isRepairPass === true || isRepairPass === 'noWait'
-  const fastConfirmMs = noWaitForBlockUpdate
-    ? Math.max(0, toNumber(config.advanced?.scannerPlaceConfirmMs, Math.max(45, toNumber(config.advanced?.scannerWorkloadPollMs, 10) * 4)))
-    : 0
+  const isFastNoWaitPlacement = isRepairPass === 'noWait'
+  const fastConfirmMs = isFastNoWaitPlacement
+    ? 0
+    : Math.max(0, toNumber(config.advanced?.scannerPlaceConfirmMs, Math.max(45, toNumber(config.advanced?.scannerWorkloadPollMs, 10) * 4)))
   const fastConfirmPollMs = Math.max(5, toNumber(config.advanced?.scannerPlaceConfirmPollMs, 15))
 
-  if (isRepairPass === 'noWait') {
+  if (isFastNoWaitPlacement) {
     ensureUsableEntityState(bot, config, 'before-place-fast', { allowPlatformSeed: false, log: false })
   } else {
     await waitForPlatformReady(bot, config, 'before-place')
@@ -4794,7 +4840,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   const botBlockX = Math.floor(bot.entity.position.x)
   const botBlockZ = Math.floor(bot.entity.position.z)
   const botNearTargetY = bot.entity.position.y >= targetPos.y && bot.entity.position.y < targetPos.y + 2.5
-  if (botBlockX === targetPos.x && botBlockZ === targetPos.z && botNearTargetY) {
+  if (!isFastNoWaitPlacement && botBlockX === targetPos.x && botBlockZ === targetPos.z && botNearTargetY) {
     const sidestepCandidates = [
       targetPos.offset(1, 1, 0),
       targetPos.offset(-1, 1, 0),
@@ -4820,36 +4866,33 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     }
   }
 
-  const equipped = await equipMaterial(bot, config, target.blockName)
-  if (!equipped) {
-    return { state: 'skip', reason: `missing-item-${target.blockName}` }
-  }
-
-  const heldItemName = String(bot.heldItem?.name || '')
-  if (heldItemName !== target.blockName) {
-    const reequipped = await equipMaterial(bot, config, target.blockName)
-    if (!reequipped || String(bot.heldItem?.name || '') !== target.blockName) {
+  if (String(bot.heldItem?.name || '') !== target.blockName) {
+    const equipped = await equipMaterial(bot, config, target.blockName, { fastSwap: isFastNoWaitPlacement })
+    if (!equipped || String(bot.heldItem?.name || '') !== target.blockName) {
       return { state: 'skip', reason: `missing-item-${target.blockName}` }
     }
   }
 
-  if (printer.rotate !== false) {
+  if (!isFastNoWaitPlacement && printer.rotate !== false) {
     await bot.lookAt(targetPos.offset(0.5, 0.5, 0.5), true)
   }
 
-  const sideCandidates = [
-    { refPos: targetPos.offset(-1, 0, 0), face: new Vec3(1, 0, 0) },
-    { refPos: targetPos.offset(1, 0, 0), face: new Vec3(-1, 0, 0) },
-    { refPos: targetPos.offset(0, 0, -1), face: new Vec3(0, 0, 1) },
-    { refPos: targetPos.offset(0, 0, 1), face: new Vec3(0, 0, -1) }
-  ]
-
   const placeAttempts = [{ block: support, face: new Vec3(0, 1, 0) }]
-  for (const candidate of sideCandidates) {
-    const sideBlock = bot.blockAt(candidate.refPos)
-    if (sideBlock && sideBlock.name !== 'air') {
-      placeAttempts.push({ block: sideBlock, face: candidate.face })
+  if (!isFastNoWaitPlacement) {
+    const sideCandidates = [
+      { refPos: targetPos.offset(-1, 0, 0), face: new Vec3(1, 0, 0) },
+      { refPos: targetPos.offset(1, 0, 0), face: new Vec3(-1, 0, 0) },
+      { refPos: targetPos.offset(0, 0, -1), face: new Vec3(0, 0, 1) },
+      { refPos: targetPos.offset(0, 0, 1), face: new Vec3(0, 0, -1) }
+    ]
+
+    for (const candidate of sideCandidates) {
+      const sideBlock = bot.blockAt(candidate.refPos)
+      if (sideBlock && sideBlock.name !== 'air') {
+        placeAttempts.push({ block: sideBlock, face: candidate.face })
+      }
     }
+    placeAttempts.sort((a, b) => getPlacementAttemptPriority(bot, targetPos, b.face) - getPlacementAttemptPriority(bot, targetPos, a.face))
   }
 
   let placedSuccessfully = false
@@ -4857,12 +4900,14 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
 
   for (const attempt of placeAttempts) {
     const sneakOnDispenserOnly = config.advanced?.sneakOnDispenserOnly !== false
-    const shouldSneak = sneakOnDispenserOnly ? requiresSneakPlacementSupport(attempt?.block) : true
+    const shouldSneak = isFastNoWaitPlacement
+      ? requiresSneakPlacementSupport(attempt?.block)
+      : (sneakOnDispenserOnly ? requiresSneakPlacementSupport(attempt?.block) : true)
     try {
       if (shouldSneak) {
         bot.setControlState('sneak', true)
       }
-      if (noWaitForBlockUpdate && typeof bot._genericPlace === 'function') {
+      if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
         await bot._genericPlace(attempt.block, attempt.face, {
           swingArm: 'right',
           forceLook: printer.rotate !== false ? true : 'ignore'
@@ -4870,7 +4915,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
       }
-      if (!noWaitForBlockUpdate || await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
+      if (isFastNoWaitPlacement || await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
         placedSuccessfully = true
         break
       }
@@ -4880,7 +4925,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       if (errMsg.includes('must be holding an item')) {
         return { state: 'skip', reason: `missing-item-${target.blockName}` }
       }
-      if (await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
+      if (isFastNoWaitPlacement) {
+        // Fast path: don't wait for confirmation on error, just report failure
+        break
+      }
+      if (isTargetBlockPlaced(bot, targetPos, target.blockName) || await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
         placedSuccessfully = true
         if (config.advanced?.debugPrints) {
           console.log(`[PLACE-WARN] Placement timeout but block is present at ${target.position.x} ${target.position.y} ${target.position.z}`)
@@ -4895,13 +4944,10 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   }
 
   if (!placedSuccessfully) {
-    if (noWaitForBlockUpdate) {
-      return { state: 'skip', reason: 'unconfirmed-place' }
-    }
     throw lastPlaceError || new Error('placement failed with all faces')
   }
 
-  if (!noWaitForBlockUpdate) {
+  if (!isFastNoWaitPlacement) {
     await delay(toNumber(printer.placeDelayMs, 50))
   }
   return { state: 'placed' }
@@ -5388,116 +5434,105 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
   const advanced = config.advanced || {}
   const tickMs = Math.max(10, toNumber(printer.fastTraversalTickMs, 40))
   const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
-  const catchupPasses = Math.max(0, toNumber(printer.fastTraversalCatchupPasses, 3))
-  const catchupStallMs = Math.max(100, toNumber(printer.fastTraversalCatchupStallMs, 6000))
+  const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 1))
   const lineEndSettleMs = Math.max(0, toNumber(advanced.litematicRowSettleMs, 150))
-  const verifyEveryRows = Math.max(1, toNumber(advanced.litematicRowVerifyEveryRows, 2))
-  const rowRepairThreshold = Math.max(1, toNumber(advanced.litematicRowRepairThreshold, 2))
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 150))
-  const minPlaceDistance = Math.max(0, toNumber(printer.minPlaceDistance, 0.8))
-  const Vec3 = bot.entity.position.constructor
-
-  const byRow = new Map()
-  for (const target of batchTargets) {
-    const list = byRow.get(target.row) || []
-    list.push(target)
-    byRow.set(target.row, list)
-  }
-
-  const checkpoints = []
-  const rowsWithTargets = rowOrder.filter((row) => byRow.has(row))
-  for (const row of rowsWithTargets) {
-    const rowTargets = byRow.get(row) || []
-    const mid = rowTargets[Math.floor(rowTargets.length / 2)] || rowTargets[0]
-    if (mid) checkpoints.push({ row, position: mid.position, targets: rowTargets })
-  }
-
+  const checkpoints = buildNervUCheckpoints(batchTargets, rowOrder[0] <= rowOrder[rowOrder.length - 1])
+  const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
+  const neededByBlock = estimateNeededFromLookahead(batchTargets)
+  const seen = new Set()
+  const pendingUntil = new Map()
+  const retryPriority = new Set()
   let active = true
+  let currentGoal = checkpoints[0]?.position || null
+  let currentAction = checkpoints[0]?.action || ''
+  let currentActiveCols = checkpoints[0]?.activeCols || new Set(batchTargets.map((target) => target.col))
   let placed = 0
   let already = 0
   let skipped = 0
-  const processed = new Set()
-  const pendingUntil = new Map()
+  let emergencyRestockBlock = null
 
   const getTargetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
-  const isTargetPlaced = (target) => {
-    const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
+  const getUniqueTargets = (targets) => [...new Map(targets.map((target) => [getTargetKey(target), target])).values()]
+  const confirmTargetPlaced = (target) => {
+    const Vec3Confirm = bot.entity.position.constructor
+    const actual = bot.blockAt(new Vec3Confirm(target.position.x, target.position.y, target.position.z))
     return actual?.name === target.blockName
   }
-  const markPlacedTargetsProcessed = (targets) => {
-    for (const target of targets) {
-      if (isTargetPlaced(target)) {
-        processed.add(getTargetKey(target))
-        pendingUntil.delete(getTargetKey(target))
-      }
-    }
-  }
-  const getUnresolvedTargets = (targets) => scanPlacementErrors(bot, targets, {
+  const isTransientPlacementReason = (reason) => String(reason || '') === 'unconfirmed-place'
+  const getUnresolvedTargets = (targets) => getUniqueTargets(scanPlacementErrors(bot, targets, {
     config,
     logPrefix: `${label}-VERIFY`,
     logErrors: false,
     includeUnloaded: false,
     maxLogs: 0
-  }).map((entry) => entry.target)
-
-  const getCandidates = (botPos, now) => batchTargets
-    .filter((target) => !processed.has(getTargetKey(target)))
-    .filter((target) => {
-      const key = getTargetKey(target)
-      const blockedUntil = pendingUntil.get(key)
-      if (blockedUntil && blockedUntil > now) return false
-      if (blockedUntil && blockedUntil <= now) pendingUntil.delete(key)
-      if (isTargetPlaced(target)) {
-        processed.add(key)
-        already += 1
-        return false
-      }
-      const distance = botPos.distanceTo(new Vec3(target.position.x + 0.5, target.position.y + 0.5, target.position.z + 0.5))
-      return distance <= placeRange && distance > minPlaceDistance
-    })
-    .sort((a, b) => {
-      const da = botPos.distanceTo(new Vec3(a.position.x + 0.5, a.position.y + 0.5, a.position.z + 0.5))
-      const db = botPos.distanceTo(new Vec3(b.position.x + 0.5, b.position.y + 0.5, b.position.z + 0.5))
-      return da - db
-    })
+  }).map((entry) => entry.target))
 
   const placementLoop = (async () => {
     while (active) {
-      const now = Date.now()
-      const botPos = bot.entity.position
-      let placementsThisTick = 0
+      const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
+      if (allowPlacement) {
+        const now = Date.now()
+        const burstExcluded = new Set(seen)
 
-      const candidates = getCandidates(botPos, now)
+        for (const [key, until] of pendingUntil.entries()) {
+          if (until > now) burstExcluded.add(key)
+          else pendingUntil.delete(key)
+        }
 
-      for (const target of candidates) {
-        if (placementsThisTick >= maxPerTick) break
-        const key = getTargetKey(target)
-        placementsThisTick += 1
+        for (let i = 0; i < maxPerTick; i += 1) {
+          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded, currentActiveCols, retryPriority)
+          if (!target) break
 
-        try {
-          const result = await placeNervScannerTarget(bot, config, target)
-          if (result.state === 'placed') {
-            placed += 1
-            processed.add(key)
-            pendingUntil.delete(key)
-          } else if (result.state === 'already') {
-            already += 1
-            processed.add(key)
-            pendingUntil.delete(key)
-          } else if (result.reason === 'unconfirmed-place') {
-            pendingUntil.set(key, Date.now() + retryCooldownMs)
-          } else {
-            skipped += 1
-            processed.add(key)
-            if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
-              console.log(`[${label}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+          const key = getTargetKey(target)
+          burstExcluded.add(key)
+
+          try {
+            const result = await placeNervScannerTarget(bot, config, target)
+            const confirmed = confirmTargetPlaced(target)
+
+            if (confirmed) {
+              seen.add(key)
+              pendingUntil.delete(key)
+              retryPriority.delete(key)
+            } else if (result.state === 'placed') {
+              pendingUntil.set(key, Date.now() + retryCooldownMs)
+              retryPriority.add(key)
             }
-          }
-        } catch (err) {
-          skipped += 1
-          pendingUntil.set(key, Date.now() + retryCooldownMs)
-          if (config.errorHandling?.logErrors !== false) {
-            console.log(`[${label}-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+
+            if (result.state === 'placed' && confirmed) {
+              placed += 1
+            } else if (result.state === 'placed') {
+              // Fast path stays non-blocking; unresolved attempts are retried while still in range.
+            } else if (result.state === 'already') {
+              already += 1
+              seen.add(key)
+              pendingUntil.delete(key)
+              retryPriority.delete(key)
+            } else {
+              if (!isTransientPlacementReason(result.reason)) {
+                skipped += 1
+              }
+              if (!String(result.reason || '').startsWith('missing-item-')) {
+                pendingUntil.set(key, Date.now() + retryCooldownMs)
+                retryPriority.add(key)
+              }
+              if (String(result.reason || '').startsWith('missing-item-')) {
+                emergencyRestockBlock = target.blockName
+                active = false
+                break
+              }
+              if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config) && !isTransientPlacementReason(result.reason)) {
+                console.log(`[${label}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+              }
+            }
+          } catch (err) {
+            pendingUntil.set(key, Date.now() + retryCooldownMs)
+            retryPriority.add(key)
+            skipped += 1
+            if (config.errorHandling?.logErrors !== false) {
+              console.log(`[${label}-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+            }
           }
         }
       }
@@ -5507,59 +5542,24 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
   })()
 
   try {
-    bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
-    for (let checkpointIndex = 0; checkpointIndex < checkpoints.length; checkpointIndex += 1) {
-      const cp = checkpoints[checkpointIndex]
-      await bot.pathfinder.goto(new GoalNear(cp.position.x, cp.position.y, cp.position.z, 1))
-      if (lineEndSettleMs > 0) {
-        await delay(lineEndSettleMs)
-      }
+    for (const checkpoint of checkpoints) {
+      if (emergencyRestockBlock) break
 
-      markPlacedTargetsProcessed(cp.targets)
-      const shouldVerifyRow = ((checkpointIndex + 1) % verifyEveryRows) === 0 || checkpointIndex === checkpoints.length - 1
-      if (!shouldVerifyRow) continue
+      currentGoal = checkpoint.position
+      currentAction = checkpoint.action
+      currentActiveCols = checkpoint.activeCols
 
-      const unresolvedRowTargets = getUnresolvedTargets(cp.targets)
-      if (unresolvedRowTargets.length >= rowRepairThreshold) {
-        console.log(`[${label}-ROW] row=${cp.row} unresolved=${unresolvedRowTargets.length}; local catch-up before advancing.`)
-        const local = await repairTargetsWhileMovingWithStops(bot, config, unresolvedRowTargets, placeRange, `${label}-ROW-${cp.row}`)
-        placed += local.placed
-        already += local.already
-        skipped += local.skipped
-        markPlacedTargetsProcessed(cp.targets)
-      }
-    }
+      const sprintMode = String(printer.sprintMode || 'always').toLowerCase()
+      const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
+      bot.setControlState('sprint', shouldSprint)
 
-    for (let pass = 1; pass <= catchupPasses && processed.size < batchTargets.length; pass += 1) {
-      let lastProcessed = processed.size
-      console.log(`[${label}-CATCHUP] pass=${pass}/${catchupPasses} remaining=${batchTargets.length - processed.size}`)
+      await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
 
-      while (processed.size < batchTargets.length) {
-        const botPos = bot.entity.position
-        const remaining = getCandidates(botPos, Date.now())
-
-        const next = remaining[0]
-        if (!next) break
-
-        await bot.pathfinder.goto(new GoalNear(next.position.x, next.position.y, next.position.z, Math.max(1, placeRange - 1)))
-        await delay(catchupStallMs)
-
-        if (processed.size <= lastProcessed) {
-          console.log(`[${label}-CATCHUP] stalled pass=${pass} remaining=${batchTargets.length - processed.size}`)
-          break
+      if (checkpoint.action === 'lineEnd') {
+        if (lineEndSettleMs > 0) {
+          await delay(lineEndSettleMs)
         }
-        lastProcessed = processed.size
       }
-    }
-
-    const unresolvedTargets = getUnresolvedTargets(batchTargets)
-    if (unresolvedTargets.length > 0) {
-      console.log(`[${label}-FINAL] unresolved=${unresolvedTargets.length}; running live repair sweep.`)
-      const finalRepair = await repairTargetsWhileMovingWithStops(bot, config, unresolvedTargets, placeRange, `${label}-FINAL`)
-      placed += finalRepair.placed
-      already += finalRepair.already
-      skipped += finalRepair.skipped
-      markPlacedTargetsProcessed(batchTargets)
     }
   } catch (err) {
     if (config.errorHandling?.logErrors !== false) {
@@ -5570,21 +5570,60 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
     await placementLoop
   }
 
-  return { placed, already, skipped, processed: processed.size }
+  if (emergencyRestockBlock) {
+    console.log(`[${label}-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; refilling and retrying the remaining band once.`)
+    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
+    if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
+      const Vec3Retry = bot.entity.position.constructor
+      const remainingTargets = batchTargets.filter((target) => {
+        const actual = bot.blockAt(new Vec3Retry(target.position.x, target.position.y, target.position.z))
+        return actual?.name !== target.blockName
+      })
+      if (remainingTargets.length > 0) {
+        const retry = await runContinuousPlacementBatch(bot, config, remainingTargets, rowOrder, placeRange, label)
+        placed += retry.placed
+        already += retry.already
+        skipped += retry.skipped
+      }
+    }
+  }
+
+  const Vec3 = bot.entity.position.constructor
+  const missing = batchTargets.filter((target) => {
+    const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
+    return actual?.name !== target.blockName
+  }).length
+
+  return { placed, already, skipped, processed: batchTargets.length - missing }
 }
 
-function buildNervUCheckpoints(batchTargets, startOnNorthSide) {
-  const minX = Math.min(...batchTargets.map((target) => target.position.x))
-  const minY = Math.min(...batchTargets.map((target) => target.position.y))
+function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0) {
+  const orderedCols = [...new Set(batchTargets.map((target) => target.col))]
+  const leadCol = orderedCols[0]
+  const leadTarget = batchTargets.find((target) => target.col === leadCol) || batchTargets[0]
+  const leadX = toNumber(leadTarget?.position?.x, Math.min(...batchTargets.map((target) => target.position.x)))
+  const leadY = toNumber(leadTarget?.position?.y, Math.min(...batchTargets.map((target) => target.position.y)))
   const minZ = Math.min(...batchTargets.map((target) => target.position.z))
   const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
   const activeCols = new Set(batchTargets.map((target) => target.col))
-  const cp1 = { x: minX + 0.5, y: minY, z: minZ + 0.5 }
-  const cp2 = { x: minX + 0.5, y: minY, z: maxZ + 0.5 }
+  const cp1 = { x: leadX + 0.5, y: leadY, z: minZ + 0.5 }
+  const cp2 = { x: leadX + 0.5, y: leadY, z: maxZ + 0.5 }
 
-  return startOnNorthSide
-    ? [{ position: cp1, action: '', activeCols }, { position: cp2, action: 'lineEnd', activeCols }]
-    : [{ position: cp2, action: '', activeCols }, { position: cp1, action: 'lineEnd', activeCols }]
+  if (segmentSize <= 0 || maxZ - minZ <= segmentSize) {
+    return startOnNorthSide
+      ? [{ position: cp1, action: '', activeCols }, { position: cp2, action: 'lineEnd', activeCols }]
+      : [{ position: cp2, action: '', activeCols }, { position: cp1, action: 'lineEnd', activeCols }]
+  }
+
+  const startZ = startOnNorthSide ? minZ : maxZ
+  const endZ = startOnNorthSide ? maxZ : minZ
+  const dir = startOnNorthSide ? 1 : -1
+  const checkpoints = [{ position: { x: leadX + 0.5, y: leadY, z: startZ + 0.5 }, action: '', activeCols }]
+  for (let z = startZ + dir * segmentSize; dir > 0 ? z < endZ : z > endZ; z += dir * segmentSize) {
+    checkpoints.push({ position: { x: leadX + 0.5, y: leadY, z: z + 0.5 }, action: 'inline-repair', activeCols })
+  }
+  checkpoints.push({ position: { x: leadX + 0.5, y: leadY, z: endZ + 0.5 }, action: 'lineEnd', activeCols })
+  return checkpoints
 }
 
 async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true) {
@@ -5608,24 +5647,39 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   let skipped = 0
   let emergencyRestockBlock = null
   const seen = new Set()
+  const retryPriority = new Set()
 
   const placementLoop = (async () => {
     while (active) {
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
       if (allowPlacement) {
         for (let i = 0; i < maxPerTick; i += 1) {
-          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, seen, currentActiveCols)
+          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, seen, currentActiveCols, retryPriority)
           if (!target) break
 
           const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-          seen.add(key)
 
           try {
             const result = await placeNervScannerTarget(bot, config, target)
-            if (result.state === 'placed') placed += 1
-            else if (result.state === 'already') already += 1
-            else {
+            const confirmed = confirmTargetPlaced(target)
+
+            if (confirmed) {
+              seen.add(key)
+              retryPriority.delete(key)
+            } else if (result.state === 'placed') {
+              retryPriority.add(key)
+            }
+
+            if (result.state === 'placed' && confirmed) placed += 1
+            else if (result.state === 'placed') {
+              // Leave unconfirmed fast attempts in the retry set without treating them as failures.
+            } else if (result.state === 'already') {
+              already += 1
+              seen.add(key)
+              retryPriority.delete(key)
+            } else {
               skipped += 1
+              retryPriority.add(key)
               if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
               }
@@ -5637,6 +5691,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
             }
           } catch (err) {
             skipped += 1
+            retryPriority.add(key)
             if (config.errorHandling?.logErrors !== false) {
               console.log(`[NERV-SCANNER-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
             }
@@ -5699,13 +5754,22 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   const printer = config.printer || {}
   const advanced = config.advanced || {}
-  const placeDelayMs = Math.max(1, toNumber(advanced.scannerPlaceDelayMs, toNumber(printer.placeDelayMs, 10)))
-  const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 12))
-  const pollMs = Math.max(1, toNumber(advanced.scannerWorkloadPollMs, Math.min(10, placeDelayMs)))
+  const placeDelayMs = Math.max(0, toNumber(advanced.scannerPlaceDelayMs, 0))
+  const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 30))
+  const pollMs = Math.max(0, toNumber(advanced.scannerWorkloadPollMs, 0))
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
+  const optimisticRetryMs = Math.max(25, toNumber(advanced.scannerOptimisticRetryMs, Math.max(120, pollMs * 4)))
+  const inlineRepairEnabled = advanced.scannerInlineRepairEnabled === true
+  const missRecoveryEnabled = advanced.scannerMissRecoveryEnabled !== false
+  const missRecoveryThreshold = Math.max(1, toNumber(advanced.scannerMissRecoveryThreshold, 3))
+  const missRecoveryBacktrackBlocks = Math.max(1, toNumber(advanced.scannerMissRecoveryBacktrackBlocks, 3))
+  const alertPollMs = Math.max(10, toNumber(advanced.scannerAlertPollMs, Math.max(pollMs, 25)))
+  const alertReach = Math.max(1, toNumber(advanced.scannerAlertReach, Math.max(printer.placeRange, 4) + 0.75))
   const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
 
-  const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide)
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const inlineSegmentBlocks = Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, placeRange))
+  const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks)
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
   const neededByBlock = estimateNeededFromLookahead(batchTargets)
@@ -5722,62 +5786,133 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let cappedTotal = 0
   let maxAllowedSeen = 0
   let emergencyRestockBlock = null
+  let prevCheckpointPos = null
   const seen = new Set()
   const pendingUntil = new Map()
+  const retryPriority = new Set()
+  const repairAlerts = new Map()
+  let lastAlertScanAt = 0
 
-  const placementLoop = (async () => {
-    while (active) {
-      const now = Date.now()
-      const rawAllowed = Math.floor((now - lastTickTime) / placeDelayMs)
+  const getTargetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
+  const raiseRepairAlert = (target, reason) => {
+    const key = getTargetKey(target)
+    if (seen.has(key)) return
+    retryPriority.add(key)
+    pendingUntil.set(key, 0)
+    const existing = repairAlerts.get(key)
+    if (!existing || existing.reason !== reason) {
+      repairAlerts.set(key, { target, reason, lastRaisedAt: Date.now() })
+      if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
+        console.log(`[NERV-WORKLOAD-ALERT] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
+      }
+    }
+  }
+  const clearRepairAlert = (key) => {
+    repairAlerts.delete(key)
+    retryPriority.delete(key)
+  }
+  const getUnresolvedTargetsForActiveCols = (activeCols) => {
+    const Vec3Current = bot.entity.position.constructor
+    return batchTargets.filter((target) => {
+      if (activeCols instanceof Set && !activeCols.has(target.col)) return false
+      const actual = bot.blockAt(new Vec3Current(target.position.x, target.position.y, target.position.z))
+      return actual?.name !== target.blockName
+    })
+  }
+  const scanNearbyRepairAlerts = () => {
+    const now = Date.now()
+    if (now - lastAlertScanAt < alertPollMs) return
+    lastAlertScanAt = now
 
-      if (rawAllowed <= 0) {
-        await delay(pollMs)
+    const botPos = bot.entity.position
+    const Vec3Alert = bot.entity.position.constructor
+
+    for (const target of batchTargets) {
+      if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) continue
+
+      const key = getTargetKey(target)
+      if (seen.has(key)) {
+        clearRepairAlert(key)
+        pendingUntil.delete(key)
         continue
       }
 
-      lastTickTime += rawAllowed * placeDelayMs
+      const targetPos = new Vec3Alert(target.position.x, target.position.y, target.position.z)
+      const distance = botPos.distanceTo(targetPos.offset(0.5, 0.5, 0.5))
+      if (distance > alertReach) continue
+
+      const actual = bot.blockAt(targetPos)
+      if (actual?.name === target.blockName) {
+        seen.add(key)
+        clearRepairAlert(key)
+        pendingUntil.delete(key)
+        continue
+      }
+
+      const reason = !actual || actual.name === 'air'
+        ? 'missing'
+        : `wrong-${actual.name}`
+      raiseRepairAlert(target, reason)
+    }
+  }
+
+  const placementLoop = (async () => {
+    while (active) {
+      if (inlineRepairEnabled) {
+        scanNearbyRepairAlerts()
+      }
+
+      const now = Date.now()
+      const rawAllowed = placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : maxCatchup
+
+      if (rawAllowed <= 0) {
+        if (pollMs > 0) await delay(pollMs)
+        else await delay(1)
+        continue
+      }
+
+      lastTickTime = placeDelayMs > 0 ? lastTickTime + rawAllowed * placeDelayMs : now
       rawAllowedTotal += rawAllowed
       const allowed = Math.min(rawAllowed, maxCatchup)
       cappedTotal += Math.max(0, rawAllowed - allowed)
       maxAllowedSeen = Math.max(maxAllowedSeen, rawAllowed)
 
-      const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
+      const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint' || currentAction === 'inline-repair'
       if (allowPlacement) {
         const burstExcluded = new Set(seen)
         for (const [key, until] of pendingUntil.entries()) {
-          if (until > now) burstExcluded.add(key)
+          if (until > now && !retryPriority.has(key)) burstExcluded.add(key)
           else pendingUntil.delete(key)
         }
 
         for (let i = 0; i < allowed; i += 1) {
-          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded, currentActiveCols)
+          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded, currentActiveCols, retryPriority)
           if (!target) break
 
           const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-          const neededSwap = String(bot.heldItem?.name || '') !== target.blockName
           burstExcluded.add(key)
 
           try {
             const result = await placeNervScannerTarget(bot, config, target)
-            const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
-
-            if (actual?.name === target.blockName) {
-              seen.add(key)
-              pendingUntil.delete(key)
-            } else if (result.state === 'placed') {
-              pendingUntil.set(key, Date.now() + retryCooldownMs)
-            }
 
             if (result.state === 'placed') {
               placed += 1
+              pendingUntil.set(key, now + optimisticRetryMs)
+              retryPriority.delete(key)
+              clearRepairAlert(key)
             } else if (result.state === 'already') {
               already += 1
               seen.add(key)
               pendingUntil.delete(key)
+              clearRepairAlert(key)
             } else {
               skipped += 1
               if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+              }
+
+              if (!String(result.reason || '').startsWith('missing-item-')) {
+                pendingUntil.set(key, 0)
               }
 
               if (String(result.reason || '').startsWith('missing-item-')) {
@@ -5793,22 +5928,18 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           } catch (err) {
             skipped += 1
             hardStops += 1
+            pendingUntil.set(key, 0)
             if (config.errorHandling?.logErrors !== false) {
               console.log(`[NERV-WORKLOAD-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
             }
             lastTickTime = Date.now()
             break
           }
-
-          if (neededSwap) {
-            hardStops += 1
-            lastTickTime = Date.now()
-            break
-          }
         }
       }
 
-      await delay(pollMs)
+      if (pollMs > 0) await delay(pollMs)
+      else await delay(1)
     }
   })()
 
@@ -5822,6 +5953,105 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
       bot.setControlState('sprint', shouldSprint)
       await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+
+      if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
+        const drainTimeoutMs = Math.max(50, toNumber(advanced.inlineRepairDrainMs, Math.max(200, retryCooldownMs * 4)))
+        const drainStart = Date.now()
+        const placeRangeSq = placeRange * placeRange
+        while (Date.now() - drainStart < drainTimeoutMs) {
+          const botPos = bot.entity.position
+          const hasNearbyPending = batchTargets.some((t) => {
+            const key = getTargetKey(t)
+            if (seen.has(key)) return false
+            const pendingExpiry = pendingUntil.get(key)
+            if (pendingExpiry !== undefined && pendingExpiry > Date.now() + drainTimeoutMs) return false
+            const dx = botPos.x - (t.position.x + 0.5)
+            const dy = botPos.y - (t.position.y + 0.5)
+            const dz = botPos.z - (t.position.z + 0.5)
+            return dx * dx + dy * dy + dz * dz <= placeRangeSq
+          })
+          if (!hasNearbyPending) break
+          await delay(Math.max(1, pollMs || 10))
+        }
+      }
+
+      if (missRecoveryEnabled && !emergencyRestockBlock && prevCheckpointPos) {
+        const Vec3Miss = bot.entity.position.constructor
+        const missedInCols = batchTargets.filter((target) => {
+          if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) return false
+          const key = getTargetKey(target)
+          if (seen.has(key)) return false
+          const actual = bot.blockAt(new Vec3Miss(target.position.x, target.position.y, target.position.z))
+          return actual?.name !== target.blockName
+        })
+
+        if (missedInCols.length >= missRecoveryThreshold) {
+          console.log(`[NERV-WORKLOAD-MISS-RECOVERY] detected ${missedInCols.length} missed blocks; sneaking back ${missRecoveryBacktrackBlocks} blocks to re-place.`)
+
+          bot.setControlState('sprint', false)
+          bot.setControlState('sneak', true)
+
+          const botPos = bot.entity.position
+          const dx = prevCheckpointPos.x - botPos.x
+          const dz = prevCheckpointPos.z - botPos.z
+          const dist = Math.sqrt(dx * dx + dz * dz) || 1
+          const backX = botPos.x + (dx / dist) * missRecoveryBacktrackBlocks
+          const backZ = botPos.z + (dz / dist) * missRecoveryBacktrackBlocks
+
+          await bot.pathfinder.goto(new GoalNear(backX, checkpoint.position.y, backZ, checkpointBuffer))
+          await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+
+          bot.setControlState('sneak', false)
+
+          const stillMissed = missedInCols.filter((target) => {
+            const key = getTargetKey(target)
+            if (seen.has(key)) return false
+            const actual = bot.blockAt(new Vec3Miss(target.position.x, target.position.y, target.position.z))
+            return actual?.name !== target.blockName
+          })
+
+          if (stillMissed.length > 0) {
+            console.log(`[NERV-WORKLOAD-MISS-RECOVERY] ${stillMissed.length} still unresolved after backtrack; running targeted repair.`)
+            const repaired = await repairTargetsInBatches(bot, config, stillMissed, Math.max(1, toNumber(printer.placeRange, 4)), 'NERV-MISS-REPAIR')
+            placed += repaired.placed
+            already += repaired.already
+            skipped += repaired.skipped
+            for (const target of stillMissed) {
+              const key = getTargetKey(target)
+              const actual = bot.blockAt(new Vec3Miss(target.position.x, target.position.y, target.position.z))
+              if (actual?.name === target.blockName) {
+                seen.add(key)
+                pendingUntil.delete(key)
+                clearRepairAlert(key)
+              }
+            }
+          }
+        }
+      }
+
+      prevCheckpointPos = { x: checkpoint.position.x, y: checkpoint.position.y, z: checkpoint.position.z }
+
+      if (inlineRepairEnabled && checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
+        const rowErrors = getUnresolvedTargetsForActiveCols(currentActiveCols)
+        if (rowErrors.length > 0) {
+          console.log(`[NERV-WORKLOAD-LINEEND-REPAIR] unresolved=${rowErrors.length}; repairing before next traversal leg.`)
+          const repaired = await repairTargetsInBatches(bot, config, rowErrors, Math.max(1, toNumber(printer.placeRange, 4)), 'NERV-WORKLOAD-LINEEND')
+          placed += repaired.placed
+          already += repaired.already
+          skipped += repaired.skipped
+          for (const target of rowErrors) {
+            const key = getTargetKey(target)
+            const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
+            if (actual?.name === target.blockName) {
+              seen.add(key)
+              pendingUntil.delete(key)
+              clearRepairAlert(key)
+            } else {
+              raiseRepairAlert(target, 'lineend-unresolved')
+            }
+          }
+        }
+      }
     }
   } finally {
     active = false
@@ -5851,6 +6081,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
 
   const Vec3 = bot.entity.position.constructor
+
   let missing = 0
   for (const target of batchTargets) {
     const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
@@ -6202,6 +6433,8 @@ async function runPrint(bot, config) {
 
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
   const postPrintTestOnly = printer.postPrintTestOnly === true
+  const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'litematic').toLowerCase()
+  const isLitematicBandMode = scannerWorkloadMode === 'litematic' || scannerWorkloadMode === 'reactive'
 
   if (postPrintTestOnly) {
     console.log('[TEST] postPrintTestOnly=true, skipping carpet placement and running post-print workflow only.')
@@ -6350,9 +6583,10 @@ async function runPrint(bot, config) {
       }
     }
 
+    let batchStartOnNorthSide = startOnNorthSide
     for (let j = 0; j < inventoryCols.length; j += Math.max(1, toNumber(linesPerRun, 1))) {
       const colBatch = inventoryCols.slice(j, j + Math.max(1, toNumber(linesPerRun, 1)))
-      const rowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
+      const rowOrder = batchStartOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
       const batchTargets = []
       for (const row of rowOrder) {
         for (const col of colBatch) {
@@ -6369,17 +6603,16 @@ async function runPrint(bot, config) {
         batchIndex: Math.floor((i + j) / Math.max(1, toNumber(linesPerRun, 1))) + 1
       })
 
-      const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'litematic').toLowerCase()
-      const useLitematicRowMode = scannerWorkloadMode === 'litematic' || scannerWorkloadMode === 'reactive'
+      const useLitematicRowMode = isLitematicBandMode
 
       if (useLitematicRowMode) {
-        const result = await runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, placeRange, 'LITEMATIC-ROW')
+        const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
         placed += result.placed
         already += result.already
         skipped += result.skipped
         processedInRun += batchTargets.length
         if (placementNoiseLogsEnabled(config)) {
-          console.log(`[LITEMATIC-ROW-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} processed=${result.processed}/${batchTargets.length}`)
+          console.log(`[LITEMATIC-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
         }
         if (progressEnabled) {
           saveProgress('printing', {
@@ -6391,10 +6624,11 @@ async function runPrint(bot, config) {
             skipped
           })
         }
+        batchStartOnNorthSide = !batchStartOnNorthSide
       } else if (printer.fastTraversalEnabled === true) {
         const result = scannerWorkloadMode === 'time'
-          ? await placementWorkload.runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide)
-          : await placementWorkload.runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide)
+          ? await placementWorkload.runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
+          : await placementWorkload.runNervScannerPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
         placed += result.placed
         already += result.already
         skipped += result.skipped
@@ -6414,6 +6648,7 @@ async function runPrint(bot, config) {
             skipped
           })
         }
+        batchStartOnNorthSide = !batchStartOnNorthSide
       } else {
         const firstTarget = rowOrder
           .map((row) => colBatch.map((col) => byColRow.get(`${col}:${row}`)).find(Boolean))
@@ -6495,29 +6730,32 @@ async function runPrint(bot, config) {
               })
             }
           }
+
+          batchStartOnNorthSide = !batchStartOnNorthSide
         }
       }
 
-      // LineEnd: scan the completed movement row for errors
-      saveProgress('printing', {
-        state: 'printing_lineend_check',
-        action: 'verify-completed-batch',
-        colBatch: colBatch.join(',')
-      })
-      const Vec3_LineEnd = bot.entity.position.constructor
-      const errorListKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
-      for (const col of colBatch) {
-        for (const row of rowOrder) {
-          const target = byColRow.get(`${col}:${row}`)
-          if (!target) continue
-          const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-          if (errorListKeys.has(key)) continue
-          const actual = bot.blockAt(new Vec3_LineEnd(target.position.x, target.position.y, target.position.z))
-          if (actual?.name !== target.blockName) {
-            errorList.push(target)
-            if (config.errorHandling?.logErrors !== false) {
-              const reason = (!actual || actual.name === 'air') ? 'missing' : `wrong-${actual.name}`
-              console.log(`[LINEEND-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
+      if (!isLitematicBandMode) {
+        saveProgress('printing', {
+          state: 'printing_lineend_check',
+          action: 'verify-completed-batch',
+          colBatch: colBatch.join(',')
+        })
+        const Vec3_LineEnd = bot.entity.position.constructor
+        const errorListKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
+        for (const col of colBatch) {
+          for (const row of rowOrder) {
+            const target = byColRow.get(`${col}:${row}`)
+            if (!target) continue
+            const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+            if (errorListKeys.has(key)) continue
+            const actual = bot.blockAt(new Vec3_LineEnd(target.position.x, target.position.y, target.position.z))
+            if (actual?.name !== target.blockName) {
+              errorList.push(target)
+              if (config.errorHandling?.logErrors !== false) {
+                const reason = (!actual || actual.name === 'air') ? 'missing' : `wrong-${actual.name}`
+                console.log(`[LINEEND-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
+              }
             }
           }
         }
@@ -6525,6 +6763,15 @@ async function runPrint(bot, config) {
 
       startOnNorthSide = !startOnNorthSide
     }
+  }
+
+  if (isLitematicBandMode) {
+    errorList.push(...scanPlacementErrors(bot, orderedTargets, {
+      config,
+      logPrefix: 'LITEMATIC-SWEEP',
+      logErrors: config.errorHandling?.logErrors !== false,
+      maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+    }).map((entry) => entry.target))
   }
 
   console.log(`[DONE-SWEEP] placed=${placed} already=${already} skipped=${skipped} errors=${errorList.length}`)
@@ -7784,22 +8031,35 @@ function buildNervScannerCheckpoints(targets, config, maxGroupsOverride = null) 
   return checkpoints
 }
 
-function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processed = new Set(), activeCols = null) {
+function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processed = new Set(), activeCols = null, priorityKeys = null) {
   const printer = config.printer || {}
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const placeRange2 = placeRange * placeRange
   const minPlaceDistance = Math.max(0, toNumber(printer.minPlaceDistance, 0.8))
+  const minPlaceDistance2 = minPlaceDistance * minPlaceDistance
+  const bandWidth = Math.max(1, toNumber(printer.linesPerRun, 3))
+  const goalBlockX = !(activeCols instanceof Set && activeCols.size > 0) && Number.isFinite(currentGoal?.x)
+    ? Math.floor(currentGoal.x)
+    : null
+  const activeMinX = goalBlockX == null ? null : goalBlockX - 1
+  const activeMaxX = goalBlockX == null ? null : goalBlockX + Math.max(0, bandWidth - 1)
   const radius = Math.ceil(placeRange) + 1
-  const Vec3 = bot.entity.position.constructor
-  const baseX = Math.floor(bot.entity.position.x)
-  const baseZ = Math.floor(bot.entity.position.z)
+  const botX = bot.entity.position.x
+  const botY = bot.entity.position.y
+  const botZ = bot.entity.position.z
+  const baseX = Math.floor(botX)
+  const baseZ = Math.floor(botZ)
 
   let best = null
-  let bestDistance = Number.POSITIVE_INFINITY
+  let bestDistance2 = Number.POSITIVE_INFINITY
+  let bestPriority = -1
 
   for (let dx = -radius; dx <= radius; dx += 1) {
     for (let dz = -radius; dz <= radius; dz += 1) {
       const x = baseX + dx
       const z = baseZ + dz
+
+      if (activeMinX != null && (x < activeMinX || x > activeMaxX)) continue
 
       const target = targetByXZ.get(`${x}:${z}`)
       if (!target) continue
@@ -7807,16 +8067,29 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       const key = `${target.position.x}:${target.position.y}:${target.position.z}`
       if (processed.has(key)) continue
 
-      const targetPos = new Vec3(target.position.x, target.position.y, target.position.z)
-      const distance = bot.entity.position.distanceTo(targetPos.offset(0.5, 0.5, 0.5))
-      if (distance > placeRange || distance <= minPlaceDistance) continue
+      const tx = target.position.x + 0.5
+      const ty = target.position.y + 0.5
+      const tz = target.position.z + 0.5
+      const ddx = botX - tx
+      const ddy = botY - ty
+      const ddz = botZ - tz
+      const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
+      if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
-      const actual = bot.blockAt(targetPos)
-      if (actual && actual.name !== 'air' && !String(actual.name).endsWith('_carpet')) continue
+      const priority = priorityKeys instanceof Set && priorityKeys.has(key) ? 1 : 0
 
-      if (distance < bestDistance) {
+      if (priority > bestPriority || (priority === bestPriority && distance2 < bestDistance2)) {
+        // Only do blockAt for the current best candidate to skip expensive world reads
+        const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
+        if (actual?.name === target.blockName) {
+          processed.add(key)
+          continue
+        }
+        if (actual && actual.name !== 'air' && !String(actual.name).endsWith('_carpet')) continue
+
         best = target
-        bestDistance = distance
+        bestDistance2 = distance2
+        bestPriority = priority
       }
     }
   }
@@ -7931,9 +8204,9 @@ async function runNervWorkloadTest(bot, config) {
   const checkpoints = buildNervScannerCheckpoints(calibratedTargets, config, maxGroups)
   const testTargets = [...new Map(checkpoints.flatMap((cp) => cp.targets).map((target) => [`${target.position.x}:${target.position.y}:${target.position.z}`, target])).values()]
   const targetByXZ = new Map(testTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
-  const placeDelayMs = Math.max(1, toNumber(advanced.scannerPlaceDelayMs, toNumber(printer.placeDelayMs, 10)))
-  const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 12))
-  const pollMs = Math.max(1, toNumber(advanced.scannerWorkloadPollMs, Math.min(10, placeDelayMs)))
+  const placeDelayMs = Math.max(0, toNumber(advanced.scannerPlaceDelayMs, 0))
+  const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 30))
+  const pollMs = Math.max(0, toNumber(advanced.scannerWorkloadPollMs, 0))
   const logEveryMs = Math.max(0, toNumber(advanced.scannerWorkloadLogEveryMs, 1000))
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
   const waitAfterMs = Math.max(0, toNumber(advanced.nervWorkloadTestWaitAfterMs, 5000))
@@ -9170,6 +9443,7 @@ function seedBotPosition(bot, seed, reason = 'position-seed', options = {}) {
 }
 
 function rescueBotPositionFromPlatformCache(bot, config, source = 'position-cache', options = {}) {
+  if (!isPlatformPositionCacheEnabled(config)) return false
   if (!isPositionMissing(bot?.entity?.position)) return false
   const cached = bot?.__nervLastPlatformPosition
   if (!cached || !Number.isFinite(cached.x) || !Number.isFinite(cached.y) || !Number.isFinite(cached.z)) return false
@@ -9244,7 +9518,7 @@ function ensureUsableEntityState(bot, config, reason = 'entity-state', options =
   repairInvalidEntityVelocity(bot, reason, { log: options.log === true })
   if (!isPositionMissing(bot?.entity?.position)) return true
   if (rescueBotPositionFromLatestPacket(bot, config || {}, reason, { log: options.log === true })) return true
-  if (config && rescueBotPositionFromPlatformCache(bot, config, reason, { log: options.log === true })) return true
+  if (config && isPlatformPositionCacheEnabled(config) && rescueBotPositionFromPlatformCache(bot, config, reason, { log: options.log === true })) return true
   if (config && options.allowPlatformSeed === true && seedBotPositionFromPlatform(bot, config, reason)) return true
   return !isPositionMissing(bot?.entity?.position)
 }
@@ -9618,11 +9892,11 @@ function getSpatialReferencePosition(bot, config, reason = 'spatial-reference') 
     pos = bot?.entity?.position
     if (!isPositionMissing(pos)) return pos
   }
-  if (rescueBotPositionFromPlatformCache(bot, config, reason, { log: false })) {
+  if (isPlatformPositionCacheEnabled(config) && rescueBotPositionFromPlatformCache(bot, config, reason, { log: false })) {
     pos = bot?.entity?.position
     if (!isPositionMissing(pos)) return pos
   }
-  const cached = bot?.__nervLastPlatformPosition
+  const cached = isPlatformPositionCacheEnabled(config) ? bot?.__nervLastPlatformPosition : null
   if (cached && Number.isFinite(cached.x) && Number.isFinite(cached.y) && Number.isFinite(cached.z)) {
     return {
       x: Number(cached.x),
@@ -10739,6 +11013,7 @@ function runSingleSession(config, sessionNumber) {
 
     const clonePos = (pos) => ({ x: Number(pos.x), y: Number(pos.y), z: Number(pos.z) })
     const recordPlatformPosition = (pos, source) => {
+      if (!isPlatformPositionCacheEnabled(config)) return false
       if (!isPositionUsable(pos) || !Number.isFinite(pos.y) || !isPositionInsidePlatformBounds(pos, config)) return false
       const value = clonePos(pos)
       bot.__nervLastPlatformPosition = {
@@ -10757,6 +11032,7 @@ function runSingleSession(config, sessionNumber) {
       return true
     }
     const tryRescuePositionFromCache = (source) => {
+      if (!isPlatformPositionCacheEnabled(config)) return false
       if (spawnedCount < getRequiredSpawnCount(config)) return false
       if (rescueBotPositionFromLatestPacket(bot, config, source, { log: false })) return true
       return rescueBotPositionFromPlatformCache(bot, config, source)
@@ -11202,6 +11478,7 @@ function runSpatialAwarenessTestSession(config) {
 
     const clonePos = (pos) => ({ x: Number(pos.x), y: Number(pos.y), z: Number(pos.z) })
     const recordPlatformPosition = (pos, source) => {
+      if (!isPlatformPositionCacheEnabled(config)) return false
       if (!isPositionUsable(pos) || !Number.isFinite(pos.y) || !isPositionInsidePlatformBounds(pos, config)) return false
       const value = clonePos(pos)
       bot.__nervLastPlatformPosition = {
@@ -11218,6 +11495,7 @@ function runSpatialAwarenessTestSession(config) {
     }
 
     const tryRescuePositionFromCache = (source) => {
+      if (!isPlatformPositionCacheEnabled(config)) return false
       if (spawnedCount < reqSpawn) return false
       const cached = bot.__nervLastPlatformPosition
       if (!cached || Date.now() - cached.at > cacheMaxAgeMs) return false

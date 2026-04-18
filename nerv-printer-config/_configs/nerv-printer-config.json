@@ -49,7 +49,7 @@
           "checkTimeoutInterval": 60000,
           "reconnect": {
             "enabled": true,
-            "delayMs": 15000,
+            "delayMs": 5000,
             "maxAttempts": 25
           }
         }
@@ -72,6 +72,7 @@
           "requiredSpawnFallbackSeconds": 90,
           "spawnPositionTimeoutSeconds": 240,
           "spawnMissingPositionReconnectSeconds": 75,
+          "platformPositionCacheEnabled": false,
           "waitForPlatformPositionOnSpawn": true,
           "seedPositionFromPlatformOnSpawn": true,
           "platformRecoveryTpa": {
@@ -204,42 +205,42 @@
     "machineConfigProfile": "carpet",
     "machineConfigFile": "./nerv-printer-config/_configs/carpet-printer-config.json",
     "resumeProgress": true,
-    "progressFile": "./logs/nerv-printer-progress.json",
+    "progressFile": "./logs/printer-progress.json",
     "progressSaveEvery": 10,
     "moveToFinishedFolder": true,
     "finishedFolder": "./finished-maps",
     "disableOnFinished": true
   },
   "logging": {
-    "rotateHours": 12,
-    "retentionHours": 72
+    "rotateHours": 4,
+    "retentionHours": 12
   },
   "printer": {
     "startOnSpawn": true,
     "startDelayMs": 1500,
     "allowJump": false,
-    "placeWhileSprinting": false,
+    "placeWhileSprinting": true,
     "postPrintTestOnly": false,
     "printOffset": {
       "x": 0,
       "y": 0,
       "z": -1
     },
-    "linesPerRun": 3,
+    "linesPerRun": 4,
     "placeRange": 4,
     "minPlaceDistance": 0.8,
     "ignoredBlocks": [],
-    "placeDelayMs": 0,
+    "placeDelayMs": 10,
     "rotate": false,
     "northToSouth": true,
     "mapFillSquareSize": 4,
-    "sprintMode": "off",
+    "sprintMode": "always",
     "fastTraversalEnabled": false,
     "fastTraversalTickMs": 5,
     "fastTraversalCheckpointEveryRows": 10,
     "fastTraversalCatchupPasses": 2,
-    "fastTraversalCatchupStallMs": 2000,
-    "maxPlacementsPerTick": 15
+    "fastTraversalCatchupStallMs": 750,
+    "maxPlacementsPerTick": 10
   },
   "advanced": {
     "antiHunger": {
@@ -249,6 +250,7 @@
     },
     "meteorSceneAwareness": {
       "enabled": true,
+      "platformEnabled": false,
       "loginPortalEnabled": false,
       "file": "d:\\PrismLauncher\\instances\\Bot 001 1.0.0(1)\\minecraft\\spatial-awareness\\meteor-scene-signatures.json",
       "minScore": 0.72,
@@ -330,10 +332,13 @@
     "scannerAdaptivePlaceDelayStepMs": 2,
     "scannerAdaptiveMaxPlaceDelayMs": 50,
     "scannerAdaptiveMinPlaceDelayMs": 6,
-    "scannerRetryCooldownMs": 150,
+    "scannerRetryCooldownMs": 100,
+    "scannerMissRecoveryEnabled": true,
+    "scannerMissRecoveryThreshold": 1,
+    "scannerMissRecoveryBacktrackBlocks": 3,
     "litematicRowSettleMs": 150,
-    "litematicRowVerifyEveryRows": 2,
-    "litematicRowRepairThreshold": 2,
+    "litematicRowVerifyEveryRows": 1,
+    "litematicRowRepairThreshold": 1,
     "scannerPreSwapDelayMs": 10,
     "scannerPostSwapDelayMs": 10,
     "placementNoiseLogs": false,
@@ -364,8 +369,7 @@
     "logErrors": true,
     "errorAction": "repair"
   },
- 
-"anchorTranslation": {
+  "anchorTranslation": {
     "enabled": true,
     "sourceAnchor": {
       "x": -450,

@@ -342,7 +342,8 @@ function summarizeNode(node) {
     onlineCount: node.onlineCount,
     botNames: node.botNames,
     lastStatusAt: node.lastStatusAt,
-    nodeFiles: Array.isArray(node.nodeFiles) ? node.nodeFiles : []
+    nodeFiles: Array.isArray(node.nodeFiles) ? node.nodeFiles : [],
+    timing: node.timing || null
   }
 }
 

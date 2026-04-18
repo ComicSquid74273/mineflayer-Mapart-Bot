@@ -5,6 +5,7 @@ const state = {
   logs: [],
   operators: [],
   refreshTimer: null,
+  refreshIntervalMs: 300000,
   busy: false,
   uploadBusy: false,
   lastInteractionAt: Date.now(),
@@ -36,6 +37,8 @@ const state = {
 }
 
 const AUTH_STORAGE_KEY = 'mapart-dashboard-operator-auth'
+const REFRESH_STORAGE_KEY = 'mapart-dashboard-refresh-ms'
+const ALLOWED_REFRESH_INTERVALS = [60000, 300000, 600000]
 const UI_ACTIVITY_HOLD_MS = 15000
 
 const elements = {
@@ -67,6 +70,7 @@ const elements = {
   permOperate: document.getElementById('permOperate'),
   permViewLogs: document.getElementById('permViewLogs'),
   refreshButton: document.getElementById('refreshButton'),
+  refreshInterval: document.getElementById('refreshInterval'),
   serviceStatus: document.getElementById('serviceStatus'),
   startAllButton: document.getElementById('startAllButton'),
   stopAllButton: document.getElementById('stopAllButton'),
@@ -122,6 +126,32 @@ function formatTime(value) {
   return date.toLocaleString()
 }
 
+function formatDuration(value) {
+  const ms = Number(value)
+  if (!Number.isFinite(ms) || ms < 0) return 'n/a'
+  if (ms < 1000) return '<1s'
+
+  let totalSeconds = Math.round(ms / 1000)
+  const days = Math.floor(totalSeconds / 86400)
+  totalSeconds -= days * 86400
+  const hours = Math.floor(totalSeconds / 3600)
+  totalSeconds -= hours * 3600
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds - (minutes * 60)
+  const parts = []
+
+  if (days > 0) parts.push(`${days}d`)
+  if (hours > 0) parts.push(`${hours}h`)
+  if (minutes > 0) parts.push(`${minutes}m`)
+  if (!parts.length || (parts.length < 2 && seconds > 0 && days === 0)) parts.push(`${seconds}s`)
+  return parts.slice(0, 2).join(' ')
+}
+
+function normalizeRefreshInterval(value) {
+  const next = Number(value)
+  return ALLOWED_REFRESH_INTERVALS.includes(next) ? next : 300000
+}
+
 function phaseClass(phase) {
   return `phase-${String(phase || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 }
@@ -170,11 +200,37 @@ function loadStoredAuth() {
   }
 }
 
+function loadStoredRefreshInterval() {
+  try {
+    const raw = window.localStorage.getItem(REFRESH_STORAGE_KEY)
+    if (!raw) return
+    state.refreshIntervalMs = normalizeRefreshInterval(raw)
+  } catch {
+    state.refreshIntervalMs = 300000
+  }
+}
+
 function persistAuth() {
   window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
     operator: state.auth.operator,
     password: state.auth.password
   }))
+}
+
+function persistRefreshInterval() {
+  window.localStorage.setItem(REFRESH_STORAGE_KEY, String(state.refreshIntervalMs))
+}
+
+function applyRefreshInterval() {
+  if (elements.refreshInterval) {
+    elements.refreshInterval.value = String(state.refreshIntervalMs)
+  }
+  if (state.refreshTimer) {
+    window.clearInterval(state.refreshTimer)
+  }
+  state.refreshTimer = window.setInterval(() => {
+    void refreshData({ background: true })
+  }, state.refreshIntervalMs)
 }
 
 function clearAuth() {
@@ -419,6 +475,27 @@ function renderSummary() {
   `).join('')
 }
 
+function renderNodeTimingMetrics(node) {
+  const timing = node.timing || {}
+  const activeRun = timing.activeRun || null
+  return `
+    <div class="node-timing-strip">
+      <div class="metric metric-compact">
+        Avg Map Time<strong>${escapeHtml(formatDuration(timing.averageDurationMs))}</strong>
+      </div>
+      <div class="metric metric-compact">
+        Completed<strong>${escapeHtml(timing.totalCompletedMaps ?? 0)}</strong>
+      </div>
+      <div class="metric metric-compact">
+        Current Run<strong>${escapeHtml(activeRun ? formatDuration(activeRun.elapsedMs) : 'idle')}</strong>
+      </div>
+      <div class="metric metric-compact">
+        Active Map<strong>${escapeHtml(activeRun?.fileName || timing.lastCompletedFileName || 'none')}</strong>
+      </div>
+    </div>
+  `
+}
+
 function renderBotCard(bot) {
   const progress = bot.progress && Number.isFinite(Number(bot.progress.percent))
     ? `${bot.progress.percent}%`
@@ -494,6 +571,7 @@ function renderBots() {
             <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Stop Node</button>
           </div>
         </div>
+        ${renderNodeTimingMetrics(node)}
         <div class="fleet-node-bots">
           ${nodeBots.length ? nodeBots.map(renderBotCard).join('') : `
             <article class="empty-card">
@@ -601,6 +679,7 @@ function renderNodes() {
           </div>
           <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
         </div>
+        ${renderNodeTimingMetrics(node)}
         ${files.length ? files.map((file) => `
           <article class="file-item compact-file-item">
             <div class="file-row">
@@ -1042,10 +1121,16 @@ elements.managedRole.addEventListener('change', () => {
 
 renderEvents()
 loadStoredAuth()
+loadStoredRefreshInterval()
 setManagedOperatorDefaults(elements.managedRole.value)
 renderAuthState()
+applyRefreshInterval()
 void verifyOperatorAuth()
 void refreshData()
-state.refreshTimer = window.setInterval(() => {
-  void refreshData({ background: true })
-}, 5000)
+
+elements.refreshInterval.addEventListener('change', () => {
+  state.refreshIntervalMs = normalizeRefreshInterval(elements.refreshInterval.value)
+  persistRefreshInterval()
+  applyRefreshInterval()
+  pushEvent('info', `Auto refresh set to ${Math.round(state.refreshIntervalMs / 60000)} minute(s)`)
+})
