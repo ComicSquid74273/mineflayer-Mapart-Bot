@@ -29,12 +29,38 @@ const TEST_BOT_CONFIG_FILE = path.resolve(process.cwd(), 'config.test.json')
 const LOG_FILE = path.resolve(process.cwd(), 'logs', 'nerv-printer.log')
 const logContext = new AsyncLocalStorage()
 const botLogStreams = new Map()
+const throttledLogState = new Map()
 const stdinCommandState = {
   initialized: false,
   rl: null,
   status: null,
   verificationWaiter: null,
   runtimeControl: null
+}
+
+function getBootstrapLogConfig() {
+  const defaults = { rotateHours: 12, retentionHours: 72 }
+  const userConfigPath = getUserConfigPath()
+  let fileLogging = null
+
+  if (fs.existsSync(userConfigPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(userConfigPath, 'utf8'))
+      fileLogging = parsed?.logging && typeof parsed.logging === 'object' ? parsed.logging : null
+    } catch {
+      fileLogging = null
+    }
+  }
+
+  const rotateHours = Math.max(0, toNumber(process.env.NERV_LOG_ROTATE_HOURS, toNumber(fileLogging?.rotateHours, defaults.rotateHours)))
+  const retentionHours = Math.max(0, toNumber(process.env.NERV_LOG_RETENTION_HOURS, toNumber(fileLogging?.retentionHours, defaults.retentionHours)))
+
+  return {
+    rotateHours,
+    retentionHours,
+    rotateMs: rotateHours > 0 ? rotateHours * 60 * 60 * 1000 : 0,
+    retentionMs: retentionHours > 0 ? retentionHours * 60 * 60 * 1000 : 0
+  }
 }
 
 function formatLogArg(value) {
@@ -69,14 +95,105 @@ function initLogger() {
   }
 
   const terminalLogsEnabled = !terminalLogsDisabledByCli()
-  const stream = fs.createWriteStream(LOG_FILE, { flags: 'a' })
+  const logConfig = getBootstrapLogConfig()
+  const openLogState = (filePath) => ({ filePath, stream: fs.createWriteStream(filePath, { flags: 'a' }) })
+  const streamState = openLogState(LOG_FILE)
+  let rotationTimer = null
+  let rotationInProgress = false
+  const queuedWrites = []
+
+  const buildLogArchivePath = (filePath) => {
+    const parsed = path.parse(filePath)
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z').replace('T', '-')
+    return path.join(parsed.dir, `${parsed.name}-${stamp}${parsed.ext}`)
+  }
+
+  const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+  const pruneArchivedLogs = (filePath) => {
+    if (logConfig.retentionMs <= 0) return
+    const parsed = path.parse(filePath)
+    const now = Date.now()
+    const archivePattern = new RegExp(`^${escapeRegExp(parsed.name)}-\\d{8}-\\d{6}Z${escapeRegExp(parsed.ext)}$`)
+    for (const entry of fs.readdirSync(parsed.dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !archivePattern.test(entry.name)) continue
+      const archivePath = path.join(parsed.dir, entry.name)
+      try {
+        const stats = fs.statSync(archivePath)
+        if (now - stats.mtimeMs >= logConfig.retentionMs) {
+          fs.unlinkSync(archivePath)
+        }
+      } catch {
+        // Ignore individual prune failures.
+      }
+    }
+  }
+
+  const flushQueuedWrites = () => {
+    if (rotationInProgress || !queuedWrites.length) return
+    const pending = queuedWrites.splice(0, queuedWrites.length)
+    for (const entry of pending) {
+      writeNow(entry.level, entry.args)
+    }
+  }
+
+  const closeLogState = (state) => new Promise((resolve) => {
+    if (!state?.stream) {
+      resolve()
+      return
+    }
+    state.stream.end(() => resolve())
+  })
+
+  const rotateLogState = async (state) => {
+    if (!state?.filePath) return
+    await closeLogState(state)
+    try {
+      if (fs.existsSync(state.filePath)) {
+        const stats = fs.statSync(state.filePath)
+        if (stats.size > 0) {
+          fs.renameSync(state.filePath, buildLogArchivePath(state.filePath))
+        }
+      }
+    } catch (error) {
+      if (terminalLogsEnabled) {
+        original.warn(`[LOG-WARN] log rotation failed for ${state.filePath}: ${error?.message || error}`)
+      }
+    }
+    state.stream = fs.createWriteStream(state.filePath, { flags: 'a' })
+    pruneArchivedLogs(state.filePath)
+  }
+
+  const scheduleRotation = () => {
+    if (logConfig.rotateMs <= 0) return
+    rotationTimer = setTimeout(() => {
+      void rotateAllLogs()
+    }, logConfig.rotateMs)
+    rotationTimer.unref?.()
+  }
+
+  const rotateAllLogs = async () => {
+    if (rotationInProgress) return
+    rotationInProgress = true
+    try {
+      await rotateLogState(streamState)
+      for (const state of botLogStreams.values()) {
+        await rotateLogState(state)
+      }
+    } finally {
+      rotationInProgress = false
+      flushQueuedWrites()
+      scheduleRotation()
+    }
+  }
+
   const getBotStream = (botName) => {
     const safeName = sanitizeSyncName(botName)
     if (!safeName) return null
     if (!botLogStreams.has(safeName)) {
-      botLogStreams.set(safeName, fs.createWriteStream(path.join(logDir, `nerv-printer-${safeName}.log`), { flags: 'a' }))
+      botLogStreams.set(safeName, openLogState(path.join(logDir, `nerv-printer-${safeName}.log`)))
     }
-    return botLogStreams.get(safeName)
+    return botLogStreams.get(safeName).stream
   }
   const original = {
     log: console.log,
@@ -84,15 +201,23 @@ function initLogger() {
     error: console.error
   }
 
-  const write = (level, args) => {
+  const writeNow = (level, args) => {
     const message = args.map(formatLogArg).join(' ')
     const context = logContext.getStore()
     const botName = context?.botName || null
     const prefix = botName ? ` [${botName}]` : ''
     const line = `[${new Date().toISOString()}] [${level}]${prefix} ${message}\n`
-    stream.write(line)
+    streamState.stream.write(line)
     const botStream = botName ? getBotStream(botName) : null
     if (botStream) botStream.write(line)
+  }
+
+  const write = (level, args) => {
+    if (rotationInProgress) {
+      queuedWrites.push({ level, args })
+      return
+    }
+    writeNow(level, args)
   }
 
   console.log = (...args) => {
@@ -111,14 +236,19 @@ function initLogger() {
   }
 
   process.on('exit', () => {
-    stream.end()
-    for (const botStream of botLogStreams.values()) {
-      botStream.end()
+    if (rotationTimer) clearTimeout(rotationTimer)
+    streamState.stream.end()
+    for (const botState of botLogStreams.values()) {
+      botState.stream.end()
     }
   })
 
   if (terminalLogsEnabled) original.log(`[LOG] Writing runtime logs to ${LOG_FILE}`)
   write('INFO', [`[LOG] Writing runtime logs to ${LOG_FILE}`])
+  if (logConfig.rotateMs > 0) {
+    write('INFO', [`[LOG] Rotation enabled every ${logConfig.rotateHours}h; archived logs kept for ${logConfig.retentionHours}h.`])
+    scheduleRotation()
+  }
 }
 
 function readJson(filePath) {
@@ -159,6 +289,30 @@ function writeJson(filePath, data) {
     fs.mkdirSync(dir, { recursive: true })
   }
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8')
+}
+
+function logThrottled(key, message, options = {}) {
+  const intervalMs = Math.max(1000, toNumber(options.intervalMs, 30000))
+  const level = options.level === 'warn' ? 'warn' : (options.level === 'error' ? 'error' : 'log')
+  const now = Date.now()
+  const current = throttledLogState.get(key)
+
+  if (!current || now >= current.nextAllowedAt || current.lastMessage !== message) {
+    if (current && current.suppressed > 0) {
+      console[level](`[LOG-THROTTLE] ${key}: suppressed ${current.suppressed} repeated message(s) over ${Math.max(1, Math.round((now - current.windowStartedAt) / 1000))}s.`)
+    }
+    throttledLogState.set(key, {
+      lastMessage: message,
+      nextAllowedAt: now + intervalMs,
+      suppressed: 0,
+      windowStartedAt: now
+    })
+    console[level](message)
+    return
+  }
+
+  current.suppressed += 1
+  throttledLogState.set(key, current)
 }
 
 function getDashboardConfig(config) {
@@ -411,10 +565,35 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return mapDashboardLocation({ ...runtime, position: bot?.entity?.position })
   }
 
+  function listNodeNbtFiles() {
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    if (!fs.existsSync(folder)) return []
+    try {
+      return fs.readdirSync(folder, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.nbt'))
+        .map((entry) => {
+          const filePath = path.join(folder, entry.name)
+          const stats = fs.statSync(filePath)
+          return {
+            fileName: entry.name,
+            sizeBytes: stats.size,
+            modifiedAt: stats.mtime.toISOString()
+          }
+        })
+        .sort((left, right) => String(left.fileName).localeCompare(String(right.fileName), undefined, { numeric: true, sensitivity: 'base' }))
+    } catch (error) {
+      logThrottled(`dashboard-node-files-${botName}`, `[DASHBOARD-WARN] node file listing failed for ${botName}: ${error?.message || error}`, {
+        intervalMs: 30000,
+        level: 'warn'
+      })
+      return []
+    }
+  }
+
   function buildStatusPayload(onlineOverride = null) {
     const now = Date.now()
     const progress = currentProgress()
-    const rawPhase = progress?.phase || state.phase || 'idle'
+    const rawPhase = state.phase || progress?.phase || 'idle'
     const phase = normalizeDashboardPhase(rawPhase)
     const health = Number.isFinite(Number(bot?.health)) ? Number(bot.health) : 20
     const hunger = Number.isFinite(Number(bot?.food)) ? Number(bot.food) : 20
@@ -425,7 +604,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       start: toNumber(currentAssignment().interval.start, 0),
       end: toNumber(currentAssignment().interval.end, 127)
     } : null
-    const progressPayload = progress && Number.isFinite(Number(progress.totalTargets))
+    const clientState = String(bot?._client?.state || '').toLowerCase()
+    const isOnline = onlineOverride == null
+      ? (bot.__nervSessionActive !== false && clientState === 'play')
+      : onlineOverride
+    const progressPayload = progress && Number.isFinite(Number(progress.totalTargets)) && ['printing', 'repair', 'rescan', 'post-print', 'cleanup'].includes(phase)
       ? {
           processed: toNumber(progress.processedTargets, 0),
           total: toNumber(progress.totalTargets, 0),
@@ -437,7 +620,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       botName,
       runtime: 'nerv-printer',
       hostLabel: dashboard.hostLabel,
-      online: onlineOverride == null ? (bot.__nervSessionActive !== false && bot?._client?.state !== 'disconnected') : onlineOverride,
+      online: isOnline,
       phase,
       health,
       hunger,
@@ -450,8 +633,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       reconnectState: state.reconnectState,
       currentNbt: currentSourceName(),
       lastStatusAt: new Date().toISOString(),
+      nodeFiles: listNodeNbtFiles(),
       progress: progressPayload,
-      lastError: state.lastError || undefined,
+      lastError: state.lastError || null,
       assignedInterval,
       staleReason: activeState === 'stale' ? (progress ? 'progress-frozen' : 'heartbeat-missed') : undefined
     }
@@ -461,7 +645,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     try {
       await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/status`, 'POST', buildStatusPayload(onlineOverride))
     } catch (err) {
-      console.log(`[DASHBOARD-WARN] status post failed for ${botName}: ${err?.message || err}`)
+      logThrottled(`dashboard-status-${botName}`, `[DASHBOARD-WARN] status post failed for ${botName}: ${err?.message || err}`, {
+        intervalMs: 30000,
+        level: 'warn'
+      })
     }
   }
 
@@ -471,7 +658,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       try {
         await work()
       } catch (err) {
-        console.log(`[DASHBOARD-WARN] ${botName} loop=${key} failed: ${err?.message || err}`)
+        logThrottled(`dashboard-loop-${botName}-${key}`, `[DASHBOARD-WARN] ${botName} loop=${key} failed: ${err?.message || err}`, {
+          intervalMs: 30000,
+          level: 'warn'
+        })
       }
       if (state.stopped) return
       state[key] = setTimeout(run, intervalMs)
@@ -493,6 +683,85 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       deliveryStatus,
       failedReason
     })
+  }
+
+  async function reportNodeFileResult(fileId, deliveryStatus, failedReason = null) {
+    await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/files/${encodeURIComponent(fileId)}/result`, 'POST', {
+      deliveryStatus,
+      failedReason,
+      botName
+    })
+  }
+
+  async function claimNextNodeFile() {
+    const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/files/claim-next`, 'POST', {
+      botName
+    })
+    return response.body?.item || null
+  }
+
+  async function claimNextNodeCommand() {
+    const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/commands/claim-next`, 'POST', {
+      botName
+    })
+    return response.body?.command || null
+  }
+
+  async function reportNodeCommandResult(commandId, status, resultMessage) {
+    await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/commands/${encodeURIComponent(commandId)}/result`, 'POST', {
+      status,
+      resultMessage,
+      botName
+    })
+  }
+
+  function resolveNodeNbtPath(fileName) {
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    const safeName = path.basename(String(fileName || '').trim())
+    if (!safeName) throw new Error('file name is required')
+    return path.join(folder, safeName)
+  }
+
+  async function executeNodeCommand(command) {
+    if (!command) return false
+    switch (command.commandType) {
+      case 'delete-node-file': {
+        const targetPath = resolveNodeNbtPath(command.fileName)
+        if (!fs.existsSync(targetPath)) {
+          await reportNodeCommandResult(command.commandId, 'failed', `file not found: ${command.fileName}`)
+          return true
+        }
+        fs.unlinkSync(targetPath)
+        if (path.basename(String(state.currentNbt || '')) === path.basename(String(command.fileName || ''))) {
+          state.currentNbt = null
+        }
+        noteActivity()
+        await reportNodeCommandResult(command.commandId, 'succeeded', `deleted ${command.fileName}`)
+        return true
+      }
+      default: {
+        await reportNodeCommandResult(command.commandId, 'failed', `unsupported node command type: ${command.commandType}`)
+        return true
+      }
+    }
+  }
+
+  async function handleNodeFileAssignment() {
+    const item = await claimNextNodeFile()
+    if (!item) return false
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    const fileName = path.basename(String(item.originalName || item.storedName || `${item.fileId}.nbt`))
+    const targetPath = path.join(folder, fileName)
+    try {
+      await downloadDashboardFile(`${dashboard.serviceUrl}/api/files/${encodeURIComponent(item.fileId)}/download`, targetPath)
+      await reportNodeFileResult(item.fileId, 'placed')
+      state.currentNbt = fileName
+      noteActivity()
+      return true
+    } catch (error) {
+      await reportNodeFileResult(item.fileId, 'failed', error?.message || String(error))
+      throw error
+    }
   }
 
   async function handleAssignNbt(command) {
@@ -558,6 +827,13 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     if (state.commandBusy || state.stopped) return
     state.commandBusy = true
     try {
+      const handledNodeFile = await handleNodeFileAssignment()
+      if (handledNodeFile) return
+      const nodeCommand = await claimNextNodeCommand()
+      if (nodeCommand) {
+        await executeNodeCommand(nodeCommand)
+        return
+      }
       const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands`, 'GET')
       const items = Array.isArray(response.body?.items) ? response.body.items : []
       if (items.length) {
@@ -570,9 +846,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
   return {
     start() {
-      void postStatus(true)
+      void postStatus(false)
       scheduleLoop('heartbeatTimer', dashboard.heartbeatMs, async () => {
-        await postStatus(true)
+        await postStatus()
       })
       scheduleLoop('commandTimer', dashboard.commandPollMs, async () => {
         await pollCommands()
@@ -1587,10 +1863,13 @@ function createDefaultConfig() {
       scannerAdaptiveMaxPlaceDelayMs: 16,
       scannerAdaptiveMinPlaceDelayMs: 6,
       scannerRetryCooldownMs: 30,
+      litematicRowSettleMs: 150,
+      litematicRowVerifyEveryRows: 2,
+      litematicRowRepairThreshold: 2,
       scannerPreSwapDelayMs: 0,
       scannerPostSwapDelayMs: 0,
       placementNoiseLogs: true,
-      scannerWorkloadMode: 'fixed',
+      scannerWorkloadMode: 'litematic',
       inventoryCycleTestWaitAfterMs: 5000,
       inventoryCycleTestRows: 2,
       dumpPathThinkTimeoutMs: 3000,
@@ -1672,6 +1951,10 @@ function createDefaultConfig() {
       commandPollMs: 3000,
       idleWindowMs: 15000,
       staleMs: 20000
+    },
+    logging: {
+      rotateHours: 12,
+      retentionHours: 72
     }
   }
 }
@@ -1973,6 +2256,7 @@ function mergeUserConfig(base, loaded, options = {}) {
     advanced: { ...base.advanced, ...(loaded.advanced || {}) },
     errorHandling: { ...base.errorHandling, ...(loaded.errorHandling || {}) },
     anchorTranslation: { ...base.anchorTranslation, ...(loaded.anchorTranslation || {}) },
+    logging: { ...(base.logging || {}), ...(loaded.logging || {}) },
     machine: { ...base.machine },
     multiUser: { ...base.multiUser, ...(loaded.multiUser || {}) }
   }
@@ -5097,15 +5381,20 @@ async function repairTargetsInBatches(bot, config, targets, placeRange, label = 
   return { placed, already, skipped }
 }
 
-async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, placeRange) {
+async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, placeRange, label = 'LITEMATIC-ROW') {
   if (!batchTargets.length) return { placed: 0, already: 0, skipped: 0, processed: 0 }
 
   const printer = config.printer || {}
+  const advanced = config.advanced || {}
   const tickMs = Math.max(10, toNumber(printer.fastTraversalTickMs, 40))
   const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
-  const checkpointEveryRows = Math.max(1, toNumber(printer.fastTraversalCheckpointEveryRows, 8))
   const catchupPasses = Math.max(0, toNumber(printer.fastTraversalCatchupPasses, 3))
   const catchupStallMs = Math.max(100, toNumber(printer.fastTraversalCatchupStallMs, 6000))
+  const lineEndSettleMs = Math.max(0, toNumber(advanced.litematicRowSettleMs, 150))
+  const verifyEveryRows = Math.max(1, toNumber(advanced.litematicRowVerifyEveryRows, 2))
+  const rowRepairThreshold = Math.max(1, toNumber(advanced.litematicRowRepairThreshold, 2))
+  const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 150))
+  const minPlaceDistance = Math.max(0, toNumber(printer.minPlaceDistance, 0.8))
   const Vec3 = bot.entity.position.constructor
 
   const byRow = new Map()
@@ -5117,52 +5406,98 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 
   const checkpoints = []
   const rowsWithTargets = rowOrder.filter((row) => byRow.has(row))
-  for (let i = 0; i < rowsWithTargets.length; i += checkpointEveryRows) {
-    const rowTargets = byRow.get(rowsWithTargets[i]) || []
+  for (const row of rowsWithTargets) {
+    const rowTargets = byRow.get(row) || []
     const mid = rowTargets[Math.floor(rowTargets.length / 2)] || rowTargets[0]
-    if (mid) checkpoints.push(mid.position)
+    if (mid) checkpoints.push({ row, position: mid.position, targets: rowTargets })
   }
-  checkpoints.push(batchTargets[batchTargets.length - 1].position)
 
   let active = true
   let placed = 0
   let already = 0
   let skipped = 0
   const processed = new Set()
+  const pendingUntil = new Map()
+
+  const getTargetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
+  const isTargetPlaced = (target) => {
+    const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
+    return actual?.name === target.blockName
+  }
+  const markPlacedTargetsProcessed = (targets) => {
+    for (const target of targets) {
+      if (isTargetPlaced(target)) {
+        processed.add(getTargetKey(target))
+        pendingUntil.delete(getTargetKey(target))
+      }
+    }
+  }
+  const getUnresolvedTargets = (targets) => scanPlacementErrors(bot, targets, {
+    config,
+    logPrefix: `${label}-VERIFY`,
+    logErrors: false,
+    includeUnloaded: false,
+    maxLogs: 0
+  }).map((entry) => entry.target)
+
+  const getCandidates = (botPos, now) => batchTargets
+    .filter((target) => !processed.has(getTargetKey(target)))
+    .filter((target) => {
+      const key = getTargetKey(target)
+      const blockedUntil = pendingUntil.get(key)
+      if (blockedUntil && blockedUntil > now) return false
+      if (blockedUntil && blockedUntil <= now) pendingUntil.delete(key)
+      if (isTargetPlaced(target)) {
+        processed.add(key)
+        already += 1
+        return false
+      }
+      const distance = botPos.distanceTo(new Vec3(target.position.x + 0.5, target.position.y + 0.5, target.position.z + 0.5))
+      return distance <= placeRange && distance > minPlaceDistance
+    })
+    .sort((a, b) => {
+      const da = botPos.distanceTo(new Vec3(a.position.x + 0.5, a.position.y + 0.5, a.position.z + 0.5))
+      const db = botPos.distanceTo(new Vec3(b.position.x + 0.5, b.position.y + 0.5, b.position.z + 0.5))
+      return da - db
+    })
 
   const placementLoop = (async () => {
     while (active) {
+      const now = Date.now()
       const botPos = bot.entity.position
       let placementsThisTick = 0
 
-      const candidates = batchTargets
-        .filter((target) => !processed.has(target))
-        .filter((target) => botPos.distanceTo(new Vec3(target.position.x + 0.5, target.position.y + 0.5, target.position.z + 0.5)) <= placeRange)
-        .sort((a, b) => {
-          const da = botPos.distanceTo(new Vec3(a.position.x + 0.5, a.position.y + 0.5, a.position.z + 0.5))
-          const db = botPos.distanceTo(new Vec3(b.position.x + 0.5, b.position.y + 0.5, b.position.z + 0.5))
-          return da - db
-        })
+      const candidates = getCandidates(botPos, now)
 
       for (const target of candidates) {
         if (placementsThisTick >= maxPerTick) break
-        processed.add(target)
+        const key = getTargetKey(target)
         placementsThisTick += 1
 
         try {
-          const result = await placeTarget(bot, config, target, true)
-          if (result.state === 'placed') placed += 1
-          else if (result.state === 'already') already += 1
-          else {
+          const result = await placeNervScannerTarget(bot, config, target)
+          if (result.state === 'placed') {
+            placed += 1
+            processed.add(key)
+            pendingUntil.delete(key)
+          } else if (result.state === 'already') {
+            already += 1
+            processed.add(key)
+            pendingUntil.delete(key)
+          } else if (result.reason === 'unconfirmed-place') {
+            pendingUntil.set(key, Date.now() + retryCooldownMs)
+          } else {
             skipped += 1
+            processed.add(key)
             if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
-              console.log(`[FAST-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+              console.log(`[${label}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
             }
           }
         } catch (err) {
           skipped += 1
+          pendingUntil.set(key, Date.now() + retryCooldownMs)
           if (config.errorHandling?.logErrors !== false) {
-            console.log(`[FAST-PLACE-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+            console.log(`[${label}-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
           }
         }
       }
@@ -5173,23 +5508,35 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 
   try {
     bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
-    for (const cp of checkpoints) {
-      await bot.pathfinder.goto(new GoalNear(cp.x, cp.y, cp.z, 1))
+    for (let checkpointIndex = 0; checkpointIndex < checkpoints.length; checkpointIndex += 1) {
+      const cp = checkpoints[checkpointIndex]
+      await bot.pathfinder.goto(new GoalNear(cp.position.x, cp.position.y, cp.position.z, 1))
+      if (lineEndSettleMs > 0) {
+        await delay(lineEndSettleMs)
+      }
+
+      markPlacedTargetsProcessed(cp.targets)
+      const shouldVerifyRow = ((checkpointIndex + 1) % verifyEveryRows) === 0 || checkpointIndex === checkpoints.length - 1
+      if (!shouldVerifyRow) continue
+
+      const unresolvedRowTargets = getUnresolvedTargets(cp.targets)
+      if (unresolvedRowTargets.length >= rowRepairThreshold) {
+        console.log(`[${label}-ROW] row=${cp.row} unresolved=${unresolvedRowTargets.length}; local catch-up before advancing.`)
+        const local = await repairTargetsWhileMovingWithStops(bot, config, unresolvedRowTargets, placeRange, `${label}-ROW-${cp.row}`)
+        placed += local.placed
+        already += local.already
+        skipped += local.skipped
+        markPlacedTargetsProcessed(cp.targets)
+      }
     }
 
     for (let pass = 1; pass <= catchupPasses && processed.size < batchTargets.length; pass += 1) {
       let lastProcessed = processed.size
-      console.log(`[FAST-CATCHUP] pass=${pass}/${catchupPasses} remaining=${batchTargets.length - processed.size}`)
+      console.log(`[${label}-CATCHUP] pass=${pass}/${catchupPasses} remaining=${batchTargets.length - processed.size}`)
 
       while (processed.size < batchTargets.length) {
         const botPos = bot.entity.position
-        const remaining = batchTargets
-          .filter((target) => !processed.has(target))
-          .sort((a, b) => {
-            const da = botPos.distanceTo(new Vec3(a.position.x + 0.5, a.position.y + 0.5, a.position.z + 0.5))
-            const db = botPos.distanceTo(new Vec3(b.position.x + 0.5, b.position.y + 0.5, b.position.z + 0.5))
-            return da - db
-          })
+        const remaining = getCandidates(botPos, Date.now())
 
         const next = remaining[0]
         if (!next) break
@@ -5198,15 +5545,25 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
         await delay(catchupStallMs)
 
         if (processed.size <= lastProcessed) {
-          console.log(`[FAST-CATCHUP] stalled pass=${pass} remaining=${batchTargets.length - processed.size}`)
+          console.log(`[${label}-CATCHUP] stalled pass=${pass} remaining=${batchTargets.length - processed.size}`)
           break
         }
         lastProcessed = processed.size
       }
     }
+
+    const unresolvedTargets = getUnresolvedTargets(batchTargets)
+    if (unresolvedTargets.length > 0) {
+      console.log(`[${label}-FINAL] unresolved=${unresolvedTargets.length}; running live repair sweep.`)
+      const finalRepair = await repairTargetsWhileMovingWithStops(bot, config, unresolvedTargets, placeRange, `${label}-FINAL`)
+      placed += finalRepair.placed
+      already += finalRepair.already
+      skipped += finalRepair.skipped
+      markPlacedTargetsProcessed(batchTargets)
+    }
   } catch (err) {
     if (config.errorHandling?.logErrors !== false) {
-      console.log(`[FAST-MOVE-ERROR] Traversal interrupted: ${err?.message || err}`)
+      console.log(`[${label}-MOVE-ERROR] Traversal interrupted: ${err?.message || err}`)
     }
   } finally {
     active = false
@@ -6012,8 +6369,29 @@ async function runPrint(bot, config) {
         batchIndex: Math.floor((i + j) / Math.max(1, toNumber(linesPerRun, 1))) + 1
       })
 
-      if (printer.fastTraversalEnabled === true) {
-        const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'fixed').toLowerCase()
+      const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'litematic').toLowerCase()
+      const useLitematicRowMode = scannerWorkloadMode === 'litematic' || scannerWorkloadMode === 'reactive'
+
+      if (useLitematicRowMode) {
+        const result = await runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, placeRange, 'LITEMATIC-ROW')
+        placed += result.placed
+        already += result.already
+        skipped += result.skipped
+        processedInRun += batchTargets.length
+        if (placementNoiseLogsEnabled(config)) {
+          console.log(`[LITEMATIC-ROW-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} processed=${result.processed}/${batchTargets.length}`)
+        }
+        if (progressEnabled) {
+          saveProgress('printing', {
+            state: 'printing_batch',
+            action: 'batch-complete',
+            colBatch: colBatch.join(','),
+            placed,
+            already,
+            skipped
+          })
+        }
+      } else if (printer.fastTraversalEnabled === true) {
         const result = scannerWorkloadMode === 'time'
           ? await placementWorkload.runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide)
           : await placementWorkload.runNervScannerPlacementBatch(bot, config, batchTargets, startOnNorthSide)
@@ -10544,7 +10922,9 @@ function runSingleSession(config, sessionNumber) {
 
         if (attempts > 0 && attempts % 10 === 0) {
           const reason = runtimeClassification.platform ? 'platform-detected' : (isPositionUsable(p) ? 'not near platform yet' : 'missing or resetting')
-          console.log(`[SPAWN] Coordinates ${reason}... (${attempts}/${maxAttempts}) p=${JSON.stringify(p)} state=${runtimeClassification.state}`)
+          logThrottled(`spawn-coordinates-${bot?.username || 'bot'}`, `[SPAWN] Coordinates ${reason}... (${attempts}/${maxAttempts}) p=${JSON.stringify(p)} state=${runtimeClassification.state}`, {
+            intervalMs: 15000
+          })
         }
         await delay(500)
         attempts++
@@ -10567,6 +10947,7 @@ function runSingleSession(config, sessionNumber) {
       printerStarted = true
       successfulStartup = true
       bot.__nervPlatformWatchdogActive = true
+      dashboardRuntime?.setLastError('')
       dashboardRuntime?.setReconnectState('idle')
       const allowJump = printer.allowJump !== false
 
@@ -10656,7 +11037,9 @@ function runSingleSession(config, sessionNumber) {
         return
       }
       if (spawnedCount < reqSpawn) {
-        console.log(`[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`)
+        logThrottled(`spawn-event-${bot?.username || 'bot'}`, `[SPAWN] Event received (${spawnedCount}/${reqSpawn}). Waiting for more...`, {
+          intervalMs: 10000
+        })
         if (!spawnFallbackTimer) {
           const fallbackMs = getTransferWaitReconnectMs(config)
           spawnFallbackTimer = setTimeout(() => {

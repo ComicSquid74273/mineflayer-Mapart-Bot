@@ -70,6 +70,8 @@ npm run start:nerv:local
 6. Check logs:
 
 - `logs/nerv-printer.log`
+- active `.log` files rotate every 12 hours by default and archived `.log` files older than 72 hours are pruned
+- `logs/nerv-printer-progress.json` is not part of log cleanup and is kept for resume state
 
 ## 1. Start To Finish Setup
 
@@ -108,6 +110,7 @@ node nerv-printer.js
 7. Watch logs:
 
 - `logs/nerv-printer.log`
+- rotated archives stay in `logs/` as `nerv-printer-YYYYMMDD-HHMMSSZ.log`
 - `logs/nerv-printer-progress.json` (if resume is enabled)
 
 ## 2. Config Source Rules
@@ -641,6 +644,8 @@ On successful completion:
 Main file:
 
 - `logs/nerv-printer.log`
+- per-bot files: `logs/nerv-printer-<bot>.log`
+- archived `.log` files are rotated every `logging.rotateHours` hours and pruned after `logging.retentionHours` hours
 
 Useful tags:
 

@@ -3,7 +3,7 @@
     "usernames": [
       {
         "name": "ComicSquid007",
-        "enabled": true,
+        "enabled": false,
         "auth": "microsoft"
       },
       {
@@ -14,19 +14,19 @@
           },
           {
             "name": "ComicBot002",
-            "enabled": false,
+            "enabled": true,
             "auth": "offline",
             "loginPassword": "gjZq56kCumgKp"
           },
           {
             "name": "ComicBot003",
-            "enabled": false,
+            "enabled": true,
             "auth": "offline",
             "loginPassword": "hGMsqs8vPt6w3"
           }
 
     ],
-    "version": "1.20",
+    "version": "1.21.8",
     "profilesFolder": "./auth-cache",
     "viewDistance": "normal",
     "checkTimeoutInterval": 60000,
@@ -202,13 +202,17 @@
     "inputMode": "nbt",
     "planFile": "./mapart-plan.json",
     "machineConfigProfile": "carpet",
-    "machineConfigFile": "./nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json",
+    "machineConfigFile": "./nerv-printer-config/_configs/carpet-printer-config.json",
     "resumeProgress": true,
     "progressFile": "./logs/nerv-printer-progress.json",
     "progressSaveEvery": 10,
     "moveToFinishedFolder": true,
     "finishedFolder": "./finished-maps",
     "disableOnFinished": true
+  },
+  "logging": {
+    "rotateHours": 12,
+    "retentionHours": 72
   },
   "printer": {
     "startOnSpawn": true,
@@ -327,10 +331,13 @@
     "scannerAdaptiveMaxPlaceDelayMs": 50,
     "scannerAdaptiveMinPlaceDelayMs": 6,
     "scannerRetryCooldownMs": 150,
+    "litematicRowSettleMs": 150,
+    "litematicRowVerifyEveryRows": 2,
+    "litematicRowRepairThreshold": 2,
     "scannerPreSwapDelayMs": 10,
     "scannerPostSwapDelayMs": 10,
     "placementNoiseLogs": false,
-    "scannerWorkloadMode": "time",
+    "scannerWorkloadMode": "litematic",
     "inventoryCycleTestWaitAfterMs": 5000,
     "inventoryCycleTestRows": 2,
     "repairTestWaitAfterMs": 5000,
@@ -357,23 +364,24 @@
     "logErrors": true,
     "errorAction": "repair"
   },
-  "anchorTranslation": {
+ 
+"anchorTranslation": {
     "enabled": true,
     "sourceAnchor": {
-      "x": -706,
-      "y": -9,
+      "x": -450,
+      "y": 0,
       "z": -962
     },
     "targetAnchor": {
-      "x": 8765118,
-      "y": 66,
-      "z": 5890366
+      "x": -450,
+      "y": 0,
+      "z": -962
     }
-  },
+},
   "multiUser": {
     "enabled": true,
     "mode": "file",
-    "syncFolder": "./logs/nerv-printer-sync",
+    "syncFolder": "./logs/printer-sync",
     "requireAllReady": true,
     "recoveryMarginBlocks": 20,
     "recoveryDelayMs": 2000,
