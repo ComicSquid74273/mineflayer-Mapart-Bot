@@ -5,7 +5,19 @@ This repository has two entrypoints:
 1. `index.js` for general bot logic.
 2. `nerv-printer.js` for Nerv-style carpet printing.
 
+Both root files are compatibility wrappers. The actual source now lives under `src/`:
+
+- `src/nerv-printer/cli.js` - main NERV printer runtime.
+- `src/nerv-printer/placement/` - placement workload helpers.
+- `src/nerv-printer/diagnostics/` - rescan, state, and verification helpers.
+- `src/broadcast/cli.js` - general/broadcast bot runtime.
+- `src/broadcast/test-cli.js` - broadcast test runner.
+- `docs/` - notes such as 6b6t and anchor information.
+- `assets/schematics/` - schematic/litematic assets.
+
 This guide documents `nerv-printer.js` from setup to full configuration reference.
+
+Desktop dashboard workflow guide: `docs/DESKTOP-DASHBOARD-SETUP.md`
 
 ## Quick Start (2 Minutes)
 
@@ -23,7 +35,7 @@ npm install
 
 - Add `.nbt` into `nerv-printer-config/`
 
-4. Tune local behavior in `nerv-printer-config.json`:
+4. Tune local behavior in `nerv-printer-config/_configs/nerv-printer-config.json`:
 
 - `printer.printOffset`
 - `files.resumeProgress`
@@ -41,6 +53,14 @@ For 6b6t:
 npm run start:nerv:6b6t
 ```
 
+For file-only logs with no bot logs printed to the terminal:
+
+```bash
+node nerv-printer.js --connection=6b6t --disable-logs
+```
+
+Aliases: `--disableLogs`, `--no-terminal-logs`, `--log-to-file-only`, `--silent`, `--quiet`.
+
 For localhost explicitly:
 
 ```bash
@@ -50,6 +70,8 @@ npm run start:nerv:local
 6. Check logs:
 
 - `logs/nerv-printer.log`
+- active `.log` files rotate every 12 hours by default and archived `.log` files older than 72 hours are pruned
+- `logs/nerv-printer-progress.json` is not part of log cleanup and is kept for resume state
 
 ## 1. Start To Finish Setup
 
@@ -71,7 +93,7 @@ npm install
 
 5. Tune runtime behavior in:
 
-- `nerv-printer-config.json`
+- `nerv-printer-config/_configs/nerv-printer-config.json`
 
 6. Start printer:
 
@@ -88,6 +110,7 @@ node nerv-printer.js
 7. Watch logs:
 
 - `logs/nerv-printer.log`
+- rotated archives stay in `logs/` as `nerv-printer-YYYYMMDD-HHMMSSZ.log`
 - `logs/nerv-printer-progress.json` (if resume is enabled)
 
 ## 2. Config Source Rules
@@ -95,17 +118,18 @@ node nerv-printer.js
 When `nerv-printer-config/_configs/carpet-printer-config.json` exists:
 
 1. Machine/platform/chest data comes from the imported carpet file.
-2. Non-machine overrides come from `nerv-printer-config.json`.
+2. Non-machine overrides come from `nerv-printer-config/_configs/nerv-printer-config.json`.
 
 When imported carpet file does not exist:
 
-1. `nerv-printer-config.json` is used directly.
+1. `nerv-printer-config/_configs/nerv-printer-config.json` is used directly.
+2. The legacy root path `nerv-printer-config.json` is still accepted as a fallback.
 
 Do not duplicate machine coordinates in local config when imported carpet config is present.
 
 ## 3. Complete Local Config Reference
 
-All fields below are from `nerv-printer-config.json`. Values shown are the current working config values in this repo, not universal defaults.
+All fields below are from `nerv-printer-config/_configs/nerv-printer-config.json`. Values shown are the current working config values in this repo, not universal defaults.
 
 Tuning rule of thumb:
 
@@ -122,8 +146,13 @@ Connection and Mineflayer session settings.
 |---|---:|---|---|
 | `bot.host` | `127.0.0.1` | Server host/IP. | Use LAN/server IP for remote server. |
 | `bot.port` | `54321` | Minecraft server port. | Must match server/proxy port. |
-| `bot.username` | `MapartBot` | Single/default username. | For one bot, change this or the first `bot.usernames` entry. |
-| `bot.usernames` | `["MapartBot"]` | Simple roster. One name runs one bot; 2+ names automatically use multibot. | This is the easiest place to enter accounts. |
+| `bot.usernames` | account list | Simple account roster. Entries can be strings or account objects. | This is the easiest place to enter accounts. |
+| `bot.usernames[].name` | `MapartBot` | Account username/email for one roster entry. | Use your Microsoft account identity for 6b6t. |
+| `bot.usernames[].enabled` | `true` / `false` | Whether this account is active. | Single-bot mode picks the first enabled account; multibot uses all enabled accounts. |
+| `bot.usernames[].auth` | optional | `offline` or `microsoft` per account. | Useful when some accounts are local/offline and some are Microsoft. |
+| `bot.usernames[].profilesFolder` | optional | Per-account auth cache folder. | Usually `./auth-cache`; can split folders if needed. |
+| `bot.usernames[].loginPassword` | optional | Cracked/offline 6b6t `/login` password. | Used only by the 6b6t chat-login helper for offline accounts. |
+| `bot.username` | fallback only | Legacy single/default username if `bot.usernames` is missing. | Prefer `bot.usernames`; no need to set both. |
 | `bot.auth` | `offline` | `offline`, `microsoft`. | Use `offline` for local/offline test server. |
 | `bot.version` | `1.21.8` | Exact MC version or sometimes `auto`. | Exact version is safer with Mineflayer. |
 | `bot.profilesFolder` | `./auth-cache` | Auth/session cache folder. | Only relevant for authenticated accounts. |
@@ -142,6 +171,20 @@ Selection order:
 1. CLI: `--connection=6b6t` or `--server=6b6t`
 2. Environment: `NERV_CONNECTION=6b6t`
 3. Config: `connection.active`
+
+Username override order:
+
+1. CLI: `--usernames=Account1,Account2` or `--username=Account1`
+2. Environment: `NERV_USERNAMES=Account1,Account2` or `NERV_USERNAME=Account1`
+3. Config: `bot.usernames`
+4. Fallback: `bot.username`
+
+Connection/auth precedence:
+
+1. Start with the selected `connection` profile.
+2. Apply the enabled `bot.usernames[]` account entry.
+3. Only account auth fields like `auth` and `profilesFolder` win over the profile.
+4. Host, port, version, view distance, timeout, and reconnect stay in the selected `connection` profile.
 
 Available scripts:
 
@@ -165,11 +208,16 @@ npm run start:nerv:6b6t
 | `connection.profiles.local.bot.reconnect.maxAttempts` | `25` | Local reconnect attempt count. | Raise for long unattended tests. |
 | `connection.profiles.6b6t.bot.host` | `alt.6b6t.org` | 6b6t endpoint. | Change if your 6b6t connection/proxy uses a different address. |
 | `connection.profiles.6b6t.bot.port` | `25565` | 6b6t port. | Default Minecraft port. |
-| `connection.profiles.6b6t.bot.auth` | `microsoft` | Microsoft auth for public server. | Make sure `multiUser.bots[].name` matches the accounts you want to launch. |
-| `connection.profiles.6b6t.bot.version` | `auto` | Let Mineflayer negotiate version. | Use exact version only if 6b6t requires it. |
+| `connection.profiles.6b6t.bot.auth` | `microsoft` | Microsoft auth for public server. | Make sure `bot.usernames` contains the accounts you want to launch. |
+| `connection.profiles.6b6t.bot.version` | `1.20` | Server protocol version for 6b6t. | Use exact version when `auto` does not join reliably. |
 | `connection.profiles.6b6t.bot.profilesFolder` | `./auth-cache` | Microsoft auth cache folder. | Keep stable so accounts stay logged in. |
-| `connection.profiles.6b6t.bot.viewDistance` | `short` | 6b6t view distance. | Lower reduces network load. |
+| `connection.profiles.6b6t.bot.viewDistance` | `normal` | 6b6t view distance. | Lower reduces network load; raise only if chunk visibility is too low. |
 | `connection.profiles.6b6t.bot.checkTimeoutInterval` | `90000` | 6b6t timeout in ms. | Higher tolerates public-server lag spikes. |
+| `connection.profiles.6b6t.bot.requiredSpawnCountBeforeStartup` | `2` | Wait for multiple spawn events before starting. | Helps with proxy/backend handoff on public servers. |
+| `connection.profiles.6b6t.bot.requiredSpawnFallbackSeconds` | `25` | If the second spawn event never arrives, continue startup after this many seconds. | Prevents hanging forever on servers that emit only one spawn event. |
+| `connection.profiles.6b6t.bot.spawnPositionTimeoutSeconds` | `180` | Max wait for real non-zero coordinates after spawn. | If coords never load, bot reconnects instead of starting at fake `0,0`. |
+| `connection.profiles.6b6t.bot.waitForPlatformPositionOnSpawn` | `true` | Wait until spawn coordinates are inside the configured platform bounds. | Prevents temporary proxy coords like `500,500` from making the bot idle too early. |
+| `connection.profiles.6b6t.bot.seedPositionFromPlatformOnSpawn` | `true` | If Mineflayer position stays NaN/null after spawn but the player is on-platform, seed internal coords from the platform config. | Handles proxy/server-restored sessions where Mineflayer never updates its local position. |
 | `connection.profiles.6b6t.bot.reconnect.enabled` | `true` | 6b6t reconnect enabled. | Keep enabled for queue/kick/restart recovery. |
 | `connection.profiles.6b6t.bot.reconnect.delayMs` | `30000` | Slower reconnect for public server. | Helps avoid reconnect spam/anti-bot flags. |
 | `connection.profiles.6b6t.bot.reconnect.maxAttempts` | `50` | 6b6t reconnect attempt count. | Higher for long unattended runs. |
@@ -227,6 +275,21 @@ Print movement, placement, and row/batch behavior.
 
 Advanced is grouped by behavior because this section has many tuning knobs.
 
+#### 3.4.0 Network And Hunger
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `advanced.antiHunger.enabled` | `true` | Enables Meteor-style AntiHunger packet spoofing. | On by default; set `false` only for debugging movement/server issues. |
+| `advanced.antiHunger.sprint` | `true` | Cancels outgoing start-sprinting action packets. | Reduces hunger from sprint packet state. |
+| `advanced.antiHunger.onGround` | `true` | Spoofs movement packet ground flag while safely on ground. | First ground packet after landing is preserved so fall damage is not suppressed incorrectly. |
+| `advanced.platformWatchdogEnabled` | `true` | Pauses pathing/placing if the bot leaves platform bounds or enters limbo coords. | Keep enabled on public servers/restarts. |
+| `advanced.platformWatchdogPollMs` | `1000` | How often the runtime platform watchdog checks position. | Lower reacts faster; higher is calmer. |
+| `advanced.platformHoldLogMs` | `5000` | Log interval while waiting in platform hold. | Raise if logs are too noisy during restarts. |
+| `advanced.startupSupportProbeEnabled` | `true` | Wait for platform support blocks to be visible before restock/print starts. | Prevents `support=0/64` from running inventory logic too early. |
+| `advanced.startupSupportMinRatio` | `0.5` | Minimum startup support ratio required to continue. | `0.5` means at least half the sampled supports must be loaded. |
+| `advanced.startupSupportPollMs` | `5000` | Wait between startup support rechecks. | Raise on very laggy servers. |
+| `advanced.startupSupportLogMs` | `15000` | Log interval while waiting for startup support. | Raise to reduce log noise. |
+
 #### 3.4.1 Inventory, Restock, And Dump
 
 | Key | Current | Options / Meaning | Tuning hint |
@@ -259,6 +322,8 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.postPrintResetEnabled` | `true` | Run reset after post-print. | Disable if reset machine is not configured. |
 | `advanced.postPrintXpRefillEnabled` | `true` | Refill/handle XP for post-print actions. | Useful when cartography/rename needs XP. |
 | `advanced.postPrintRenameMapEnabled` | `true` | Rename map during post-print. | Disable if anvil/name flow is not wanted. |
+| `advanced.postPrintRequireRenameBeforeStore` | `false` | If `true`, do not deposit filled maps unless rename is verified. If `false`, store anyway after rename retries fail. | Keep `false` for fully autonomous runs; use `true` only when unrenamed maps must never enter finished chest. |
+| `advanced.postPrintRenameAttempts` | `3` | Number of anvil rename attempts before holding the map for retry. | Raise on laggy servers if rename verification is late. |
 | `advanced.postPrintMinXpLevel` | `2` | Minimum XP before refill behavior. | Raise if rename costs more. |
 | `advanced.postPrintTargetXpLevel` | `3` | Desired XP target after refill. | Raise for repeated post-print actions. |
 | `advanced.postPrintSkipResetInteraction` | `false` | Skip reset interaction while keeping workflow. | Useful for testing post-print without resetting. |
@@ -379,23 +444,35 @@ File-based master/slave coordination. No in-game DM/chat system is required.
 
 Simple rule:
 
-1. Put one account in `bot.usernames` for one bot.
-2. Put multiple accounts in `bot.usernames` for multibot.
-3. `multiUser` is now mostly timing/coordination settings. You usually do not need to edit `multiUser.bots`.
+1. Put all accounts in `bot.usernames`.
+2. Set `enabled: true` for accounts you want active.
+3. If `multiUser.enabled` is `false`, the printer uses the first enabled account only.
+4. If `multiUser.enabled` is `true`, 2+ enabled accounts automatically use multibot.
+5. `multiUser` is mostly timing/coordination settings. You usually do not need to edit `multiUser.bots`.
 
 Examples:
 
 ```json
 "bot": {
-  "username": "MyMainAccount",
-  "usernames": ["MyMainAccount"]
+  "usernames": [
+    {
+      "name": "MyMainAccount",
+      "enabled": true,
+      "auth": "microsoft"
+    },
+    { "name": "MyAlt1", "enabled": false },
+    { "name": "MyAlt2", "enabled": false }
+  ]
 }
 ```
 
 ```json
 "bot": {
-  "username": "MyMainAccount",
-  "usernames": ["MyMainAccount", "MyAlt1", "MyAlt2"]
+  "usernames": [
+    { "name": "MyMainAccount", "enabled": true, "auth": "microsoft" },
+    { "name": "MyAlt1", "enabled": true, "auth": "microsoft" },
+    { "name": "MyAlt2", "enabled": true, "auth": "microsoft" }
+  ]
 }
 ```
 
@@ -441,7 +518,34 @@ Verify without connecting:
 npm run test:multi-user-plan
 ```
 
-### 3.7 `anchorTranslation` Diamond Block
+### 3.7 `dashboard`
+
+Use this only when running the separate `dashboard-service` project.
+
+This is a compact operator integration layer, not a full Mineflayer web inspector.
+
+When `dashboard-service` is running, open `http://127.0.0.1:4080/` for the browser dashboard UI.
+
+Current behavior:
+
+1. The bot posts compact status snapshots to the dashboard service.
+2. The bot polls the dashboard service for `start`, `stop`, and `assign-nbt` commands.
+3. Assigned NBT files are downloaded into `files.nbtFolder`.
+4. In direct mode, start and stop control the print loop for an already running bot process.
+5. Starting a fully stopped process still requires an external supervisor or later host-agent layer.
+6. Use `npm run start:nerv:wait` or `npm run start:nerv:6b6t:wait` to launch the process, connect, and wait idle for dashboard or terminal `start` and `stop` commands.
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `dashboard.enabled` | `false` | Enable direct bot-to-dashboard integration. | Keep `false` unless the dashboard service is running. |
+| `dashboard.serviceUrl` | `http://127.0.0.1:4080` | Base URL of the dashboard service. | Point this to your deployed dashboard host. |
+| `dashboard.hostLabel` | empty | Logical host label sent with status updates. | Set this on multi-host deployments so operators can distinguish machines. |
+| `dashboard.heartbeatMs` | `5000` | Status POST interval in ms. | Lower gives fresher status; higher reduces traffic. |
+| `dashboard.commandPollMs` | `3000` | Command polling interval in ms. | Lower reacts faster to operator actions. |
+| `dashboard.idleWindowMs` | `15000` | Idle classification window in ms. | Raise if the bot often pauses briefly between phases. |
+| `dashboard.staleMs` | `20000` | Stale classification window in ms. | Raise if public-server lag causes long apparent inactivity. |
+
+### 3.8 `anchorTranslation` Diamond Block
 
 Use this to relocate the full fixed machine layout by one anchor delta.
 
@@ -540,6 +644,8 @@ On successful completion:
 Main file:
 
 - `logs/nerv-printer.log`
+- per-bot files: `logs/nerv-printer-<bot>.log`
+- archived `.log` files are rotated every `logging.rotateHours` hours and pruned after `logging.retentionHours` hours
 
 Useful tags:
 
@@ -574,15 +680,25 @@ From `package.json`:
 6. `npm run clean` removes install/auth caches
 7. `npm run clean:install` clean install cycle
 
-## 10. Minimal Example `nerv-printer-config.json`
+## 10. Minimal Example `nerv-printer-config/_configs/nerv-printer-config.json`
 
 ```json
 {
   "bot": {
     "host": "127.0.0.1",
     "port": 54321,
-    "username": "MapartBot",
-    "usernames": ["MapartBot"],
+    "usernames": [
+      {
+        "name": "MapartBot",
+        "enabled": true,
+        "auth": "offline"
+      },
+      {
+        "name": "MapartBot1",
+        "enabled": false,
+        "auth": "microsoft"
+      }
+    ],
     "auth": "offline",
     "version": "1.21.8",
     "profilesFolder": "./auth-cache",

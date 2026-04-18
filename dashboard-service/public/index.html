@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mapart Bot Dashboard</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Headless operators console</p>
+        <h1>Mapart Bot Dashboard</h1>
+        <p class="hero-copy">Live bot status, fleet controls, and NBT delivery from one page.</p>
+      </div>
+      <div class="hero-actions">
+        <div class="auth-box">
+          <input id="operatorUsername" type="text" placeholder="operator">
+          <input id="operatorPassword" type="password" placeholder="password">
+          <button id="loginButton" class="ghost-button" type="button">Login</button>
+          <button id="logoutButton" class="ghost-button" type="button">Logout</button>
+          <span id="authStatus" class="timestamp">Viewer mode</span>
+        </div>
+        <button id="refreshButton" class="ghost-button" type="button">Refresh</button>
+        <button id="startAllButton" class="accent-button" type="button" data-permission-needed="canOperate">Start Printing All</button>
+        <button id="stopAllButton" class="danger-button" type="button" data-permission-needed="canOperate">Stop Printing All</button>
+      </div>
+    </header>
+
+    <main class="layout-grid">
+      <section class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Fleet</p>
+            <h2>Grouped Fleet</h2>
+          </div>
+          <div class="status-inline">
+            <span id="serviceStatus" class="status-pill status-neutral">Checking service</span>
+            <span id="lastRefresh" class="timestamp">Never</span>
+          </div>
+        </div>
+        <div id="botSummary" class="summary-strip"></div>
+        <div id="botsGrid" class="bot-grid">
+          <article class="empty-card">
+            <h3>No bot data yet</h3>
+            <p>Start the dashboard service and at least one bot with dashboard integration enabled.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Delivery</p>
+            <h2>Upload NBT To Node</h2>
+          </div>
+        </div>
+        <form id="uploadForm" class="stack-form">
+          <label>
+            <span>NBT file</span>
+            <input id="fileInput" name="file" type="file" accept=".nbt" multiple required>
+          </label>
+          <label>
+            <span>Target node</span>
+            <select id="uploadNodeSelect" required>
+              <option value="">Select node</option>
+            </select>
+          </label>
+          <label>
+            <span>Uploaded by</span>
+            <input id="uploadedByInput" name="uploadedBy" type="text" placeholder="operator-1">
+          </label>
+          <label>
+            <span>Notes</span>
+            <textarea id="notesInput" name="notes" rows="3" placeholder="Optional assignment note"></textarea>
+          </label>
+          <button class="accent-button" type="submit">Upload File</button>
+          <p id="uploadStatus" class="hint">No upload in progress.</p>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Assignments</p>
+            <h2>Reassign Existing Upload</h2>
+          </div>
+        </div>
+        <form id="assignForm" class="stack-form">
+          <label>
+            <span>File</span>
+            <select id="fileSelect" required>
+              <option value="">Select uploaded file</option>
+            </select>
+          </label>
+          <label>
+            <span>Node</span>
+            <select id="nodeSelect" required>
+              <option value="">Select node</option>
+            </select>
+          </label>
+          <button class="accent-button" type="submit">Assign To Node</button>
+        </form>
+        <div id="filesList" class="file-list"></div>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Admin</p>
+            <h2>Operators</h2>
+          </div>
+        </div>
+        <form id="operatorForm" class="stack-form">
+          <label>
+            <span>Username</span>
+            <input id="managedUsername" type="text" placeholder="new-operator" required>
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="managedPassword" type="text" placeholder="leave blank to keep current password on update">
+          </label>
+          <label>
+            <span>Role</span>
+            <select id="managedRole">
+              <option value="viewer">viewer</option>
+              <option value="operator">operator</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          <div class="checkbox-grid">
+            <label class="checkbox-row"><input id="permViewLogs" type="checkbox"> <span>Allow log downloads</span></label>
+            <label class="checkbox-row"><input id="permOperate" type="checkbox"> <span>Allow bot and file operations</span></label>
+            <label class="checkbox-row"><input id="permDeleteNodeFiles" type="checkbox"> <span>Allow node file deletes</span></label>
+            <label class="checkbox-row"><input id="permManageOperators" type="checkbox"> <span>Allow operator management</span></label>
+          </div>
+          <button class="accent-button" type="submit" data-permission-needed="canManageOperators">Create Or Update Operator</button>
+          <p id="operatorStatus" class="hint">Admin only. This writes directly to the operators JSON file.</p>
+        </form>
+        <div id="operatorsList" class="file-list">
+          <article class="empty-card">
+            <h3>Admin only</h3>
+            <p>Log in with an operator that can manage operators to view and edit accounts.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Nodes</p>
+            <h2>Node NBT Files</h2>
+          </div>
+        </div>
+        <div id="nodesGrid" class="node-grid">
+          <article class="empty-card">
+            <h3>No node inventory yet</h3>
+            <p>Once a node reports its shared NBT folder, the files will appear here.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Diagnostics</p>
+            <h2>Log Downloads</h2>
+          </div>
+        </div>
+        <div id="logsList" class="file-list">
+          <article class="empty-card">
+            <h3>Login required</h3>
+            <p>Authenticate as a viewer, operator, or admin to list and download log files.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Activity</p>
+            <h2>Operator Log</h2>
+          </div>
+        </div>
+        <div id="eventLog" class="event-log"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

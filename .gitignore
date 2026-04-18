@@ -10,6 +10,9 @@ reference/
 # Node-generated dependencies
 node_modules/
 
+# Dashboard service runtime data
+dashboard-service/data/
+
 # Generated finished map outputs
 finished-maps/
 
@@ -23,3 +26,9 @@ finished-maps/
 *_old.json
 nerv-printer-config.old.json
 nerv-printer-config.backup.json
+
+docs/6b6t.txt
+docs/anchorinformation.txt
+docs/EC2-DEPLOY.md
+
+D:\Projects\mapart-bot\dashboard-service\data\operators.json

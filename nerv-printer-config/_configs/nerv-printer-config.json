@@ -1,0 +1,396 @@
+{
+  "bot": {
+    "usernames": [
+      {
+        "name": "ComicSquid007",
+        "enabled": false,
+        "auth": "microsoft"
+      },
+      {
+            "name": "ComicBot001",
+            "enabled": true,
+            "auth": "offline",
+            "loginPassword": "zKoUufW3hb71u"
+          },
+          {
+            "name": "ComicBot002",
+            "enabled": true,
+            "auth": "offline",
+            "loginPassword": "gjZq56kCumgKp"
+          },
+          {
+            "name": "ComicBot003",
+            "enabled": true,
+            "auth": "offline",
+            "loginPassword": "hGMsqs8vPt6w3"
+          }
+
+    ],
+    "version": "1.21.8",
+    "profilesFolder": "./auth-cache",
+    "viewDistance": "normal",
+    "checkTimeoutInterval": 60000,
+    "reconnect": {
+      "enabled": true,
+      "delayMs": 10000,
+      "maxAttempts": 25
+    }
+  },
+  "connection": {
+    "active": "local",
+    "profiles": {
+      "local": {
+        "bot": {
+          "host": "127.0.0.1",
+          "port": 54321,
+          "auth": "offline",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "normal",
+          "checkTimeoutInterval": 60000,
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 15000,
+            "maxAttempts": 25
+          }
+        }
+      },
+      "6b6t": {
+        "bot": {
+          "host": "alt3.6b6t.org",
+          "hosts": [
+            "alt3.6b6t.org",
+            "alt.6b6t.org",
+            "play.6b6t.org",
+            "alt2.6b6t.org"
+          ],
+          "port": 25565,
+          "auth": "microsoft",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "normal",
+          "checkTimeoutInterval": 90000,
+          "requiredSpawnCountBeforeStartup": 3,
+          "requiredSpawnFallbackSeconds": 90,
+          "spawnPositionTimeoutSeconds": 240,
+          "spawnMissingPositionReconnectSeconds": 75,
+          "waitForPlatformPositionOnSpawn": true,
+          "seedPositionFromPlatformOnSpawn": true,
+          "platformRecoveryTpa": {
+            "enabled": true,
+            "command": "/tpa ComicSquid74273",
+            "retryMs": 300000
+          },
+          "chatLogin": {
+            "enabled": true,
+            "offlineOnly": true,
+            "command": "/login",
+            "promptPatterns": [
+              "please login with the command",
+              "/login <password>"
+            ],
+            "successPatterns": [
+              "you are now logged in",
+              "successfully logged in"
+            ],
+            "minDelayMs": 750,
+            "retryMs": 5000,
+            "maxAttempts": 5
+          },
+          "lobbyPortal": {
+            "enabled": true,
+            "accountMode": "auto",
+            "maxAttempts": 3,
+            "pathTimeoutMs": 60000,
+            "portalEntryMs": 3000,
+            "waitAfterPortalMs": 12000,
+            "portalSearchRadius": 96,
+            "lobbyRegions": [
+              {
+                "name": "lobby-1",
+                "type": "disk",
+                "action": "wait-transfer",
+                "centerX": 500,
+                "centerZ": 500,
+                "radius": 192
+              },
+              {
+                "name": "lobby-2",
+                "type": "disk",
+                "action": "wait-transfer",
+                "centerX": 1000,
+                "centerZ": 1000,
+                "radius": 192
+              },
+              {
+                "name": "login-portal-neg999",
+                "type": "box",
+                "action": "login-portal",
+                "x": -1000,
+                "y": 100,
+                "z": -1000,
+                "radius": 16
+              },
+              {
+                "name": "spawn-portal-overworld-0",
+                "type": "box",
+                "action": "spawn-portal",
+                "x": 0,
+                "y": 20,
+                "z": 4,
+                "radius": 24
+              },
+              {
+                "name": "spawn-portal-overworld-33",
+                "type": "box",
+                "action": "spawn-portal",
+                "x": 33,
+                "y": 61,
+                "z": -53,
+                "radius": 16
+              }
+            ],
+            "spawnDisk": {
+              "enabled": true,
+              "centerX": 0,
+              "centerZ": 4,
+              "radius": 24,
+              "waitBeforeMoveMs": 2500,
+              "backoffWhenNearWaypoint": true,
+              "backoffBlocks": 5,
+              "backoffTriggerRadius": 12,
+              "backoffGoalRange": 1.5,
+              "twoStepRoute": false,
+              "useConfiguredPortalTarget": true,
+              "waypoint": {
+                "x": 0,
+                "y": 20,
+                "z": 4
+              },
+              "portal": {
+                "x": 0,
+                "y": 20,
+                "z": -16
+              },
+              "goalRange": 2
+            },
+            "loginPortal": {
+              "enabled": true,
+              "x": -1000,
+              "y": 100,
+              "z": -1000,
+              "radius": 16,
+              "waitBeforeMoveMs": 5000,
+              "portalTargetZ": -989,
+              "goalRange": 2
+            }
+          },
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 11000,
+            "maxAttempts": 50
+          }
+        },
+        "multiUser": {
+          "joinStaggerMs": 15000,
+          "startStaggerMs": 6000,
+          "staleStateMs": 60000,
+          "heartbeatMs": 4000
+        }
+      }
+    }
+  },
+  "files": {
+    "inputMode": "nbt",
+    "planFile": "./mapart-plan.json",
+    "machineConfigProfile": "carpet",
+    "machineConfigFile": "./nerv-printer-config/_configs/carpet-printer-config.json",
+    "resumeProgress": true,
+    "progressFile": "./logs/nerv-printer-progress.json",
+    "progressSaveEvery": 10,
+    "moveToFinishedFolder": true,
+    "finishedFolder": "./finished-maps",
+    "disableOnFinished": true
+  },
+  "logging": {
+    "rotateHours": 12,
+    "retentionHours": 72
+  },
+  "printer": {
+    "startOnSpawn": true,
+    "startDelayMs": 1500,
+    "allowJump": false,
+    "placeWhileSprinting": false,
+    "postPrintTestOnly": false,
+    "printOffset": {
+      "x": 0,
+      "y": 0,
+      "z": -1
+    },
+    "linesPerRun": 3,
+    "placeRange": 4,
+    "minPlaceDistance": 0.8,
+    "ignoredBlocks": [],
+    "placeDelayMs": 0,
+    "rotate": false,
+    "northToSouth": true,
+    "mapFillSquareSize": 4,
+    "sprintMode": "off",
+    "fastTraversalEnabled": false,
+    "fastTraversalTickMs": 5,
+    "fastTraversalCheckpointEveryRows": 10,
+    "fastTraversalCatchupPasses": 2,
+    "fastTraversalCatchupStallMs": 2000,
+    "maxPlacementsPerTick": 15
+  },
+  "advanced": {
+    "antiHunger": {
+      "enabled": true,
+      "sprint": false,
+      "onGround": true
+    },
+    "meteorSceneAwareness": {
+      "enabled": true,
+      "loginPortalEnabled": false,
+      "file": "d:\\PrismLauncher\\instances\\Bot 001 1.0.0(1)\\minecraft\\spatial-awareness\\meteor-scene-signatures.json",
+      "minScore": 0.72,
+      "scanRadius": 20,
+      "verticalRadius": 5,
+      "labelHints": {
+        "spawn1": "login-portal",
+        "spawn2": "spawn-portal",
+        "printer-platform": "platform"
+      }
+    },
+    "platformWatchdogEnabled": true,
+    "platformWatchdogPollMs": 1000,
+    "platformHoldLogMs": 5000,
+    "startupSupportProbeEnabled": true,
+    "startupSupportMinRatio": 0.5,
+    "startupSupportPollMs": 5000,
+    "startupSupportLogMs": 15000,
+    "preRestockDelayMs": 10,
+    "inventoryActionDelayMs": 10,
+    "postRestockDelayMs": 120,
+    "restockFailureCooldownMs": 250,
+    "predictiveRestock": true,
+    "dumpUnneededBeforeRefill": true,
+    "inventoryRefillRows": 2,
+    "inventoryMaxMaterialTypes": 16,
+    "inventoryPlanUseWorldState": false,
+    "sneakOnDispenserOnly": true,
+    "resetChestWaitMs": 500,
+    "rescanEnabled": true,
+    "rescanAfterPrinting": true,
+    "rescanRepairMissingBlocks": true,
+    "rescanBreakMisplacedCarpets": true,
+    "rescanVerifySupport": true,
+    "postPrintWorkflowEnabled": true,
+    "postPrintFillMapEnabled": true,
+    "postPrintUseCartographyEnabled": true,
+    "postPrintStoreFinishedMapEnabled": true,
+    "postPrintResetEnabled": true,
+    "postPrintXpRefillEnabled": true,
+    "postPrintRenameMapEnabled": true,
+    "postPrintRequireRenameBeforeStore": false,
+    "postPrintRenameAttempts": 3,
+    "postPrintMinXpLevel": 2,
+    "postPrintTargetXpLevel": 3,
+    "postPrintSkipResetInteraction": false,
+    "postPrintWalkToCenter": true,
+    "postPrintCenterWaitMs": 20000,
+    "postPrintInteractionDelayMs": 200,
+    "postPrintMapSettleDelayMs": 200,
+    "dumpAimSettleMs": 150,
+    "dumpYawInvert": false,
+    "dumpPitchInvert": false,
+    "dumpTestStationWaitMs": 7000,
+    "dumpTestTossAtEachStation": true,
+    "dumpPathThinkTimeoutMs": 5000,
+    "dumpAlreadyNearRange": 4,
+    "dumpGoalRange": 2,
+    "multiDumpLockStaleMs": 45000,
+    "dumpReaimEveryStacks": 2,
+    "movingPlaceTestTargetCount": 32,
+    "movingPlaceTestCheckpointEveryRows": 8,
+    "movingPlaceTestWaitAfterMs": 5000,
+    "nervScannerTestLineGroups": 2,
+    "nervScannerTestWaitAfterMs": 5000,
+    "nervWorkloadTestLineGroups": 2,
+    "nervWorkloadTestWaitAfterMs": 5000,
+    "scannerPlaceDelayMs": 0,
+    "scannerMaxCatchupPlacements": 15,
+    "scannerWorkloadPollMs": 10,
+    "scannerWorkloadLogEveryMs": 1000,
+    "scannerLineEndSettleMs": 6000,
+    "scannerAdaptiveSlowdown": false,
+    "scannerAdaptiveMissingThreshold": 10,
+    "scannerAdaptiveRecoverThreshold": 4,
+    "scannerAdaptiveSettleStepMs": 750,
+    "scannerAdaptiveMaxSettleMs": 9000,
+    "scannerAdaptiveMinSettleMs": 2500,
+    "scannerAdaptivePlaceDelayStepMs": 2,
+    "scannerAdaptiveMaxPlaceDelayMs": 50,
+    "scannerAdaptiveMinPlaceDelayMs": 6,
+    "scannerRetryCooldownMs": 150,
+    "litematicRowSettleMs": 150,
+    "litematicRowVerifyEveryRows": 2,
+    "litematicRowRepairThreshold": 2,
+    "scannerPreSwapDelayMs": 10,
+    "scannerPostSwapDelayMs": 10,
+    "placementNoiseLogs": false,
+    "scannerWorkloadMode": "litematic",
+    "inventoryCycleTestWaitAfterMs": 5000,
+    "inventoryCycleTestRows": 2,
+    "repairTestWaitAfterMs": 5000,
+    "repairTestMaxPasses": 3,
+    "repairSprintMode": "off",
+    "repairGoalRange": 3.25,
+    "repairTargetSettleMs": 0,
+    "repairMoveTimeoutMs": 30000,
+    "repairProgressLogMs": 5000,
+    "repairFallbackToStopPlace": true,
+    "repairVerifySettleMs": 180,
+    "repairMaxMismatchRatio": 0.25,
+    "repairMaxMismatchCount": 512,
+    "useMapCornerYForNbtCarpets": true,
+    "repairBatchSize": 256,
+    "repairRestockMode": "fast",
+    "postBuildDelayMs": 10,
+    "retryInteractTimeoutMs": 800,
+    "checkpointBuffer": 0.8,
+    "breakCarpetAboveReset": false,
+    "debugPrints": false
+  },
+  "errorHandling": {
+    "logErrors": true,
+    "errorAction": "repair"
+  },
+ 
+"anchorTranslation": {
+    "enabled": true,
+    "sourceAnchor": {
+      "x": -450,
+      "y": 0,
+      "z": -962
+    },
+    "targetAnchor": {
+      "x": -450,
+      "y": 0,
+      "z": -962
+    }
+},
+  "multiUser": {
+    "enabled": true,
+    "mode": "file",
+    "syncFolder": "./logs/printer-sync",
+    "requireAllReady": true,
+    "recoveryMarginBlocks": 20,
+    "recoveryDelayMs": 2000,
+    "staleStateMs": 50000,
+    "heartbeatMs": 5000,
+    "resumeExistingJob": true,
+    "startAllOnMasterReady": true,
+    "joinStaggerMs": 12000,
+    "startStaggerMs": 5000,
+    "launchFromSingleProcess": true
+  }
+}
