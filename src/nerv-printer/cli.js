@@ -5768,7 +5768,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
 
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
-  const inlineSegmentBlocks = Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, placeRange))
+  const inlineSegmentBlocks = Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, Math.max(2, placeRange - 1)))
   const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks)
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
@@ -5958,11 +5958,19 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         const drainTimeoutMs = Math.max(50, toNumber(advanced.inlineRepairDrainMs, Math.max(200, retryCooldownMs * 4)))
         const drainStart = Date.now()
         const placeRangeSq = placeRange * placeRange
+        const Vec3Drain = bot.entity.position.constructor
         while (Date.now() - drainStart < drainTimeoutMs) {
           const botPos = bot.entity.position
           const hasNearbyPending = batchTargets.some((t) => {
             const key = getTargetKey(t)
             if (seen.has(key)) return false
+            if (currentActiveCols instanceof Set && !currentActiveCols.has(t.col)) return false
+            const actual = bot.blockAt(new Vec3Drain(t.position.x, t.position.y, t.position.z))
+            if (actual?.name === t.blockName) {
+              seen.add(key)
+              pendingUntil.delete(key)
+              return false
+            }
             const pendingExpiry = pendingUntil.get(key)
             if (pendingExpiry !== undefined && pendingExpiry > Date.now() + drainTimeoutMs) return false
             const dx = botPos.x - (t.position.x + 0.5)
