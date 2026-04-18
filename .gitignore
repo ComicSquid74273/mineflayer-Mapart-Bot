@@ -10,6 +10,9 @@ reference/
 # Node-generated dependencies
 node_modules/
 
+# Dashboard service runtime data
+dashboard-service/data/
+
 # Generated finished map outputs
 finished-maps/
 

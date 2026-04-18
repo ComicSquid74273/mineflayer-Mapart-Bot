@@ -17,6 +17,8 @@ Both root files are compatibility wrappers. The actual source now lives under `s
 
 This guide documents `nerv-printer.js` from setup to full configuration reference.
 
+Desktop dashboard workflow guide: `docs/DESKTOP-DASHBOARD-SETUP.md`
+
 ## Quick Start (2 Minutes)
 
 1. Install dependencies:
@@ -513,7 +515,34 @@ Verify without connecting:
 npm run test:multi-user-plan
 ```
 
-### 3.7 `anchorTranslation` Diamond Block
+### 3.7 `dashboard`
+
+Use this only when running the separate `dashboard-service` project.
+
+This is a compact operator integration layer, not a full Mineflayer web inspector.
+
+When `dashboard-service` is running, open `http://127.0.0.1:4080/` for the browser dashboard UI.
+
+Current behavior:
+
+1. The bot posts compact status snapshots to the dashboard service.
+2. The bot polls the dashboard service for `start`, `stop`, and `assign-nbt` commands.
+3. Assigned NBT files are downloaded into `files.nbtFolder`.
+4. In direct mode, start and stop control the print loop for an already running bot process.
+5. Starting a fully stopped process still requires an external supervisor or later host-agent layer.
+6. Use `npm run start:nerv:wait` or `npm run start:nerv:6b6t:wait` to launch the process, connect, and wait idle for dashboard or terminal `start` and `stop` commands.
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `dashboard.enabled` | `false` | Enable direct bot-to-dashboard integration. | Keep `false` unless the dashboard service is running. |
+| `dashboard.serviceUrl` | `http://127.0.0.1:4080` | Base URL of the dashboard service. | Point this to your deployed dashboard host. |
+| `dashboard.hostLabel` | empty | Logical host label sent with status updates. | Set this on multi-host deployments so operators can distinguish machines. |
+| `dashboard.heartbeatMs` | `5000` | Status POST interval in ms. | Lower gives fresher status; higher reduces traffic. |
+| `dashboard.commandPollMs` | `3000` | Command polling interval in ms. | Lower reacts faster to operator actions. |
+| `dashboard.idleWindowMs` | `15000` | Idle classification window in ms. | Raise if the bot often pauses briefly between phases. |
+| `dashboard.staleMs` | `20000` | Stale classification window in ms. | Raise if public-server lag causes long apparent inactivity. |
+
+### 3.8 `anchorTranslation` Diamond Block
 
 Use this to relocate the full fixed machine layout by one anchor delta.
 

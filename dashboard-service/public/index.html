@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mapart Bot Dashboard</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Headless operators console</p>
+        <h1>Mapart Bot Dashboard</h1>
+        <p class="hero-copy">Live bot status, fleet controls, and NBT delivery from one page.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="refreshButton" class="ghost-button" type="button">Refresh</button>
+        <button id="startAllButton" class="accent-button" type="button">Start Printing All</button>
+        <button id="stopAllButton" class="danger-button" type="button">Stop Printing All</button>
+      </div>
+    </header>
+
+    <main class="layout-grid">
+      <section class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Fleet</p>
+            <h2>Bots</h2>
+          </div>
+          <div class="status-inline">
+            <span id="serviceStatus" class="status-pill status-neutral">Checking service</span>
+            <span id="lastRefresh" class="timestamp">Never</span>
+          </div>
+        </div>
+        <div id="botSummary" class="summary-strip"></div>
+        <div id="botsGrid" class="bot-grid">
+          <article class="empty-card">
+            <h3>No bot data yet</h3>
+            <p>Start the dashboard service and at least one bot with dashboard integration enabled.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Delivery</p>
+            <h2>Upload NBT</h2>
+          </div>
+        </div>
+        <form id="uploadForm" class="stack-form">
+          <label>
+            <span>NBT file</span>
+            <input id="fileInput" name="file" type="file" accept=".nbt" required>
+          </label>
+          <label>
+            <span>Uploaded by</span>
+            <input id="uploadedByInput" name="uploadedBy" type="text" placeholder="operator-1">
+          </label>
+          <label>
+            <span>Notes</span>
+            <textarea id="notesInput" name="notes" rows="3" placeholder="Optional assignment note"></textarea>
+          </label>
+          <button class="accent-button" type="submit">Upload File</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Assignments</p>
+            <h2>Distribute Files</h2>
+          </div>
+        </div>
+        <form id="assignForm" class="stack-form">
+          <label>
+            <span>File</span>
+            <select id="fileSelect" required>
+              <option value="">Select uploaded file</option>
+            </select>
+          </label>
+          <label>
+            <span>Bot</span>
+            <select id="botSelect" required>
+              <option value="">Select bot</option>
+            </select>
+          </label>
+          <button class="accent-button" type="submit">Assign NBT</button>
+        </form>
+        <div id="filesList" class="file-list"></div>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Activity</p>
+            <h2>Operator Log</h2>
+          </div>
+        </div>
+        <div id="eventLog" class="event-log"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

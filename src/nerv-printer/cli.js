@@ -1,6 +1,9 @@
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
 const fs = require('fs')
+const http = require('http')
+const https = require('https')
+const os = require('os')
 const path = require('path')
 const { AsyncLocalStorage } = require('async_hooks')
 const mineflayer = require('mineflayer')
@@ -30,7 +33,8 @@ const stdinCommandState = {
   initialized: false,
   rl: null,
   status: null,
-  verificationWaiter: null
+  verificationWaiter: null,
+  runtimeControl: null
 }
 
 function formatLogArg(value) {
@@ -155,6 +159,521 @@ function writeJson(filePath, data) {
     fs.mkdirSync(dir, { recursive: true })
   }
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8')
+}
+
+function getDashboardConfig(config) {
+  const raw = config?.dashboard
+  const envEnabled = String(process.env.NERV_DASHBOARD_ENABLED || '').toLowerCase()
+  const enabled = raw?.enabled === true || envEnabled === '1' || envEnabled === 'true' || envEnabled === 'yes'
+  return {
+    enabled,
+    serviceUrl: String(raw?.serviceUrl || process.env.NERV_DASHBOARD_URL || 'http://127.0.0.1:4080').trim().replace(/\/$/, ''),
+    hostLabel: String(raw?.hostLabel || process.env.NERV_DASHBOARD_HOST_LABEL || process.env.COMPUTERNAME || os.hostname() || 'unknown-host').trim(),
+    heartbeatMs: Math.max(1000, toNumber(raw?.heartbeatMs, 5000)),
+    commandPollMs: Math.max(1000, toNumber(raw?.commandPollMs, 3000)),
+    idleWindowMs: Math.max(3000, toNumber(raw?.idleWindowMs, 15000)),
+    staleMs: Math.max(5000, toNumber(raw?.staleMs, 20000))
+  }
+}
+
+function isDashboardEnabled(config) {
+  const dashboard = getDashboardConfig(config)
+  return dashboard.enabled && Boolean(dashboard.serviceUrl)
+}
+
+function isWaitForCommandEnabled() {
+  if (hasCliFlag('--wait-for-command') || hasCliFlag('--wait')) return true
+  const envValue = String(process.env.NERV_WAIT_FOR_COMMAND || '').toLowerCase()
+  return envValue === '1' || envValue === 'true' || envValue === 'yes'
+}
+
+function createRuntimeControl() {
+  const state = {
+    lastSource: '',
+    runActive: false,
+    startRequested: false,
+    stopRequested: false,
+    updatedAt: Date.now()
+  }
+
+  function syncStatus() {
+    setRuntimeCommandStatus({
+      controlState: state.runActive
+        ? 'running'
+        : (state.stopRequested ? 'stopped' : (state.startRequested ? 'start-requested' : 'idle-ready')),
+      controlSource: state.lastSource || '',
+      controlUpdatedAt: state.updatedAt
+    })
+  }
+
+  return {
+    attach() {
+      stdinCommandState.runtimeControl = this
+      syncStatus()
+    },
+    detach() {
+      if (stdinCommandState.runtimeControl === this) {
+        stdinCommandState.runtimeControl = null
+      }
+    },
+    requestStart(source = 'terminal') {
+      state.startRequested = true
+      state.stopRequested = false
+      state.lastSource = source
+      state.updatedAt = Date.now()
+      syncStatus()
+      return `start requested via ${source}`
+    },
+    requestStop(source = 'terminal') {
+      state.startRequested = false
+      state.stopRequested = true
+      state.lastSource = source
+      state.updatedAt = Date.now()
+      syncStatus()
+      return 'stop requested; bot will remain connected and go idle after the current run'
+    },
+    consumeStartRequest() {
+      if (!state.startRequested) return false
+      state.startRequested = false
+      state.stopRequested = false
+      state.updatedAt = Date.now()
+      syncStatus()
+      return true
+    },
+    isStopRequested() {
+      return state.stopRequested === true
+    },
+    markRunStarted(source = 'runtime') {
+      state.runActive = true
+      state.lastSource = source
+      state.updatedAt = Date.now()
+      syncStatus()
+    },
+    markRunCompleted() {
+      state.runActive = false
+      state.updatedAt = Date.now()
+      syncStatus()
+    }
+  }
+}
+
+function normalizeDashboardPhase(phase) {
+  const value = String(phase || '').trim().toLowerCase()
+  if (!value) return 'idle'
+  if (value === 'post_print') return 'post-print'
+  if (value === 'waiting_master' || value === 'waiting_slaves_ready' || value === 'waiting_slaves_finished' || value === 'ready') return 'idle'
+  if (value === 'connected' || value === 'starting') return 'starting'
+  if (value === 'repair' || value.startsWith('repair')) return 'repair'
+  if (value === 'post-print') return 'post-print'
+  if (value.startsWith('post_print')) return 'post-print'
+  if (value === 'printing' || value.startsWith('printing')) return 'printing'
+  if (value === 'rescan' || value.startsWith('rescan')) return 'rescan'
+  if (value === 'cleanup' || value.startsWith('cleanup')) return 'cleanup'
+  if (value === 'waiting-spawn' || value === 'waiting_spawn') return 'waiting-spawn'
+  if (value === 'stopped' || value === 'crashed' || value === 'idle') return value
+  return value
+}
+
+function mapDashboardLocation(runtime) {
+  const state = String(runtime?.classification?.state || '').toLowerCase()
+  if (runtime?.classification?.platform === true || state === 'platform') return 'platform'
+  if (state.includes('lobby') || state.includes('portal')) return state.includes('spawn') ? 'spawn' : 'lobby'
+  if (state.includes('platform')) return 'platform'
+  if (state.includes('spawn')) return 'spawn'
+  if (state.includes('printer')) return 'printer-area'
+  if (state === 'off-platform' && isPositionUsable(runtime?.position)) return 'printer-area'
+  return 'unknown'
+}
+
+function createDashboardRequest(urlValue, method, body = null) {
+  const target = new URL(urlValue)
+  const transport = target.protocol === 'https:' ? https : http
+  const payload = body == null ? null : Buffer.from(JSON.stringify(body), 'utf8')
+  const headers = {
+    accept: 'application/json'
+  }
+  if (payload) {
+    headers['content-type'] = 'application/json'
+    headers['content-length'] = String(payload.length)
+  }
+
+  return new Promise((resolve, reject) => {
+    const req = transport.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method,
+      headers,
+      timeout: 10000
+    }, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        let json = null
+        try {
+          json = text ? JSON.parse(text) : null
+        } catch {
+          json = null
+        }
+        resolve({
+          statusCode: toNumber(res.statusCode, 0),
+          body: json,
+          text
+        })
+      })
+    })
+
+    req.on('timeout', () => req.destroy(new Error(`dashboard request timeout: ${method} ${urlValue}`)))
+    req.on('error', reject)
+    if (payload) req.write(payload)
+    req.end()
+  })
+}
+
+function downloadDashboardFile(urlValue, filePath) {
+  const target = new URL(urlValue)
+  const transport = target.protocol === 'https:' ? https : http
+  return new Promise((resolve, reject) => {
+    const req = transport.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: 'GET',
+      timeout: 15000
+    }, (res) => {
+      if (toNumber(res.statusCode, 0) < 200 || toNumber(res.statusCode, 0) >= 300) {
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () => reject(new Error(`dashboard file download failed: ${res.statusCode} ${Buffer.concat(chunks).toString('utf8')}`)))
+        return
+      }
+      const dir = path.dirname(filePath)
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+      const stream = fs.createWriteStream(filePath)
+      res.pipe(stream)
+      stream.on('finish', () => {
+        stream.close(() => resolve(filePath))
+      })
+      stream.on('error', reject)
+    })
+    req.on('timeout', () => req.destroy(new Error(`dashboard download timeout: ${urlValue}`)))
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
+  const dashboard = getDashboardConfig(config)
+  if (!dashboard.enabled || !dashboard.serviceUrl) return null
+
+  const botName = String(config?.bot?.username || bot?.username || 'MapartBot').trim() || 'MapartBot'
+  const state = {
+    phase: 'starting',
+    recoveryState: 'none',
+    reconnectState: sessionNumber > 1 ? 'reconnecting' : 'idle',
+    currentNbt: null,
+    lastError: '',
+    lastActivityAt: Date.now(),
+    startRequested: false,
+    stopRequested: false,
+    commandBusy: false,
+    heartbeatTimer: null,
+    commandTimer: null,
+    stopped: false
+  }
+
+  function noteActivity() {
+    state.lastActivityAt = Date.now()
+  }
+
+  function currentRole() {
+    return String(config?.multiUser?.runtime?.role || 'single').toLowerCase() || 'single'
+  }
+
+  function currentAssignment() {
+    return config?.multiUser?.runtime?.assignment || null
+  }
+
+  function currentProgress() {
+    const filePath = path.resolve(process.cwd(), config.files?.progressFile || './logs/nerv-printer-progress.json')
+    return readProgressState(filePath)
+  }
+
+  function currentSourceName() {
+    return String(state.currentNbt || currentProgress()?.sourceName || currentAssignment()?.sourceName || '').trim() || null
+  }
+
+  function currentLocation() {
+    const runtime = classifyRuntimePosition(bot, config, 'dashboard-status')
+    return mapDashboardLocation({ ...runtime, position: bot?.entity?.position })
+  }
+
+  function buildStatusPayload(onlineOverride = null) {
+    const now = Date.now()
+    const progress = currentProgress()
+    const rawPhase = progress?.phase || state.phase || 'idle'
+    const phase = normalizeDashboardPhase(rawPhase)
+    const health = Number.isFinite(Number(bot?.health)) ? Number(bot.health) : 20
+    const hunger = Number.isFinite(Number(bot?.food)) ? Number(bot.food) : 20
+    const idle = phase === 'idle' || (now - state.lastActivityAt >= dashboard.idleWindowMs && !['printing', 'repair', 'rescan', 'post-print', 'cleanup', 'starting', 'waiting-spawn'].includes(phase))
+    const activeState = !idle && now - state.lastActivityAt >= dashboard.staleMs ? 'stale' : 'active'
+    const role = currentRole()
+    const assignedInterval = currentAssignment()?.interval ? {
+      start: toNumber(currentAssignment().interval.start, 0),
+      end: toNumber(currentAssignment().interval.end, 127)
+    } : null
+    const progressPayload = progress && Number.isFinite(Number(progress.totalTargets))
+      ? {
+          processed: toNumber(progress.processedTargets, 0),
+          total: toNumber(progress.totalTargets, 0),
+          percent: toNumber(progress.totalTargets, 0) > 0 ? Number(((toNumber(progress.processedTargets, 0) / toNumber(progress.totalTargets, 1)) * 100).toFixed(2)) : 0
+        }
+      : undefined
+
+    return {
+      botName,
+      runtime: 'nerv-printer',
+      hostLabel: dashboard.hostLabel,
+      online: onlineOverride == null ? (bot.__nervSessionActive !== false && bot?._client?.state !== 'disconnected') : onlineOverride,
+      phase,
+      health,
+      hunger,
+      activeState,
+      location: currentLocation(),
+      idle,
+      heartbeatAt: new Date().toISOString(),
+      role,
+      recoveryState: phase === 'repair' ? 'recovering' : state.recoveryState,
+      reconnectState: state.reconnectState,
+      currentNbt: currentSourceName(),
+      lastStatusAt: new Date().toISOString(),
+      progress: progressPayload,
+      lastError: state.lastError || undefined,
+      assignedInterval,
+      staleReason: activeState === 'stale' ? (progress ? 'progress-frozen' : 'heartbeat-missed') : undefined
+    }
+  }
+
+  async function postStatus(onlineOverride = null) {
+    try {
+      await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/status`, 'POST', buildStatusPayload(onlineOverride))
+    } catch (err) {
+      console.log(`[DASHBOARD-WARN] status post failed for ${botName}: ${err?.message || err}`)
+    }
+  }
+
+  function scheduleLoop(key, intervalMs, work) {
+    const run = async () => {
+      if (state.stopped) return
+      try {
+        await work()
+      } catch (err) {
+        console.log(`[DASHBOARD-WARN] ${botName} loop=${key} failed: ${err?.message || err}`)
+      }
+      if (state.stopped) return
+      state[key] = setTimeout(run, intervalMs)
+      state[key].unref?.()
+    }
+    state[key] = setTimeout(run, intervalMs)
+    state[key].unref?.()
+  }
+
+  async function reportCommandResult(commandId, status, resultMessage) {
+    await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(commandId)}/result`, 'POST', {
+      status,
+      resultMessage
+    })
+  }
+
+  async function reportFileResult(fileId, deliveryStatus, failedReason = null) {
+    await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/${encodeURIComponent(botName)}/files/${encodeURIComponent(fileId)}/result`, 'POST', {
+      deliveryStatus,
+      failedReason
+    })
+  }
+
+  async function handleAssignNbt(command) {
+    const metadataResponse = await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/${encodeURIComponent(botName)}/files/next`, 'GET')
+    const item = metadataResponse.body?.item || null
+    if (!item || item.fileId !== command.nbtFileId) {
+      throw new Error(`assigned file ${command.nbtFileId || 'unknown'} is not ready for ${botName}`)
+    }
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    const fileName = path.basename(String(item.originalName || item.storedName || `${item.fileId}.nbt`))
+    const targetPath = path.join(folder, fileName)
+    await downloadDashboardFile(`${dashboard.serviceUrl}/api/files/${encodeURIComponent(item.fileId)}/download`, targetPath)
+    await reportFileResult(item.fileId, 'placed')
+    state.currentNbt = fileName
+    noteActivity()
+    return `downloaded ${fileName}`
+  }
+
+  async function executeCommand(command) {
+    const claimResponse = command.status === 'pending'
+      ? await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(command.commandId)}/claim`, 'POST', {})
+      : { body: { command } }
+    const claimed = claimResponse.body?.command || command
+
+    if (claimed.status !== 'claimed' && claimed.status !== 'pending') {
+      return
+    }
+
+    switch (claimed.commandType) {
+      case 'start': {
+        runtimeControl?.requestStart('dashboard')
+        state.startRequested = true
+        state.stopRequested = false
+        noteActivity()
+        await reportCommandResult(claimed.commandId, 'succeeded', 'start requested; bot will begin work when idle')
+        break
+      }
+      case 'stop': {
+        runtimeControl?.requestStop('dashboard')
+        state.stopRequested = true
+        state.startRequested = false
+        state.phase = 'idle'
+        noteActivity()
+        await reportCommandResult(claimed.commandId, 'succeeded', claimed.reason || 'stop requested; bot will remain connected idle')
+        break
+      }
+      case 'assign-nbt': {
+        const message = await handleAssignNbt(claimed)
+        await reportCommandResult(claimed.commandId, 'succeeded', message)
+        break
+      }
+      case 'restart': {
+        await reportCommandResult(claimed.commandId, 'failed', 'restart is not implemented in direct bot mode')
+        break
+      }
+      default: {
+        await reportCommandResult(claimed.commandId, 'failed', `unsupported command type: ${claimed.commandType}`)
+      }
+    }
+  }
+
+  async function pollCommands() {
+    if (state.commandBusy || state.stopped) return
+    state.commandBusy = true
+    try {
+      const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands`, 'GET')
+      const items = Array.isArray(response.body?.items) ? response.body.items : []
+      if (items.length) {
+        await executeCommand(items[0])
+      }
+    } finally {
+      state.commandBusy = false
+    }
+  }
+
+  return {
+    start() {
+      void postStatus(true)
+      scheduleLoop('heartbeatTimer', dashboard.heartbeatMs, async () => {
+        await postStatus(true)
+      })
+      scheduleLoop('commandTimer', dashboard.commandPollMs, async () => {
+        await pollCommands()
+      })
+    },
+    stop(finalPhase = 'stopped', online = false) {
+      state.stopped = true
+      if (state.heartbeatTimer) clearTimeout(state.heartbeatTimer)
+      if (state.commandTimer) clearTimeout(state.commandTimer)
+      state.phase = normalizeDashboardPhase(finalPhase)
+      void postStatus(online)
+    },
+    noteActivity,
+    setPhase(nextPhase) {
+      state.phase = normalizeDashboardPhase(nextPhase)
+      noteActivity()
+    },
+    setCurrentNbt(sourceName) {
+      state.currentNbt = sourceName ? path.basename(String(sourceName)) : null
+      noteActivity()
+    },
+    setRecoveryState(nextState) {
+      state.recoveryState = String(nextState || 'none')
+      noteActivity()
+    },
+    setReconnectState(nextState) {
+      state.reconnectState = String(nextState || 'idle')
+    },
+    setLastError(message) {
+      state.lastError = String(message || '').trim()
+      noteActivity()
+    },
+    consumeStartRequest() {
+      if (!state.startRequested) return false
+      state.startRequested = false
+      noteActivity()
+      return true
+    },
+    isStopRequested() {
+      return state.stopRequested === true
+    }
+  }
+}
+
+async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, initialStartRequested = false) {
+  let pendingStart = initialStartRequested
+  while (isBotSessionLive(bot) && bot.__nervSessionActive !== false) {
+    if (runtimeControl?.isStopRequested()) {
+      dashboardRuntime?.setPhase('idle')
+      await delay(1000)
+      continue
+    }
+
+    const shouldStart = pendingStart || runtimeControl?.consumeStartRequest() === true || dashboardRuntime?.consumeStartRequest() === true
+    pendingStart = false
+
+    if (!shouldStart) {
+      dashboardRuntime?.setPhase('idle')
+      await delay(1000)
+      continue
+    }
+
+    const nextNbt = getNextNbtFile(config)
+  runtimeControl?.markRunStarted('runtime')
+    dashboardRuntime?.setCurrentNbt(nextNbt ? path.basename(nextNbt) : null)
+    dashboardRuntime?.setPhase('printing')
+    try {
+      const runInfo = await runPrint(bot, config)
+      dashboardRuntime?.setCurrentNbt(runInfo?.sourceName || null)
+
+      if (runInfo?.sourceType !== 'nbt') {
+        dashboardRuntime?.setPhase('idle')
+        await delay(1000)
+        continue
+      }
+
+      if (runInfo?.didWork === false) {
+        dashboardRuntime?.setPhase('idle')
+        await delay(1000)
+        continue
+      }
+
+      dashboardRuntime?.setPhase('idle')
+      if (config.files?.moveToFinishedFolder !== true) {
+        await delay(1000)
+      }
+    } catch (err) {
+      const text = String(err?.message || err)
+      dashboardRuntime?.setLastError(text)
+      const noMoreInput = text.includes('No NBT files found in folder:') || text.includes('No input found.')
+      if (noMoreInput) {
+        console.log('[STATE] No more map files found. Waiting idle.')
+        dashboardRuntime?.setPhase('idle')
+        await delay(1000)
+        continue
+      }
+      throw err
+    } finally {
+      runtimeControl?.markRunCompleted()
+    }
+  }
 }
 
 function getMeteorSceneConfig(config) {
@@ -1144,6 +1663,15 @@ function createDefaultConfig() {
         { name: 'MapartBot_1', role: 'slave', enabled: false, joinDelayMs: 8000, startDelayMs: 3000 },
         { name: 'MapartBot_2', role: 'slave', enabled: false, joinDelayMs: 16000, startDelayMs: 6000 }
       ]
+    },
+    dashboard: {
+      enabled: false,
+      serviceUrl: 'http://127.0.0.1:4080',
+      hostLabel: '',
+      heartbeatMs: 5000,
+      commandPollMs: 3000,
+      idleWindowMs: 15000,
+      staleMs: 20000
     }
   }
 }
@@ -7975,6 +8503,8 @@ function formatRuntimeCommandStatus() {
     `host=${status.host || 'unknown'}`,
     `version=${status.version || 'unknown'}`,
     `session=${status.sessionNumber ?? 'unknown'}`,
+    `control=${status.controlState || 'unknown'}`,
+    `source=${status.controlSource || 'none'}`,
     `tokenWaiting=${status.tokenWaiting === true}`,
     `code=${status.verificationCode || 'none'}`,
     `updated=${updatedAgoSeconds}s-ago`
@@ -8003,7 +8533,25 @@ function ensureStdinCommandInterface() {
     }
 
     if (value === 'help' || value === '?') {
-      console.log('[COMMAND] Commands: status, verified, refresh, clear')
+      console.log('[COMMAND] Commands: status, start, stop, verified, refresh, clear')
+      return
+    }
+
+    if (value === 'start' || value === 'run') {
+      if (!stdinCommandState.runtimeControl) {
+        console.log('[COMMAND] No managed runtime is active. Use --wait-for-command or enable dashboard control first.')
+        return
+      }
+      console.log(`[COMMAND] ${stdinCommandState.runtimeControl.requestStart('terminal')}`)
+      return
+    }
+
+    if (value === 'stop' || value === 'hold' || value === 'pause') {
+      if (!stdinCommandState.runtimeControl) {
+        console.log('[COMMAND] No managed runtime is active. Use --wait-for-command or enable dashboard control first.')
+        return
+      }
+      console.log(`[COMMAND] ${stdinCommandState.runtimeControl.requestStop('terminal')}`)
       return
     }
 
@@ -8033,7 +8581,7 @@ function ensureStdinCommandInterface() {
     console.log('[COMMAND] No active token verification prompt right now. This does not apply to Microsoft browser login.')
   })
 
-  console.log('[COMMAND] Interactive commands enabled. Type "status", "verified", or "refresh" while the bot is running.')
+  console.log('[COMMAND] Interactive commands enabled. Type "status", "start", "stop", "verified", or "refresh" while the bot is running.')
   return rl
 }
 
@@ -9786,11 +10334,19 @@ function runSingleSession(config, sessionNumber) {
   return new Promise((resolve) => {
     const bot = createBot(config)
     bot.__nervSessionActive = true
+    const managedControlEnabled = isDashboardEnabled(config) || config?.printer?.startOnSpawn === false
+    const runtimeControl = managedControlEnabled ? createRuntimeControl() : null
+    runtimeControl?.attach()
+    const dashboardRuntime = createDashboardRuntime(bot, config, sessionNumber, runtimeControl)
     bot.loadPlugin(pathfinder)
     installPlatformSafety(bot, config)
     if (is6b6tConfig(config)) {
       installPhysicsNaNProbe(bot, config, `main-session-${sessionNumber}`, { logPackets: false, logRepairs: false })
     }
+    dashboardRuntime?.start()
+    bot.on('move', () => {
+      dashboardRuntime?.noteActivity()
+    })
 
     let lastErrorText = ''
     let kickedText = ''
@@ -9850,6 +10406,12 @@ function runSingleSession(config, sessionNumber) {
         clearTimeout(spawnFallbackTimer)
         spawnFallbackTimer = null
       }
+      const finalPhase = String(reason || '').includes('dashboard-stop') || String(reason || '').includes('stop')
+        ? 'stopped'
+        : ((successfulStartup || printerStarted) ? 'crashed' : 'stopped')
+      dashboardRuntime?.setLastError(lastErrorText || kickedText || reason || '')
+      dashboardRuntime?.stop(finalPhase, false)
+      runtimeControl?.detach()
       resolve({
         endReason: reason || 'disconnected',
         lastError: lastErrorText,
@@ -9880,6 +10442,7 @@ function runSingleSession(config, sessionNumber) {
             ? `Auto-triggered from lobby portal zone at ${spawnedCount}/${reqSpawn} spawn event(s).`
             : `Threshold reached (${spawnedCount}/${reqSpawn}).`)
       console.log(`[SPAWN] ${triggerLabel} Delaying startup...`)
+      dashboardRuntime?.setPhase('waiting-spawn')
 
       const printer = config.printer || {}
       await delay(toNumber(printer.startDelayMs, 1500))
@@ -10004,6 +10567,7 @@ function runSingleSession(config, sessionNumber) {
       printerStarted = true
       successfulStartup = true
       bot.__nervPlatformWatchdogActive = true
+      dashboardRuntime?.setReconnectState('idle')
       const allowJump = printer.allowJump !== false
 
       console.log(`[SPAWN] Connected. session=${sessionNumber}`)
@@ -10030,44 +10594,53 @@ function runSingleSession(config, sessionNumber) {
 
       if (printer.startOnSpawn === false) {
         console.log('[STATE] startOnSpawn is false. Waiting idle.')
+        dashboardRuntime?.setPhase('idle')
+        await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, false)
         return
       }
 
       try {
-        while (true) {
-          let runInfo = null
-          try {
-            runInfo = await runPrint(bot, config)
-          } catch (err) {
-            const text = String(err?.message || err)
-            const noMoreInput = text.includes('No NBT files found in folder:') || text.includes('No input found.')
-            if (noMoreInput) {
-              console.log('[STATE] No more map files found. Waiting idle.')
+        if (dashboardRuntime) {
+          await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, true)
+        } else {
+          while (true) {
+            let runInfo = null
+            try {
+              runInfo = await runPrint(bot, config)
+            } catch (err) {
+              const text = String(err?.message || err)
+              const noMoreInput = text.includes('No NBT files found in folder:') || text.includes('No input found.')
+              if (noMoreInput) {
+                console.log('[STATE] No more map files found. Waiting idle.')
+                break
+              }
+              throw err
+            }
+
+            if (runInfo?.sourceType !== 'nbt') {
               break
             }
-            throw err
-          }
 
-          if (runInfo?.sourceType !== 'nbt') {
-            break
-          }
+            if (runInfo?.didWork === false) {
+              console.log('[STATE] Nothing left to build for current file/progress. Waiting idle.')
+              break
+            }
 
-          if (runInfo?.didWork === false) {
-            console.log('[STATE] Nothing left to build for current file/progress. Waiting idle.')
-            break
-          }
-
-          if (config.files?.moveToFinishedFolder !== true) {
-            break
+            if (config.files?.moveToFinishedFolder !== true) {
+              break
+            }
           }
         }
       } catch (err) {
+        dashboardRuntime?.setLastError(err?.message || String(err))
         console.log('[FATAL]', err?.message || err)
       }
     }
 
     bot.on('spawn', async () => {
       spawnedCount += 1
+      dashboardRuntime?.noteActivity()
+      dashboardRuntime?.setPhase('waiting-spawn')
       if (printerStarted || startupPending) return
 
       const reqSpawn = getRequiredSpawnCount(config)
@@ -10108,6 +10681,7 @@ function runSingleSession(config, sessionNumber) {
     })
 
     bot.on('nerv-chat-login-success', async () => {
+      dashboardRuntime?.noteActivity()
       if (printerStarted || startupPending) return
       const reqSpawn = getRequiredSpawnCount(config)
       if (!canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) return
@@ -10117,6 +10691,7 @@ function runSingleSession(config, sessionNumber) {
 
     bot.on('messagestr', (message) => {
       rememberRecentServerMessage(bot, message, 'messagestr')
+      dashboardRuntime?.noteActivity()
       if (isTokenVerificationText(message)) {
         verificationCode = extractVerificationCode(message)
         console.log(`[VERIFY] token/web verification required: ${message}`)
@@ -10130,6 +10705,7 @@ function runSingleSession(config, sessionNumber) {
 
     bot.on('kicked', (reason) => {
       kickedText = typeof reason === 'string' ? reason : JSON.stringify(reason)
+      dashboardRuntime?.setLastError(kickedText)
       console.log(`[KICKED] ${kickedText}`)
       if (isTokenVerificationText(kickedText)) {
         verificationCode = extractVerificationCode(kickedText)
@@ -10139,6 +10715,7 @@ function runSingleSession(config, sessionNumber) {
 
     bot.on('error', (err) => {
       lastErrorText = err?.message || String(err)
+      dashboardRuntime?.setLastError(lastErrorText)
       console.log('[ERROR]', lastErrorText)
     })
 
@@ -11733,6 +12310,13 @@ async function runMultiUserLive(config, reconnect) {
 async function start() {
   ensureStdinCommandInterface()
   const config = loadConfig()
+  if (isWaitForCommandEnabled()) {
+    config.printer = {
+      ...(config.printer || {}),
+      startOnSpawn: false
+    }
+    console.log('[CONTROL] wait-for-command mode enabled. The bot will connect and remain idle until a dashboard or terminal start command is issued.')
+  }
   const reconnect = getReconnectConfig(config)
   logStartupSummary(config, reconnect)
 
