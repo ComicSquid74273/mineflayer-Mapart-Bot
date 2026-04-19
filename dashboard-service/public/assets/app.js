@@ -500,12 +500,32 @@ function renderBotCard(bot) {
   const progress = bot.progress && Number.isFinite(Number(bot.progress.percent))
     ? `${bot.progress.percent}%`
     : 'n/a'
+  const currentRunElapsed = bot.currentNbtStartedAt
+    ? formatDuration(Date.now() - new Date(bot.currentNbtStartedAt).getTime())
+    : 'n/a'
+  const verifyBanner = bot.tokenWaiting ? `
+    <div class="verify-banner">
+      <div class="verify-info">
+        <span class="verify-label">Verification Required</span>
+        <div class="verify-detail">
+          <span class="verify-field">Bot: <strong>${escapeHtml(bot.botName)}</strong></span>
+          <span class="verify-field">Code: <strong class="verify-code">${escapeHtml(bot.verificationCode || 'loading…')}</strong></span>
+          <span class="verify-field">IP: <strong>${escapeHtml(bot.botIp || 'unknown')}</strong></span>
+        </div>
+      </div>
+      <div class="verify-actions">
+        <button class="accent-button small-button" type="button" data-action="verify-done" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">✓ Verified</button>
+        <button class="ghost-button small-button" type="button" data-action="verify-refresh" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">↺ Resend</button>
+      </div>
+    </div>
+  ` : ''
   return `
-    <article class="bot-card">
+    <article class="bot-card${bot.tokenWaiting ? ' bot-card-verify' : ''}">
+      ${verifyBanner}
       <div class="bot-head">
         <div>
           <h3 class="bot-name">${escapeHtml(bot.botName)}</h3>
-          <p class="bot-meta">${escapeHtml(bot.role || 'single')} · ${escapeHtml(bot.location || 'unknown')}</p>
+          <p class="bot-meta">${escapeHtml(bot.role || 'single')} · ${escapeHtml(bot.location || 'unknown')}${bot.botIp && !bot.tokenWaiting ? ` · ${escapeHtml(bot.botIp)}` : ''}</p>
         </div>
         <div class="status-inline">
           <span class="status-pill ${bot.online ? 'status-online' : 'status-offline'}">${bot.online ? 'Online' : 'Offline'}</span>
@@ -520,9 +540,9 @@ function renderBotCard(bot) {
       </div>
       <div class="bot-metrics">
         <div class="metric">NBT<strong>${escapeHtml(bot.currentNbt || 'none')}</strong></div>
+        <div class="metric">Current Run<strong>${escapeHtml(currentRunElapsed)}</strong></div>
         <div class="metric">Recovery<strong>${escapeHtml(bot.recoveryState || 'none')}</strong></div>
         <div class="metric">Reconnect<strong>${escapeHtml(bot.reconnectState || 'idle')}</strong></div>
-        <div class="metric">Heartbeat<strong>${escapeHtml(formatTime(bot.heartbeatAt))}</strong></div>
       </div>
       ${bot.lastError ? `<p class="hint">Last error: ${escapeHtml(bot.lastError)}</p>` : ''}
       <div class="bot-actions">
@@ -816,9 +836,20 @@ function renderEvents() {
   `).join('')
 }
 
+async function onVerifyBot(botName, action) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before sending verification commands.')
+    return
+  }
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/verify`, { action })
+  pushEvent('info', `Sent verification ${action} for ${botName}`)
+  await refreshData()
+}
+
 async function refreshData(options = {}) {
   if (state.busy) return
   if (options.background === true && (state.uploadBusy || activeElementInsideForm() || hasRecentUserInteraction())) return
+  if (options.background === true && state.bots.some((bot) => bot.tokenWaiting)) return
 
   state.busy = true
   try {
@@ -1044,6 +1075,10 @@ document.addEventListener('click', async (event) => {
     } else if (button.dataset.action === 'download-log') {
       await downloadLogFile(button.dataset.fileName || '')
       pushEvent('info', `Downloaded log ${button.dataset.fileName || ''}`)
+    } else if (button.dataset.action === 'verify-done') {
+      await onVerifyBot(button.dataset.botName || '', 'verified')
+    } else if (button.dataset.action === 'verify-refresh') {
+      await onVerifyBot(button.dataset.botName || '', 'refresh')
     } else {
       await onFleetAction(button.dataset.action, button.dataset.botName || button.dataset.hostLabel || null)
     }

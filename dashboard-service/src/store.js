@@ -517,7 +517,9 @@ function createStore(baseDir) {
         timing: summarizeNodeTiming(timingByHost[hostLabel])
       }
       current.botCount += 1
-      if (bot.online === true) current.onlineCount += 1
+      const botLastStatusMs = new Date(bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
+      const botAgeMs = Number.isFinite(botLastStatusMs) ? Math.max(0, Date.now() - botLastStatusMs) : Number.POSITIVE_INFINITY
+      if (botAgeMs <= 30000 && bot.online === true) current.onlineCount += 1
       current.botNames.push(bot.botName)
       if (!current.lastStatusAt || String(bot.lastStatusAt || '') > String(current.lastStatusAt || '')) {
         current.lastStatusAt = bot.lastStatusAt || null

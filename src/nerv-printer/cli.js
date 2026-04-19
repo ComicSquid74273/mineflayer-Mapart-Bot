@@ -529,6 +529,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     recoveryState: 'none',
     reconnectState: sessionNumber > 1 ? 'reconnecting' : 'idle',
     currentNbt: null,
+    currentNbtStartedAt: null,
     lastError: '',
     lastActivityAt: Date.now(),
     startRequested: false,
@@ -637,7 +638,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       progress: progressPayload,
       lastError: state.lastError || null,
       assignedInterval,
-      staleReason: activeState === 'stale' ? (progress ? 'progress-frozen' : 'heartbeat-missed') : undefined
+      staleReason: activeState === 'stale' ? (progress ? 'progress-frozen' : 'heartbeat-missed') : undefined,
+      verificationCode: stdinCommandState.status?.verificationCode || null,
+      tokenWaiting: stdinCommandState.status?.tokenWaiting === true,
+      currentNbtStartedAt: state.currentNbtStartedAt || null
     }
   }
 
@@ -813,6 +817,18 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         await reportCommandResult(claimed.commandId, 'succeeded', message)
         break
       }
+      case 'verify': {
+        const verifyAction = String(claimed.reason || '').toLowerCase() === 'verified' ? 'verified' : 'refresh'
+        if (stdinCommandState.verificationWaiter) {
+          const waiter = stdinCommandState.verificationWaiter
+          stdinCommandState.verificationWaiter = null
+          waiter(verifyAction)
+          await reportCommandResult(claimed.commandId, 'succeeded', `verification action=${verifyAction} applied`)
+        } else {
+          await reportCommandResult(claimed.commandId, 'failed', 'no active verification prompt')
+        }
+        break
+      }
       case 'restart': {
         await reportCommandResult(claimed.commandId, 'failed', 'restart is not implemented in direct bot mode')
         break
@@ -867,7 +883,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       noteActivity()
     },
     setCurrentNbt(sourceName) {
-      state.currentNbt = sourceName ? path.basename(String(sourceName)) : null
+      const next = sourceName ? path.basename(String(sourceName)) : null
+      if (next !== state.currentNbt) {
+        state.currentNbt = next
+        state.currentNbtStartedAt = next ? new Date().toISOString() : null
+      }
       noteActivity()
     },
     setRecoveryState(nextState) {

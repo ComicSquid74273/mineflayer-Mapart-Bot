@@ -331,7 +331,11 @@ function summarizeBot(bot) {
     currentNbt: bot.currentNbt,
     lastStatusAt: bot.lastStatusAt,
     lastError: bot.lastError || null,
-    progress: bot.progress || null
+    progress: bot.progress || null,
+    verificationCode: bot.verificationCode || null,
+    tokenWaiting: bot.tokenWaiting === true,
+    botIp: bot.botIp || null,
+    currentNbtStartedAt: bot.currentNbtStartedAt || null
   }
 }
 
@@ -466,7 +470,9 @@ async function route(req, res) {
     const body = await readBody(req)
     const error = validateBotStatus(body)
     if (error) return badRequest(res, error)
-    const bot = store.upsertBotStatus(body)
+    const rawIp = req.socket?.remoteAddress || req.connection?.remoteAddress || null
+    const botIp = rawIp ? rawIp.replace(/^::ffff:/, '') : null
+    const bot = store.upsertBotStatus({ ...body, botIp })
     return sendJson(res, 200, { ok: true, nextPollMs: 3000, bot: summarizeBot(bot) })
   }
 
@@ -568,6 +574,15 @@ async function route(req, res) {
     if (status !== 'succeeded' && status !== 'failed') return badRequest(res, 'status must be succeeded or failed')
     const command = store.completeNodeCommand(params.hostLabel, params.commandId, status, body?.resultMessage, body?.botName || null)
     if (!command) return notFound(res)
+    if (command.commandType === 'delete-node-file') {
+      store.addEvent({
+        operator: `bot:${body?.botName || params.hostLabel}`,
+        action: 'delete-node-file-completed',
+        message: `${status === 'succeeded' ? 'Deleted' : 'Failed to delete'} ${command.fileName || 'unknown'} on node ${params.hostLabel}.`,
+        details: { hostLabel: params.hostLabel, fileName: command.fileName, commandId: params.commandId, status, resultMessage: body?.resultMessage || null },
+        level: status === 'succeeded' ? 'info' : 'warn'
+      })
+    }
     return sendJson(res, 200, { ok: true, command })
   }
 
@@ -666,6 +681,22 @@ async function route(req, res) {
     return sendJson(res, 201, {
       command
     })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/verify')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const action = String(body?.action || '').trim().toLowerCase()
+    if (action !== 'verified' && action !== 'refresh') return badRequest(res, 'action must be verified or refresh')
+    const command = store.createCommand({
+      targetBotName: params.botName,
+      commandType: 'verify',
+      reason: action,
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, `verify-${action}`, `Sent verification ${action} for ${params.botName}.`, { botName: params.botName })
+    return sendJson(res, 201, { command })
   }
 
   if (req.method === 'POST' && pathname === '/api/dashboard/files') {

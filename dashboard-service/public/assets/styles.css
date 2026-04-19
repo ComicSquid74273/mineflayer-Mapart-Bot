@@ -527,3 +527,57 @@ button:disabled {
     width: 100%;
   }
 }
+
+/* Verification banner */
+.verify-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: rgba(209, 154, 42, 0.12);
+  border: 1px solid rgba(209, 154, 42, 0.32);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+
+.verify-label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #ffd27a;
+  margin-bottom: 6px;
+}
+
+.verify-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.verify-field {
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.verify-code {
+  font-size: 1.3rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #ffd27a;
+  font-family: monospace;
+}
+
+.verify-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.bot-card-verify {
+  border-color: rgba(209, 154, 42, 0.28);
+  box-shadow: 0 0 0 1px rgba(209, 154, 42, 0.14);
+}
