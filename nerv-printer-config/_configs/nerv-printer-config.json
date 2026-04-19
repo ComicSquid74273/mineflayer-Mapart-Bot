@@ -216,7 +216,7 @@
     "retentionHours": 12
   },
   "printer": {
-    "startOnSpawn": true,
+    "startOnSpawn": false,
     "startDelayMs": 1500,
     "allowJump": false,
     "placeWhileSprinting": true,
@@ -396,5 +396,14 @@
     "joinStaggerMs": 12000,
     "startStaggerMs": 5000,
     "launchFromSingleProcess": true
+  },
+  "dashboard": {
+    "enabled": true,
+    "serviceUrl": "http://54.83.185.104:4080",
+    "hostLabel": "your-server-name",
+    "heartbeatMs": 5000,
+    "commandPollMs": 3000,
+    "idleWindowMs": 15000,
+    "staleMs": 20000
   }
 }
