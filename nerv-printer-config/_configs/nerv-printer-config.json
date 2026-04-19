@@ -26,7 +26,7 @@
           }
 
     ],
-    "version": "1.21.8",
+    "version": "1.20",
     "profilesFolder": "./auth-cache",
     "viewDistance": "normal",
     "checkTimeoutInterval": 60000,
@@ -203,7 +203,7 @@
     "inputMode": "nbt",
     "planFile": "./mapart-plan.json",
     "machineConfigProfile": "carpet",
-    "machineConfigFile": "./nerv-printer-config/_configs/carpet-printer-config.json",
+    "machineConfigFile": "./nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json",
     "resumeProgress": true,
     "progressFile": "./logs/printer-progress.json",
     "progressSaveEvery": 10,
@@ -369,21 +369,21 @@
     "logErrors": true,
     "errorAction": "repair"
   },
-  "anchorTranslation": {
+ "anchorTranslation": {
     "enabled": true,
     "sourceAnchor": {
-      "x": -450,
-      "y": 0,
+      "x": -706,
+      "y": -9,
       "z": -962
     },
     "targetAnchor": {
-      "x": -450,
-      "y": 0,
-      "z": -962
+      "x": 8765118,
+      "y": 66,
+      "z": 5890366
     }
-},
+  },
   "multiUser": {
-    "enabled": true,
+    "enabled": false,
     "mode": "file",
     "syncFolder": "./logs/printer-sync",
     "requireAllReady": true,
