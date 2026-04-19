@@ -400,7 +400,7 @@
   "dashboard": {
     "enabled": true,
     "serviceUrl": "http://54.83.185.104:4080",
-    "hostLabel": "your-server-name",
+    "hostLabel": "Dashboard",
     "heartbeatMs": 5000,
     "commandPollMs": 3000,
     "idleWindowMs": 15000,
