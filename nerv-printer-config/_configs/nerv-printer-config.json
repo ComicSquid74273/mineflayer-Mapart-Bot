@@ -14,13 +14,13 @@
           },
           {
             "name": "ComicBot002",
-            "enabled": true,
+            "enabled": false,
             "auth": "offline",
             "loginPassword": "gjZq56kCumgKp"
           },
           {
             "name": "ComicBot003",
-            "enabled": true,
+            "enabled": false,
             "auth": "offline",
             "loginPassword": "hGMsqs8vPt6w3"
           }
@@ -233,7 +233,7 @@
     "placeDelayMs": 10,
     "rotate": false,
     "northToSouth": true,
-    "mapFillSquareSize": 4,
+    "mapFillSquareSize": 10,
     "sprintMode": "always",
     "fastTraversalEnabled": false,
     "fastTraversalTickMs": 5,
@@ -293,7 +293,7 @@
     "postPrintXpRefillEnabled": true,
     "postPrintRenameMapEnabled": true,
     "postPrintRequireRenameBeforeStore": false,
-    "postPrintRenameAttempts": 3,
+    "postPrintRenameAttempts": 2,
     "postPrintMinXpLevel": 2,
     "postPrintTargetXpLevel": 3,
     "postPrintSkipResetInteraction": false,
@@ -333,7 +333,7 @@
     "scannerAdaptiveMaxPlaceDelayMs": 50,
     "scannerAdaptiveMinPlaceDelayMs": 6,
     "scannerRetryCooldownMs": 100,
-    "scannerMissRecoveryEnabled": true,
+    "scannerMissRecoveryEnabled": false,
     "scannerMissRecoveryThreshold": 1,
     "scannerMissRecoveryBacktrackBlocks": 3,
     "litematicRowSettleMs": 150,

@@ -3638,6 +3638,17 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   savePostPrintStep(resumeStep, 'post-print-active')
 
   if (shouldRunStep('withdraw')) {
+    // Dump any leftover filled maps from previous runs before taking new empty map
+    if (finishedChestPos) {
+      const leftoverMaps = findInventoryItemsByType(bot, 'filled_map')
+      for (const stack of leftoverMaps) {
+        if (stack && stack.count > 0) {
+          console.log(`[POSTPRINT] Dumping ${stack.count} leftover filled_map(s) before withdrawing new empty map.`)
+          await depositToChest(bot, config, finishedChestPos, 'filled_map', stack.count, machine.finishedMapChest?.accessPosition)
+        }
+      }
+    }
+
     const gotMap = countInventoryByType(bot, 'map') > 0 || await withdrawFromChest(bot, config, mapChestPos, 'map', 1)
     const gotPane = countInventoryItems(bot, 'glass_pane') > 0 || await withdrawFromChest(bot, config, mapChestPos, 'glass_pane', 1)
     if (!gotMap || !gotPane) {
@@ -6446,6 +6457,8 @@ async function runPrint(bot, config) {
 
   if (postPrintTestOnly) {
     console.log('[TEST] postPrintTestOnly=true, skipping carpet placement and running post-print workflow only.')
+    // Force fresh start in test mode so previous progress doesn't skip steps
+    resumePostPrintStep = 'withdraw'
     // Persist phase=post_print so crash here resumes post-print, not repair again
   if (progressEnabled) {
     writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
@@ -6551,6 +6564,20 @@ async function runPrint(bot, config) {
     saveProgress('printing', { state: 'printing_start', action: 'resume-ready' })
   }
 
+  // Pre-print cleanup: dump any leftover filled maps from previous runs before starting
+  {
+    const machine = config.machine || {}
+    const finishedChestPos = machine.finishedMapChest?.enabled ? machine.finishedMapChest.position : null
+    if (finishedChestPos) {
+      const leftoverMaps = findInventoryItemsByType(bot, 'filled_map')
+      for (const stack of leftoverMaps) {
+        if (stack && stack.count > 0) {
+          console.log(`[PREPRINT] Dumping ${stack.count} leftover filled_map(s) from previous run before starting print.`)
+          await depositToChest(bot, config, finishedChestPos, 'filled_map', stack.count, machine.finishedMapChest?.accessPosition)
+        }
+      }
+    }
+  }
 
   for (let i = 0; i < colTraversal.length; i += printChunkLines) {
     const inventoryCols = colTraversal.slice(i, i + printChunkLines)
@@ -6622,6 +6649,27 @@ async function runPrint(bot, config) {
         if (placementNoiseLogsEnabled(config)) {
           console.log(`[LITEMATIC-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
         }
+
+        // Collect errors from this batch for deferred end-of-print repair.
+        // Only scans loaded chunks; unloaded blocks are caught by the final sweep.
+        {
+          const Vec3Batch = bot.entity.position.constructor
+          const batchErrorKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
+          for (const target of batchTargets) {
+            const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+            if (batchErrorKeys.has(key)) continue
+            const actual = bot.blockAt(new Vec3Batch(target.position.x, target.position.y, target.position.z))
+            if (!actual) continue
+            if (actual.name !== target.blockName) {
+              errorList.push(target)
+              if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
+                const reason = actual.name === 'air' ? 'missing' : `wrong-${actual.name}`
+                console.log(`[BATCH-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
+              }
+            }
+          }
+        }
+
         if (progressEnabled) {
           saveProgress('printing', {
             state: 'printing_batch',
@@ -6774,12 +6822,14 @@ async function runPrint(bot, config) {
   }
 
   if (isLitematicBandMode) {
-    errorList.push(...scanPlacementErrors(bot, orderedTargets, {
+    const existingErrorKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
+    const sweepErrors = scanPlacementErrors(bot, orderedTargets, {
       config,
       logPrefix: 'LITEMATIC-SWEEP',
       logErrors: config.errorHandling?.logErrors !== false,
       maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
-    }).map((entry) => entry.target))
+    }).map((entry) => entry.target).filter(t => !existingErrorKeys.has(`${t.position.x}:${t.position.y}:${t.position.z}`))
+    errorList.push(...sweepErrors)
   }
 
   console.log(`[DONE-SWEEP] placed=${placed} already=${already} skipped=${skipped} errors=${errorList.length}`)
