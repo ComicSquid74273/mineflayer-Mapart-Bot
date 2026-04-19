@@ -9314,23 +9314,15 @@ function ensureStdinCommandInterface() {
   return rl
 }
 
-function waitForVerificationInput({ account, host, version, code, refreshMs = 9 * 60 * 1000 }) {
+function waitForVerificationInput({ account, host, version, code }) {
   const verifyUrl = 'https://6b6t.org/verify'
   console.log(`[VERIFY-CODE] ${account || 'unknown-account'} -> ${code || 'unknown-code'}`)
   console.log(`[VERIFY] account=${account} host=${host} version=${version} code=${code || 'unknown'} url=${verifyUrl}`)
-  console.log('[VERIFY] Open the URL, verify this account/code, then type "verified" here. Type "refresh" to request a fresh code.')
+  console.log('[VERIFY] Waiting. Type "verified" after completing verification, or "refresh" to request a new code.')
 
   return new Promise((resolve) => {
     ensureStdinCommandInterface()
-    const timer = setTimeout(() => {
-      stdinCommandState.verificationWaiter = null
-      console.log(`[VERIFY] Code for account=${account} is near expiry; refreshing by retrying the same test case.`)
-      resolve('refresh')
-    }, Math.max(30000, toNumber(refreshMs, 9 * 60 * 1000)))
-    timer.unref?.()
-
     stdinCommandState.verificationWaiter = (value) => {
-      clearTimeout(timer)
       resolve(value)
     }
   })
@@ -9343,7 +9335,8 @@ async function resolveTokenVerificationSession({
   version,
   sessionNumber,
   rerun,
-  retryDelayMs = 3000
+  retryDelayMs = 3000,
+  config = null
 }) {
   let current = session
   setRuntimeCommandStatus({
@@ -9356,7 +9349,6 @@ async function resolveTokenVerificationSession({
     verificationCode: current?.verificationCode || ''
   })
   while (current?.tokenVerification) {
-    const refreshMs = Math.max(60000, toNumber(getCliValue('--verify-refresh-ms'), 9 * 60 * 1000))
     setRuntimeCommandStatus({
       phase: 'token-verification',
       account,
@@ -9366,13 +9358,62 @@ async function resolveTokenVerificationSession({
       tokenWaiting: true,
       verificationCode: current?.verificationCode || ''
     })
-    const action = await waitForVerificationInput({
-      account,
-      host,
-      version,
-      code: current.verificationCode,
-      refreshMs
-    })
+
+    const dashCfg = config ? getDashboardConfig(config) : null
+    let verifyHeartbeatTimer = null
+    if (dashCfg?.enabled && dashCfg.serviceUrl) {
+      const botName = String(config?.bot?.username || config?.bot?.name || account || 'unnamed-bot').trim()
+      const verifyCode = current.verificationCode || null
+      const postVerifyStatus = () => {
+        createDashboardRequest(`${dashCfg.serviceUrl}/api/bots/status`, 'POST', {
+          botName,
+          runtime: 'nerv-printer',
+          hostLabel: dashCfg.hostLabel,
+          online: false,
+          phase: 'token-verification',
+          health: 20,
+          hunger: 20,
+          activeState: 'active',
+          location: 'unknown',
+          idle: false,
+          heartbeatAt: new Date().toISOString(),
+          role: String(config?.multiUser?.runtime?.role || 'single').toLowerCase() || 'single',
+          recoveryState: 'none',
+          reconnectState: 'idle',
+          currentNbt: null,
+          lastStatusAt: new Date().toISOString(),
+          verificationCode: verifyCode,
+          tokenWaiting: true
+        }).catch(() => {})
+      }
+      const pollVerifyCommands = () => {
+        if (!stdinCommandState.verificationWaiter) return
+        createDashboardRequest(`${dashCfg.serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands`, 'GET')
+          .then((res) => {
+            const items = Array.isArray(res.body?.items) ? res.body.items : []
+            const verifyCmd = items.find((item) => item.commandType === 'verify' && (item.status === 'pending' || item.status === 'claimed'))
+            if (!verifyCmd || !stdinCommandState.verificationWaiter) return
+            const verifyAction = String(verifyCmd.reason || '').toLowerCase() === 'verified' ? 'verified' : 'refresh'
+            createDashboardRequest(`${dashCfg.serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(verifyCmd.commandId)}/claim`, 'POST', {}).catch(() => {})
+            createDashboardRequest(`${dashCfg.serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(verifyCmd.commandId)}/result`, 'POST', { status: 'succeeded', resultMessage: `verification action=${verifyAction} applied` }).catch(() => {})
+            const waiter = stdinCommandState.verificationWaiter
+            stdinCommandState.verificationWaiter = null
+            waiter(verifyAction)
+          })
+          .catch(() => {})
+      }
+      postVerifyStatus()
+      verifyHeartbeatTimer = setInterval(() => {
+        postVerifyStatus()
+        pollVerifyCommands()
+      }, Math.max(3000, dashCfg.commandPollMs))
+      verifyHeartbeatTimer.unref?.()
+    }
+
+    const action = await waitForVerificationInput({ account, host, version, code: current.verificationCode })
+
+    if (verifyHeartbeatTimer) clearInterval(verifyHeartbeatTimer)
+
     console.log(action === 'verified'
       ? `[VERIFY] account=${account} marked verified; retrying the same session.`
       : `[VERIFY] account=${account} requested a fresh code; retrying the same session.`
@@ -11141,7 +11182,13 @@ function runSingleSession(config, sessionNumber) {
       const finalPhase = String(reason || '').includes('dashboard-stop') || String(reason || '').includes('stop')
         ? 'stopped'
         : ((successfulStartup || printerStarted) ? 'crashed' : 'stopped')
-      dashboardRuntime?.setLastError(lastErrorText || kickedText || reason || '')
+      const rawError = lastErrorText || kickedText || reason || ''
+      const isVerifyError = isTokenVerificationText(rawError)
+      const extractedCode = isVerifyError ? (verificationCode || extractVerificationCode(rawError)) : null
+      const cleanError = isVerifyError
+        ? `Verification required${extractedCode ? ` — code: ${extractedCode}` : ''}`
+        : rawError
+      dashboardRuntime?.setLastError(cleanError)
       dashboardRuntime?.stop(finalPhase, false)
       runtimeControl?.detach()
       resolve({
@@ -12986,7 +13033,8 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
           version: sessionConfig.bot?.version || 'unknown-version',
           sessionNumber: attempt,
           retryDelayMs: Math.max(1000, Math.min(5000, toNumber(reconnect.delayMs, 3000))),
-          rerun: async () => await runSingleSession(sessionConfig, attempt)
+          rerun: async () => await runSingleSession(sessionConfig, attempt),
+          config: sessionConfig
         })
       } finally {
         clearInterval(heartbeatTimer)
@@ -13190,7 +13238,8 @@ async function start() {
       version: sessionConfig.bot?.version || 'unknown-version',
       sessionNumber: attempt,
       retryDelayMs: Math.max(1000, Math.min(5000, toNumber(reconnect.delayMs, 3000))),
-      rerun: async () => await runSingleSession(sessionConfig, attempt)
+      rerun: async () => await runSingleSession(sessionConfig, attempt),
+      config: sessionConfig
     })
     const retryable = shouldRetryReconnect(session, sessionConfig)
     console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
