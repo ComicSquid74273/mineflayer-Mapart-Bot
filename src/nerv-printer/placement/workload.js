@@ -11,13 +11,16 @@ function createPlacementWorkload(deps) {
   } = deps
 
   function buildNervUCheckpoints(batchTargets, startOnNorthSide) {
-    const minX = Math.min(...batchTargets.map((target) => target.position.x))
-    const minY = Math.min(...batchTargets.map((target) => target.position.y))
+    const orderedCols = [...new Set(batchTargets.map((target) => target.col))]
+    const leadCol = orderedCols[0]
+    const leadTarget = batchTargets.find((target) => target.col === leadCol) || batchTargets[0]
+    const leadX = toNumber(leadTarget?.position?.x, Math.min(...batchTargets.map((target) => target.position.x)))
+    const leadY = toNumber(leadTarget?.position?.y, Math.min(...batchTargets.map((target) => target.position.y)))
     const minZ = Math.min(...batchTargets.map((target) => target.position.z))
     const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
     const activeCols = new Set(batchTargets.map((target) => target.col))
-    const cp1 = { x: minX + 0.5, y: minY, z: minZ + 0.5 }
-    const cp2 = { x: minX + 0.5, y: minY, z: maxZ + 0.5 }
+    const cp1 = { x: leadX + 0.5, y: leadY, z: minZ + 0.5 }
+    const cp2 = { x: leadX + 0.5, y: leadY, z: maxZ + 0.5 }
 
     return startOnNorthSide
       ? [{ position: cp1, action: '', activeCols }, { position: cp2, action: 'lineEnd', activeCols }]

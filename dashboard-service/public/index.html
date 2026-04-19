@@ -22,6 +22,14 @@
           <button id="logoutButton" class="ghost-button" type="button">Logout</button>
           <span id="authStatus" class="timestamp">Viewer mode</span>
         </div>
+        <label class="refresh-control" for="refreshInterval">
+          <span>Auto refresh</span>
+          <select id="refreshInterval">
+            <option value="60000">1 minute</option>
+            <option value="300000" selected>5 minutes</option>
+            <option value="600000">10 minutes</option>
+          </select>
+        </label>
         <button id="refreshButton" class="ghost-button" type="button">Refresh</button>
         <button id="startAllButton" class="accent-button" type="button" data-permission-needed="canOperate">Start Printing All</button>
         <button id="stopAllButton" class="danger-button" type="button" data-permission-needed="canOperate">Stop Printing All</button>

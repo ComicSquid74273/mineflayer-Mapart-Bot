@@ -26,6 +26,11 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8')
 }
 
+function toNumber(value, fallback) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
 function createStore(baseDir) {
   const dataDir = path.resolve(baseDir)
   const filesDir = path.join(dataDir, 'files')
@@ -34,6 +39,9 @@ function createStore(baseDir) {
   const uploadsFile = path.join(dataDir, 'files.json')
   const eventsFile = path.join(dataDir, 'events.json')
   const operatorsFile = path.join(dataDir, 'operators.json')
+  const nodeStatsFile = path.join(dataDir, 'node-stats.json')
+  const COUNTED_NODE_PHASES = new Set(['printing', 'repair', 'rescan', 'post-print', 'cleanup'])
+  const HOLD_NODE_PHASES = new Set([])
 
   function defaultOperators() {
     return [
@@ -81,6 +89,302 @@ function createStore(baseDir) {
   if (!fs.existsSync(uploadsFile)) writeJson(uploadsFile, [])
   if (!fs.existsSync(eventsFile)) writeJson(eventsFile, [])
   if (!fs.existsSync(operatorsFile)) writeJson(operatorsFile, defaultOperators())
+  if (!fs.existsSync(nodeStatsFile)) writeJson(nodeStatsFile, {})
+
+  function toTimestamp(value) {
+    const ms = new Date(value || 0).getTime()
+    return Number.isFinite(ms) ? ms : 0
+  }
+
+  function readBotMap() {
+    const bots = readJson(botsFile, {})
+    return bots && typeof bots === 'object' && !Array.isArray(bots) ? bots : {}
+  }
+
+  function readNodeStatsMap() {
+    const items = readJson(nodeStatsFile, {})
+    return items && typeof items === 'object' && !Array.isArray(items) ? items : {}
+  }
+
+  function saveNodeStatsMap(items) {
+    writeJson(nodeStatsFile, items)
+  }
+
+  function sanitizeTimingRun(input) {
+    if (!input || typeof input !== 'object') return null
+    const fileName = String(input.fileName || '').trim()
+    if (!fileName) return null
+    const startedAt = String(input.startedAt || '').trim()
+    const lastSeenAt = String(input.lastSeenAt || '').trim() || startedAt
+    return {
+      fileName: path.basename(fileName),
+      startedAt: startedAt || nowIso(),
+      lastSeenAt: lastSeenAt || startedAt || nowIso(),
+      activeBotCount: Math.max(0, toNumber(input.activeBotCount, 0)),
+      accumulatedActiveMs: Math.max(0, toNumber(input.accumulatedActiveMs, 0)),
+      segmentStartedAt: String(input.segmentStartedAt || '').trim() || null,
+      segmentLastSeenAt: String(input.segmentLastSeenAt || '').trim() || null,
+      botNames: Array.isArray(input.botNames)
+        ? input.botNames.map((item) => String(item || '').trim()).filter(Boolean)
+        : []
+    }
+  }
+
+  function sanitizeTimingHistoryEntry(input) {
+    if (!input || typeof input !== 'object') return null
+    const fileName = String(input.fileName || '').trim()
+    const startedAt = String(input.startedAt || '').trim()
+    const completedAt = String(input.completedAt || '').trim()
+    const durationMs = Math.max(0, toNumber(input.durationMs, 0))
+    if (!fileName || !startedAt || !completedAt || !Number.isFinite(durationMs)) return null
+    return {
+      fileName: path.basename(fileName),
+      startedAt,
+      completedAt,
+      durationMs,
+      botNames: Array.isArray(input.botNames)
+        ? input.botNames.map((item) => String(item || '').trim()).filter(Boolean)
+        : []
+    }
+  }
+
+  function createNodeTimingRecord(input = null) {
+    const totalCompletedMaps = Math.max(0, toNumber(input?.totalCompletedMaps, 0))
+    const totalDurationMs = Math.max(0, toNumber(input?.totalDurationMs, 0))
+    const recentRuns = (Array.isArray(input?.recentRuns) ? input.recentRuns : [])
+      .map((item) => sanitizeTimingHistoryEntry(item))
+      .filter(Boolean)
+      .slice(-12)
+    const averageDurationMs = totalCompletedMaps > 0
+      ? Math.round(totalDurationMs / totalCompletedMaps)
+      : 0
+    return {
+      totalCompletedMaps,
+      totalDurationMs,
+      averageDurationMs,
+      recentRuns,
+      activeRun: sanitizeTimingRun(input?.activeRun),
+      updatedAt: String(input?.updatedAt || '').trim() || null
+    }
+  }
+
+  function isCountedNodePhase(phase) {
+    return COUNTED_NODE_PHASES.has(String(phase || '').trim().toLowerCase())
+  }
+
+  function isHoldNodePhase(phase) {
+    return HOLD_NODE_PHASES.has(String(phase || '').trim().toLowerCase())
+  }
+
+  function getOpenSegmentDurationMs(run, endAt = null) {
+    const startMs = toTimestamp(run?.segmentStartedAt)
+    if (!startMs) return 0
+    const endMs = Math.max(startMs, toTimestamp(endAt || run?.segmentLastSeenAt || run?.lastSeenAt || nowIso()))
+    return Math.max(0, endMs - startMs)
+  }
+
+  function closeTimingSegment(run, endAt = null) {
+    const current = sanitizeTimingRun(run)
+    if (!current) return null
+    return sanitizeTimingRun({
+      ...current,
+      accumulatedActiveMs: current.accumulatedActiveMs + getOpenSegmentDurationMs(current, endAt),
+      segmentStartedAt: null,
+      segmentLastSeenAt: null
+    })
+  }
+
+  function buildHostActivitySnapshot(hostLabel, botMap) {
+    const normalizedHost = String(hostLabel || '').trim()
+    const bots = Object.values(botMap || {}).filter((bot) => String(bot?.hostLabel || '').trim() === normalizedHost)
+    let lastHostStatusAt = null
+    let lastHostStatusAtMs = 0
+    const groups = new Map()
+
+    for (const bot of bots) {
+      const statusAt = String(bot?.lastStatusAt || bot?.heartbeatAt || '').trim()
+      const statusAtMs = toTimestamp(statusAt)
+      if (statusAtMs >= lastHostStatusAtMs) {
+        lastHostStatusAtMs = statusAtMs
+        lastHostStatusAt = statusAt || lastHostStatusAt
+      }
+
+      const currentNbt = String(bot?.currentNbt || '').trim()
+      const phase = String(bot?.phase || '').trim().toLowerCase()
+      const countedPhase = isCountedNodePhase(phase)
+      const holdPhase = isHoldNodePhase(phase)
+      if (!currentNbt || (!countedPhase && !holdPhase)) continue
+
+      const fileName = path.basename(currentNbt)
+      const current = groups.get(fileName) || {
+        fileName,
+        botCount: 0,
+        activeBotCount: 0,
+        countedStartedAtCandidate: null,
+        countedStartedAtCandidateMs: 0,
+        countedLastSeenAt: null,
+        countedLastSeenAtMs: 0,
+        lastSeenAt: statusAt || nowIso(),
+        lastSeenAtMs: statusAtMs || Date.now(),
+        botNames: []
+      }
+
+      current.botCount += 1
+      if (countedPhase) {
+        current.activeBotCount += 1
+        if (statusAtMs && (!current.countedStartedAtCandidateMs || statusAtMs < current.countedStartedAtCandidateMs)) {
+          current.countedStartedAtCandidateMs = statusAtMs
+          current.countedStartedAtCandidate = statusAt
+        }
+        if (statusAtMs >= current.countedLastSeenAtMs) {
+          current.countedLastSeenAtMs = statusAtMs || current.countedLastSeenAtMs
+          current.countedLastSeenAt = statusAt || current.countedLastSeenAt
+        }
+      }
+      if (statusAtMs >= current.lastSeenAtMs) {
+        current.lastSeenAtMs = statusAtMs || current.lastSeenAtMs
+        current.lastSeenAt = statusAt || current.lastSeenAt
+      }
+      current.botNames.push(String(bot?.botName || '').trim())
+      groups.set(fileName, current)
+    }
+
+    const activeRun = Array.from(groups.values())
+      .sort((left, right) => {
+        if (right.activeBotCount !== left.activeBotCount) return right.activeBotCount - left.activeBotCount
+        if (right.botCount !== left.botCount) return right.botCount - left.botCount
+        return right.lastSeenAtMs - left.lastSeenAtMs
+      })[0] || null
+
+    return {
+      lastHostStatusAt: lastHostStatusAt || nowIso(),
+      lastHostStatusAtMs: lastHostStatusAtMs || Date.now(),
+      activeRun
+    }
+  }
+
+  function recordCompletedNodeRun(record, completedRun) {
+    const startedAtMs = toTimestamp(completedRun.startedAt)
+    const completedAtMs = Math.max(startedAtMs, toTimestamp(completedRun.completedAt))
+    const durationMs = Math.max(0, toNumber(completedRun.durationMs, Math.max(0, completedAtMs - startedAtMs)))
+    const historyEntry = sanitizeTimingHistoryEntry({
+      fileName: completedRun.fileName,
+      startedAt: completedRun.startedAt,
+      completedAt: new Date(completedAtMs).toISOString(),
+      durationMs,
+      botNames: completedRun.botNames
+    })
+
+    if (!historyEntry) return record
+
+    const next = createNodeTimingRecord(record)
+    next.totalCompletedMaps += 1
+    next.totalDurationMs += historyEntry.durationMs
+    next.averageDurationMs = next.totalCompletedMaps > 0
+      ? Math.round(next.totalDurationMs / next.totalCompletedMaps)
+      : 0
+    next.recentRuns = [...next.recentRuns, historyEntry].slice(-12)
+    next.updatedAt = historyEntry.completedAt
+    return next
+  }
+
+  function summarizeNodeTiming(record) {
+    const current = createNodeTimingRecord(record)
+    const activeRun = current.activeRun
+      ? {
+          ...current.activeRun,
+          elapsedMs: current.activeRun.accumulatedActiveMs + getOpenSegmentDurationMs(current.activeRun, Date.now())
+        }
+      : null
+    const lastCompleted = current.recentRuns[current.recentRuns.length - 1] || null
+    return {
+      totalCompletedMaps: current.totalCompletedMaps,
+      totalDurationMs: current.totalDurationMs,
+      averageDurationMs: current.averageDurationMs,
+      lastCompletedAt: lastCompleted?.completedAt || null,
+      lastCompletedFileName: lastCompleted?.fileName || null,
+      activeRun,
+      recentRuns: current.recentRuns,
+      updatedAt: current.updatedAt || null
+    }
+  }
+
+  function reconcileHostNodeTiming(hostLabel, botMap = readBotMap()) {
+    const normalizedHost = String(hostLabel || '').trim()
+    if (!normalizedHost) return summarizeNodeTiming(null)
+
+    const statsMap = readNodeStatsMap()
+    let nextRecord = createNodeTimingRecord(statsMap[normalizedHost])
+    const snapshot = buildHostActivitySnapshot(normalizedHost, botMap)
+    const previousActiveRun = nextRecord.activeRun
+    const snapshotActiveRun = snapshot.activeRun
+
+    if (previousActiveRun && (!snapshotActiveRun || snapshotActiveRun.fileName !== previousActiveRun.fileName)) {
+      const closedRun = closeTimingSegment(previousActiveRun, previousActiveRun.segmentLastSeenAt || snapshot.lastHostStatusAt || nowIso())
+      nextRecord = recordCompletedNodeRun(nextRecord, {
+        fileName: closedRun?.fileName || previousActiveRun.fileName,
+        startedAt: closedRun?.startedAt || previousActiveRun.startedAt,
+        completedAt: snapshotActiveRun?.countedStartedAtCandidate || snapshot.lastHostStatusAt || previousActiveRun.lastSeenAt || nowIso(),
+        durationMs: closedRun?.accumulatedActiveMs || 0,
+        botNames: closedRun?.botNames || previousActiveRun.botNames
+      })
+      nextRecord.activeRun = null
+    }
+
+    if (snapshotActiveRun) {
+      if (!nextRecord.activeRun || nextRecord.activeRun.fileName !== snapshotActiveRun.fileName) {
+        nextRecord.activeRun = sanitizeTimingRun({
+          fileName: snapshotActiveRun.fileName,
+          startedAt: snapshotActiveRun.countedStartedAtCandidate || snapshotActiveRun.lastSeenAt || snapshot.lastHostStatusAt || nowIso(),
+          lastSeenAt: snapshotActiveRun.lastSeenAt || snapshot.lastHostStatusAt || nowIso(),
+          activeBotCount: snapshotActiveRun.activeBotCount,
+          accumulatedActiveMs: 0,
+          segmentStartedAt: snapshotActiveRun.activeBotCount > 0
+            ? (snapshotActiveRun.countedStartedAtCandidate || snapshot.lastHostStatusAt || nowIso())
+            : null,
+          segmentLastSeenAt: snapshotActiveRun.activeBotCount > 0
+            ? (snapshotActiveRun.countedLastSeenAt || snapshot.lastHostStatusAt || nowIso())
+            : null,
+          botNames: snapshotActiveRun.botNames
+        })
+      } else {
+        let activeRun = sanitizeTimingRun({
+          ...nextRecord.activeRun,
+          lastSeenAt: snapshotActiveRun.lastSeenAt || nextRecord.activeRun.lastSeenAt,
+          activeBotCount: snapshotActiveRun.activeBotCount,
+          botNames: snapshotActiveRun.botNames
+        })
+        if (snapshotActiveRun.activeBotCount > 0) {
+          activeRun = sanitizeTimingRun({
+            ...activeRun,
+            segmentStartedAt: activeRun.segmentStartedAt || snapshotActiveRun.countedStartedAtCandidate || snapshot.lastHostStatusAt || nowIso(),
+            segmentLastSeenAt: snapshotActiveRun.countedLastSeenAt || activeRun.segmentLastSeenAt || snapshot.lastHostStatusAt || nowIso()
+          })
+        } else if (activeRun.segmentStartedAt) {
+          activeRun = closeTimingSegment(activeRun, activeRun.segmentLastSeenAt || snapshot.lastHostStatusAt || nowIso())
+        }
+        nextRecord.activeRun = activeRun
+      }
+    } else {
+      nextRecord.activeRun = null
+    }
+
+    nextRecord.updatedAt = snapshot.lastHostStatusAt || nextRecord.updatedAt || nowIso()
+    statsMap[normalizedHost] = nextRecord
+    saveNodeStatsMap(statsMap)
+    return summarizeNodeTiming(nextRecord)
+  }
+
+  function reconcileAllNodeTiming(botMap = readBotMap()) {
+    const hostLabels = new Set(
+      Object.values(botMap)
+        .map((bot) => String(bot?.hostLabel || '').trim())
+        .filter(Boolean)
+    )
+    for (const hostLabel of hostLabels) {
+      reconcileHostNodeTiming(hostLabel, botMap)
+    }
+  }
 
   function sanitizeOperatorPermissions(input) {
     const source = input && typeof input === 'object' ? input : {}
@@ -187,18 +491,21 @@ function createStore(baseDir) {
   }
 
   function listBots() {
-    const bots = readJson(botsFile, {})
+    const bots = readBotMap()
     return Object.values(bots).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
   }
 
   function getBot(botName) {
-    const bots = readJson(botsFile, {})
+    const bots = readBotMap()
     return bots[botName] || null
   }
 
   function listNodes() {
+    const botMap = readBotMap()
+    reconcileAllNodeTiming(botMap)
+    const timingByHost = readNodeStatsMap()
     const byHost = new Map()
-    for (const bot of listBots()) {
+    for (const bot of Object.values(botMap)) {
       const hostLabel = String(bot.hostLabel || '').trim() || 'unknown-host'
       const current = byHost.get(hostLabel) || {
         hostLabel,
@@ -206,7 +513,8 @@ function createStore(baseDir) {
         onlineCount: 0,
         botNames: [],
         lastStatusAt: null,
-        nodeFiles: []
+        nodeFiles: [],
+        timing: summarizeNodeTiming(timingByHost[hostLabel])
       }
       current.botCount += 1
       if (bot.online === true) current.onlineCount += 1
@@ -225,13 +533,14 @@ function createStore(baseDir) {
   }
 
   function upsertBotStatus(status) {
-    const bots = readJson(botsFile, {})
+    const bots = readBotMap()
     const next = {
       ...status,
       lastStatusAt: status.lastStatusAt || nowIso()
     }
     bots[status.botName] = next
     writeJson(botsFile, bots)
+    reconcileHostNodeTiming(next.hostLabel, bots)
     return next
   }
 
@@ -514,6 +823,8 @@ function createStore(baseDir) {
     if (!item) return null
     return path.join(filesDir, item.storedName)
   }
+
+  reconcileAllNodeTiming(readBotMap())
 
   return {
     listBots,
