@@ -293,7 +293,7 @@
     "postPrintXpRefillEnabled": true,
     "postPrintRenameMapEnabled": true,
     "postPrintRequireRenameBeforeStore": false,
-    "postPrintRenameAttempts": 2,
+    "postPrintRenameAttempts": 1,
     "postPrintMinXpLevel": 2,
     "postPrintTargetXpLevel": 3,
     "postPrintSkipResetInteraction": false,
