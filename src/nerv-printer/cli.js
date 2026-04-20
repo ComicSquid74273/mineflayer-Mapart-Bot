@@ -5311,8 +5311,10 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
       if (!target) break
 
       try {
+        const repairMovePromise = bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
+        repairMovePromise.catch(() => {})
         await Promise.race([
-          bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange)),
+          repairMovePromise,
           delay(moveTimeoutMs).then(() => {
             throw new Error(`repair move timeout after ${moveTimeoutMs}ms`)
           })
