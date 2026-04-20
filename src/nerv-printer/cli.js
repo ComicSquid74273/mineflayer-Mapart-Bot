@@ -2852,7 +2852,9 @@ async function equipMaterial(bot, config, blockName, options = {}) {
       ? toNumber(advanced.scannerPostSwapDelayMs, 0)
       : toNumber(advanced.postSwapDelayMs, 100)
     if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
+    if (fastSwap) bot.setControlState('sprint', false)
     await bot.equip(inventoryItem, 'hand')
+    if (fastSwap) bot.setControlState('sprint', true)
     if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
     unavailableMaterialCache.delete(blockName)
     return true
@@ -4941,7 +4943,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
         await bot._genericPlace(attempt.block, attempt.face, {
           swingArm: 'right',
-          forceLook: printer.rotate !== false ? true : 'ignore'
+          forceLook: true
         })
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
@@ -7009,8 +7011,34 @@ function createBot(config) {
 
   applyAntiHunger(bot, config)
   installChatLogin(bot, config)
+  applyInventoryStateSync(bot)
 
   return bot
+}
+
+function waitForInventoryStateUpdate(bot, timeoutMs) {
+  return new Promise(resolve => {
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      bot._client.removeListener('set_slot', finish)
+      bot._client.removeListener('window_items', finish)
+      resolve()
+    }
+    bot._client.once('set_slot', finish)
+    bot._client.once('window_items', finish)
+    setTimeout(finish, timeoutMs)
+  })
+}
+
+function applyInventoryStateSync(bot) {
+  if (!bot.supportFeature('stateIdUsed')) return
+  const original = bot.clickWindow.bind(bot)
+  bot.clickWindow = async function (slot, mouseButton, mode) {
+    await original(slot, mouseButton, mode)
+    await waitForInventoryStateUpdate(bot, 150)
+  }
 }
 
 function getChatLoginPassword(config) {
