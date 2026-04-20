@@ -4061,54 +4061,43 @@ function getInventoryManagedLinesPerRun(config, linesPerRun) {
 }
 
 function getNervRequiredItems(bot, config, targets) {
-  const printer = config.printer || {}
-  const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const maxMaterialTypes = Math.max(1, Math.min(16, toNumber(config.advanced?.inventoryMaxMaterialTypes, 16)))
   const useWorldState = config.advanced?.inventoryPlanUseWorldState === true
   const availableSlots = getNervAvailableSlots(bot, config, targets)
   const requiredItems = new Map()
-  const { byColRow, cols, rows } = buildNervTargetGrid(targets)
   const Vec3 = bot.entity.position.constructor
-  let isStartSide = true
   let inspected = 0
   let counted = 0
   let unloaded = 0
 
-  for (let i = 0; i < cols.length; i += linesPerRun) {
-    const colBatch = cols.slice(i, i + linesPerRun)
-    const rowOrder = isStartSide ? rows : [...rows].reverse()
+  // Process all targets in a single pass — traversal direction does not affect material counts,
+  // so batching by linesPerRun is unnecessary and causes the capacity check to fire prematurely
+  // at exactly the linesPerRun boundary instead of at the full window boundary.
+  for (const target of targets) {
+    if (!target) continue
+    inspected += 1
 
-    for (const row of rowOrder) {
-      for (const col of colBatch) {
-        const target = byColRow.get(`${col}:${row}`)
-        if (!target) continue
-        inspected += 1
-
-        const targetPos = new Vec3(target.position.x, target.position.y, target.position.z)
-        if (useWorldState) {
-          const blockState = bot.blockAt(targetPos)
-          if (!blockState) unloaded += 1
-          if (blockState && blockState.name !== 'air') continue
-        }
-
-        const blockName = target.blockName
-        if (!requiredItems.has(blockName) && requiredItems.size >= maxMaterialTypes) {
-          return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
-        }
-        requiredItems.set(blockName, (requiredItems.get(blockName) || 0) + 1)
-        counted += 1
-
-        if (stacksRequiredFromAmounts([], bot, requiredItems) > availableSlots.length) {
-          const reverted = Math.max(0, (requiredItems.get(blockName) || 1) - 1)
-          if (reverted > 0) requiredItems.set(blockName, reverted)
-          else requiredItems.delete(blockName)
-          counted -= 1
-          return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
-        }
-      }
+    const targetPos = new Vec3(target.position.x, target.position.y, target.position.z)
+    if (useWorldState) {
+      const blockState = bot.blockAt(targetPos)
+      if (!blockState) unloaded += 1
+      if (blockState && blockState.name !== 'air') continue
     }
 
-    isStartSide = !isStartSide
+    const blockName = target.blockName
+    if (!requiredItems.has(blockName) && requiredItems.size >= maxMaterialTypes) {
+      return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
+    }
+    requiredItems.set(blockName, (requiredItems.get(blockName) || 0) + 1)
+    counted += 1
+
+    if (stacksRequiredFromAmounts([], bot, requiredItems) > availableSlots.length) {
+      const reverted = Math.max(0, (requiredItems.get(blockName) || 1) - 1)
+      if (reverted > 0) requiredItems.set(blockName, reverted)
+      else requiredItems.delete(blockName)
+      counted -= 1
+      return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
+    }
   }
 
   return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
@@ -10882,8 +10871,15 @@ async function runLobbyPortalAutomation(bot, config) {
 
   const totalLegs = getPortalCount(portalConfig, config)
   const maxAttempts = Math.max(1, toNumber(portalConfig.maxAttempts, 3))
+  const overallTimeoutMs = Math.max(60000, toNumber(portalConfig.overallTimeoutMs, 180000))
   bot.__nervAllowOffPlatformNavigation = true
   bot.__nervPlatformWatchdogActive = false
+
+  const stuckTimer = setTimeout(() => {
+    console.log(`[LOBBY-PORTAL] Stuck in portal automation for ${Math.round(overallTimeoutMs / 1000)}s; disconnecting to reconnect.`)
+    stopBotMovement(bot)
+    try { bot.quit('lobby-portal-stuck') } catch {}
+  }, overallTimeoutMs)
 
   try {
     for (let leg = 1; leg <= totalLegs; leg += 1) {
@@ -10914,6 +10910,7 @@ async function runLobbyPortalAutomation(bot, config) {
     }
     return true
   } finally {
+    clearTimeout(stuckTimer)
     stopBotMovement(bot)
     bot.__nervAllowOffPlatformNavigation = false
   }
@@ -10985,10 +10982,17 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
   bot.__nervPlatformHoldPromise = (async () => {
     const pollMs = Math.max(250, toNumber(config.advanced?.platformWatchdogPollMs, 1000))
     const logMs = Math.max(1000, toNumber(config.advanced?.platformHoldLogMs, 5000))
+    const stuckTimeoutMs = Math.max(60000, toNumber(config.advanced?.platformHoldStuckTimeoutMs, 180000))
     let lastLog = 0
     let announced = false
+    const stuckAt = Date.now()
 
     while (bot?._client && bot._client.state !== 'disconnected' && bot.__nervSessionActive !== false) {
+      if (Date.now() - stuckAt > stuckTimeoutMs) {
+        console.log(`[PLATFORM-HOLD] Stuck in platform hold for ${Math.round(stuckTimeoutMs / 1000)}s; disconnecting to reconnect.`)
+        try { bot.quit('platform-hold-stuck') } catch {}
+        return
+      }
       if (bot.__nervAllowOffPlatformNavigation) return
       if (rescueBotPositionFromLatestPacket(bot, config, reason, { log: false })) return
       if (rescueBotPositionFromPlatformCache(bot, config, reason)) return
