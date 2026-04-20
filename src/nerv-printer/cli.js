@@ -7011,7 +7011,7 @@ function createBot(config) {
 
   applyAntiHunger(bot, config)
   installChatLogin(bot, config)
-  applyInventoryStateSync(bot)
+  bot.once('login', () => applyInventoryStateSync(bot))
 
   return bot
 }
