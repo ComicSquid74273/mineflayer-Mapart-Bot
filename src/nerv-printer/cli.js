@@ -11045,21 +11045,25 @@ function installPlatformSafety(bot, config) {
       if (!bot.__nervAllowOffPlatformNavigation) {
         await waitForPlatformReady(bot, config, 'before-path')
       }
-      try {
-        return await originalGoto(goal)
-      } catch (err) {
-        const message = String(err?.message || err || '')
-        const goalChanged = message.toLowerCase().includes('goal was changed')
-        if (!bot.__nervAllowOffPlatformNavigation && goalChanged) {
-          console.log('[PATH-RECOVER] Pathfinder goal changed during platform/transfer hold; waiting for platform and retrying.')
-          await waitForPlatformReady(bot, config, 'path-goal-changed')
+      while (true) {
+        try {
           return await originalGoto(goal)
+        } catch (err) {
+          const message = String(err?.message || err || '')
+          const goalChanged = message.toLowerCase().includes('goal was changed')
+          const offPlatform = !bot.__nervAllowOffPlatformNavigation &&
+            (!isPositionUsable(bot?.entity?.position) || !isPositionInsidePlatformBounds(bot.entity.position, config))
+          if (!bot.__nervAllowOffPlatformNavigation && goalChanged) {
+            console.log('[PATH-RECOVER] Pathfinder goal changed during platform/transfer hold; waiting for platform and retrying.')
+            await waitForPlatformReady(bot, config, 'path-goal-changed')
+            continue
+          }
+          if (offPlatform) {
+            await waitForPlatformReady(bot, config, 'path-interrupted')
+            continue
+          }
+          throw err
         }
-        if (!bot.__nervAllowOffPlatformNavigation && (!isPositionUsable(bot?.entity?.position) || !isPositionInsidePlatformBounds(bot.entity.position, config))) {
-          await waitForPlatformReady(bot, config, 'path-interrupted')
-          return await originalGoto(goal)
-        }
-        throw err
       }
     }
     bot.pathfinder.__nervPlatformGotoWrapped = true
