@@ -26,6 +26,7 @@ const CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs
 const LEGACY_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config.json')
 const DEFAULT_IMPORTED_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'carpet-printer-config.json')
 const TEST_BOT_CONFIG_FILE = path.resolve(process.cwd(), 'config.test.json')
+const EXPLICIT_CONFIG_FILE = getCliValue('--config') || getCliValue('--config-file') || process.env.NERV_CONFIG_FILE || null
 const LOG_FILE = path.resolve(process.cwd(), 'logs', 'nerv-printer.log')
 const logContext = new AsyncLocalStorage()
 const botLogStreams = new Map()
@@ -256,6 +257,7 @@ function readJson(filePath) {
 }
 
 function getUserConfigPath() {
+  if (EXPLICIT_CONFIG_FILE) return path.resolve(process.cwd(), EXPLICIT_CONFIG_FILE)
   if (fs.existsSync(CONFIG_FILE)) return CONFIG_FILE
   if (fs.existsSync(LEGACY_CONFIG_FILE)) return LEGACY_CONFIG_FILE
   return CONFIG_FILE
