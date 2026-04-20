@@ -4941,6 +4941,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     try {
       if (shouldSneak) {
         bot.setControlState('sneak', true)
+        await new Promise(r => setTimeout(r, 60))
       }
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
         await bot._genericPlace(attempt.block, attempt.face, {
@@ -11033,8 +11034,12 @@ function installPlatformSafety(bot, config) {
     if (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)) return
     if (rescueBotPositionFromLatestPacket(bot, config, 'runtime-watchdog', { log: false })) return
     if (rescueBotPositionFromPlatformCache(bot, config, 'runtime-watchdog')) return
+    if (bot.__nervPlatformRecoveryInProgress) return
     stopBotMovement(bot)
-    void waitForPlatformReady(bot, config, 'runtime-watchdog')
+    bot.__nervPlatformRecoveryInProgress = true
+    void waitForPlatformReady(bot, config, 'runtime-watchdog').finally(() => {
+      bot.__nervPlatformRecoveryInProgress = false
+    })
   }, pollMs)
   timer.unref?.()
   bot.once('end', () => clearInterval(timer))
