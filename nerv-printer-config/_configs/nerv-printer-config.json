@@ -323,7 +323,7 @@
     "dumpTestTossAtEachStation": true,
     "dumpPathThinkTimeoutMs": 5000,
     "dumpAlreadyNearRange": 4,
-    "dumpGoalRange": 2,
+    "dumpGoalRange": 1,
     "multiDumpLockStaleMs": 45000,
     "dumpReaimEveryStacks": 2,
     "movingPlaceTestTargetCount": 32,
