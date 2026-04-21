@@ -40,6 +40,7 @@ function createStore(baseDir) {
   const eventsFile = path.join(dataDir, 'events.json')
   const operatorsFile = path.join(dataDir, 'operators.json')
   const nodeStatsFile = path.join(dataDir, 'node-stats.json')
+  const nodeLogDownloadsDir = path.join(dataDir, 'node-log-downloads')
   const COUNTED_NODE_PHASES = new Set(['printing', 'repair', 'rescan', 'post-print', 'cleanup'])
   const HOLD_NODE_PHASES = new Set([])
 
@@ -84,6 +85,7 @@ function createStore(baseDir) {
 
   ensureDir(dataDir)
   ensureDir(filesDir)
+  ensureDir(nodeLogDownloadsDir)
   if (!fs.existsSync(botsFile)) writeJson(botsFile, {})
   if (!fs.existsSync(commandsFile)) writeJson(commandsFile, [])
   if (!fs.existsSync(uploadsFile)) writeJson(uploadsFile, [])
@@ -514,6 +516,7 @@ function createStore(baseDir) {
         botNames: [],
         lastStatusAt: null,
         nodeFiles: [],
+        nodeLogs: [],
         timing: summarizeNodeTiming(timingByHost[hostLabel])
       }
       current.botCount += 1
@@ -524,6 +527,7 @@ function createStore(baseDir) {
       if (!current.lastStatusAt || String(bot.lastStatusAt || '') > String(current.lastStatusAt || '')) {
         current.lastStatusAt = bot.lastStatusAt || null
         current.nodeFiles = Array.isArray(bot.nodeFiles) ? bot.nodeFiles : []
+        current.nodeLogs = Array.isArray(bot.nodeLogs) ? bot.nodeLogs : []
       }
       byHost.set(hostLabel, current)
     }
@@ -575,6 +579,7 @@ function createStore(baseDir) {
       requestedBy: input.requestedBy || null,
       nbtFileId: input.nbtFileId || null,
       fileName: input.fileName || null,
+      contentBase64: input.contentBase64 || null,
       reason: input.reason || null,
       message: input.message || null,
       expiresAt: input.expiresAt || null,
@@ -821,6 +826,40 @@ function createStore(baseDir) {
     return items[index]
   }
 
+  function saveNodeLogDownload({ commandId, hostLabel, botName, fileName, contentBase64 }) {
+    const safeCommandId = String(commandId || '').trim()
+    const safeHostLabel = String(hostLabel || '').trim()
+    const safeFileName = path.basename(String(fileName || '').trim())
+    if (!safeCommandId || !safeHostLabel || !safeFileName) return null
+    const dataPath = path.join(nodeLogDownloadsDir, `${safeCommandId}.log`)
+    const metaPath = path.join(nodeLogDownloadsDir, `${safeCommandId}.json`)
+    const buffer = Buffer.from(String(contentBase64 || ''), 'base64')
+    fs.writeFileSync(dataPath, buffer)
+    writeJson(metaPath, {
+      commandId: safeCommandId,
+      hostLabel: safeHostLabel,
+      botName: String(botName || '').trim() || null,
+      fileName: safeFileName,
+      sizeBytes: buffer.length,
+      savedAt: nowIso()
+    })
+    return { dataPath, metaPath }
+  }
+
+  function getNodeLogDownload(commandId) {
+    const safeCommandId = String(commandId || '').trim()
+    if (!safeCommandId) return null
+    const dataPath = path.join(nodeLogDownloadsDir, `${safeCommandId}.log`)
+    const metaPath = path.join(nodeLogDownloadsDir, `${safeCommandId}.json`)
+    if (!fs.existsSync(dataPath) || !fs.existsSync(metaPath)) return null
+    const meta = readJson(metaPath, null)
+    if (!meta) return null
+    return {
+      ...meta,
+      filePath: dataPath
+    }
+  }
+
   function resolveFilePath(fileId) {
     const item = getFile(fileId)
     if (!item) return null
@@ -860,6 +899,8 @@ function createStore(baseDir) {
     completeFileDelivery,
     completeNodeFileDelivery,
     completeNodeCommand,
+    saveNodeLogDownload,
+    getNodeLogDownload,
     resolveFilePath
   }
 }

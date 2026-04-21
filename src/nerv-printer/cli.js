@@ -624,6 +624,31 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     }
   }
 
+  function listNodeLogFiles() {
+    const folder = path.dirname(LOG_FILE)
+    if (!fs.existsSync(folder)) return []
+    try {
+      return fs.readdirSync(folder, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.log'))
+        .map((entry) => {
+          const filePath = path.join(folder, entry.name)
+          const stats = fs.statSync(filePath)
+          return {
+            fileName: entry.name,
+            sizeBytes: stats.size,
+            modifiedAt: stats.mtime.toISOString()
+          }
+        })
+        .sort((left, right) => String(left.fileName).localeCompare(String(right.fileName), undefined, { numeric: true, sensitivity: 'base' }))
+    } catch (error) {
+      logThrottled(`dashboard-node-logs-${botName}`, `[DASHBOARD-WARN] node log listing failed for ${botName}: ${error?.message || error}`, {
+        intervalMs: 30000,
+        level: 'warn'
+      })
+      return []
+    }
+  }
+
   function buildStatusPayload(onlineOverride = null) {
     const now = Date.now()
     const progress = currentProgress()
@@ -668,6 +693,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       currentNbt: currentSourceName(),
       lastStatusAt: new Date().toISOString(),
       nodeFiles: listNodeNbtFiles(),
+      nodeLogs: listNodeLogFiles(),
       progress: progressPayload,
       lastError: state.lastError || null,
       assignedInterval,
@@ -761,6 +787,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     })
   }
 
+  async function reportNodeLogDownload(commandId, fileName, contentBase64) {
+    await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/logs/${encodeURIComponent(commandId)}/result`, 'POST', {
+      botName,
+      fileName,
+      contentBase64
+    })
+  }
+
   function resolveNodeNbtPath(fileName) {
     const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
     const safeName = path.basename(String(fileName || '').trim())
@@ -771,6 +805,49 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   async function executeNodeCommand(command) {
     if (!command) return false
     switch (command.commandType) {
+      case 'upload-node-file': {
+        const fileName = path.basename(String(command.fileName || '').trim())
+        if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) {
+          await reportNodeCommandResult(command.commandId, 'failed', `invalid file name: ${command.fileName || 'unknown'}`)
+          return true
+        }
+        const targetPath = resolveNodeNbtPath(fileName)
+        const contentBase64 = String(command.contentBase64 || '')
+        if (!contentBase64) {
+          await reportNodeCommandResult(command.commandId, 'failed', `missing file content for ${fileName}`)
+          return true
+        }
+        try {
+          const buffer = Buffer.from(contentBase64, 'base64')
+          fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+          fs.writeFileSync(targetPath, buffer)
+          noteActivity()
+          await reportNodeCommandResult(command.commandId, 'succeeded', `uploaded ${fileName}`)
+        } catch (error) {
+          await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
+        }
+        return true
+      }
+      case 'download-node-log': {
+        const fileName = path.basename(String(command.fileName || '').trim())
+        if (!fileName || !fileName.toLowerCase().endsWith('.log')) {
+          await reportNodeCommandResult(command.commandId, 'failed', `invalid log file name: ${command.fileName || 'unknown'}`)
+          return true
+        }
+        const logPath = path.join(path.dirname(LOG_FILE), fileName)
+        if (!fs.existsSync(logPath)) {
+          await reportNodeCommandResult(command.commandId, 'failed', `log file not found: ${fileName}`)
+          return true
+        }
+        try {
+          const contentBase64 = fs.readFileSync(logPath).toString('base64')
+          await reportNodeLogDownload(command.commandId, fileName, contentBase64)
+          await reportNodeCommandResult(command.commandId, 'succeeded', `downloaded ${fileName}`)
+        } catch (error) {
+          await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
+        }
+        return true
+      }
       case 'delete-node-file': {
         const targetPath = resolveNodeNbtPath(command.fileName)
         if (!fs.existsSync(targetPath)) {

@@ -173,6 +173,7 @@ function reqIsLogPath(pathname, method) {
   if (method !== 'GET') return false
   return pathname === '/api/dashboard/logs'
     || Boolean(matchPath(pathname, '/api/dashboard/logs/:fileName/download'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/logs/:fileName/download'))
 }
 
 function reqIsNodeDeletePath(pathname, method) {
@@ -362,8 +363,19 @@ function summarizeNode(node) {
     botNames: node.botNames,
     lastStatusAt: node.lastStatusAt,
     nodeFiles: Array.isArray(node.nodeFiles) ? node.nodeFiles : [],
+    nodeLogs: Array.isArray(node.nodeLogs) ? node.nodeLogs : [],
     timing: node.timing || null
   }
+}
+
+async function waitForNodeLogDownload(store, commandId, timeoutMs = 15000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const ready = store.getNodeLogDownload(commandId)
+    if (ready) return ready
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  return null
 }
 
 async function route(req, res) {
@@ -560,6 +572,7 @@ async function route(req, res) {
   if (nbtUploadParams) {
     if (req.method !== 'POST') return methodNotAllowed(res)
     const body = await readBody(req)
+    if (!store.listBotsForHost(nbtUploadParams.hostLabel).length) return notFound(res)
     const fileName = path.basename(String(body?.fileName || '').trim())
     if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) {
       return badRequest(res, 'fileName must end in .nbt')
@@ -568,14 +581,17 @@ async function route(req, res) {
     if (!contentBase64) return badRequest(res, 'contentBase64 is required')
     let buffer
     try { buffer = Buffer.from(contentBase64, 'base64') } catch { return badRequest(res, 'invalid base64 content') }
-    if (!fs.existsSync(NBT_DIR)) fs.mkdirSync(NBT_DIR, { recursive: true })
-    const destPath = path.join(NBT_DIR, fileName)
-    if (!ensureWithinDir(destPath, NBT_DIR)) return badRequest(res, 'invalid file name')
-    fs.writeFileSync(destPath, buffer)
-    auditOperatorAction(actor, 'upload-nbt', `Uploaded ${fileName} directly to node ${nbtUploadParams.hostLabel}.`, {
-      hostLabel: nbtUploadParams.hostLabel, fileName, sizeBytes: buffer.length
+    const command = store.createCommand({
+      targetHostLabel: nbtUploadParams.hostLabel,
+      commandType: 'upload-node-file',
+      fileName,
+      contentBase64,
+      requestedBy: actor.username
     })
-    return sendJson(res, 201, { ok: true, fileName, sizeBytes: buffer.length })
+    auditOperatorAction(actor, 'upload-nbt', `Queued direct node upload for ${fileName} to ${nbtUploadParams.hostLabel}.`, {
+      hostLabel: nbtUploadParams.hostLabel, fileName, sizeBytes: buffer.length, commandId: command.commandId
+    })
+    return sendJson(res, 201, { ok: true, queued: true, command, fileName, sizeBytes: buffer.length })
   }
 
   if (req.method === 'POST' && pathname === '/api/bots/status') {
@@ -698,6 +714,26 @@ async function route(req, res) {
     return sendJson(res, 200, { ok: true, command })
   }
 
+  params = matchPath(pathname, '/api/nodes/:hostLabel/logs/:commandId/result')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const fileName = path.basename(String(body?.fileName || '').trim())
+    const contentBase64 = String(body?.contentBase64 || '')
+    if (!fileName || !fileName.toLowerCase().endsWith('.log')) return badRequest(res, 'fileName must end in .log')
+    if (!contentBase64) return badRequest(res, 'contentBase64 is required')
+    const command = store.getCommand(params.commandId)
+    if (!command || command.targetHostLabel !== params.hostLabel || command.commandType !== 'download-node-log') return notFound(res)
+    store.saveNodeLogDownload({
+      commandId: params.commandId,
+      hostLabel: params.hostLabel,
+      botName: body?.botName || null,
+      fileName,
+      contentBase64
+    })
+    return sendJson(res, 200, { ok: true })
+  }
+
   if (req.method === 'GET' && pathname === '/api/dashboard/bots') {
     return sendJson(res, 200, { items: store.listBots().map(summarizeBot) })
   }
@@ -716,6 +752,32 @@ async function route(req, res) {
     const node = store.listNodes().find((item) => item.hostLabel === params.hostLabel)
     if (!node) return notFound(res)
     return sendJson(res, 200, { items: Array.isArray(node.nodeFiles) ? node.nodeFiles : [] })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/logs/:fileName/download')
+  if (params) {
+    if (req.method !== 'GET') return methodNotAllowed(res)
+    const node = store.listNodes().find((item) => item.hostLabel === params.hostLabel)
+    if (!node) return notFound(res)
+    const fileName = path.basename(String(params.fileName || '').trim())
+    if (!fileName || !fileName.toLowerCase().endsWith('.log')) return notFound(res)
+    const command = store.createCommand({
+      targetHostLabel: params.hostLabel,
+      commandType: 'download-node-log',
+      fileName,
+      requestedBy: actor?.username || 'unknown'
+    })
+    const downloaded = await waitForNodeLogDownload(store, command.commandId, 15000)
+    if (!downloaded?.filePath || !fs.existsSync(downloaded.filePath)) {
+      return sendJson(res, 504, { error: `Timed out waiting for node log ${fileName} from ${params.hostLabel}` })
+    }
+    res.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'content-disposition': `attachment; filename="${downloaded.fileName}"`,
+      'cache-control': 'no-store'
+    })
+    fs.createReadStream(downloaded.filePath).pipe(res)
+    return
   }
 
   params = matchPath(pathname, '/api/dashboard/bots/:botName')

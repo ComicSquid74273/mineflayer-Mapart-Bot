@@ -416,6 +416,36 @@ async function downloadLogFile(fileName) {
   window.URL.revokeObjectURL(url)
 }
 
+async function downloadNodeLogFile(hostLabel, fileName) {
+  const response = await fetch(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/logs/${encodeURIComponent(fileName)}/download`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      authorization: authHeaderValue()
+    }
+  })
+  if (!response.ok) {
+    let message = `Request failed: ${response.status}`
+    try {
+      const body = await response.json()
+      if (body?.error) message = body.error
+    } catch {
+      // Ignore parse failure.
+    }
+    throw new Error(message)
+  }
+
+  const blob = await response.blob()
+  const url = window.URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.URL.revokeObjectURL(url)
+}
+
 function activeElementInsideForm() {
   const active = document.activeElement
   return Boolean(active && (
@@ -703,6 +733,7 @@ function renderNodes() {
 
   elements.nodesGrid.innerHTML = state.nodes.map((node) => {
     const files = Array.isArray(node.nodeFiles) ? node.nodeFiles : []
+    const logs = Array.isArray(node.nodeLogs) ? node.nodeLogs : []
     return `
       <article class="node-card">
         <div class="file-row">
@@ -724,6 +755,20 @@ function renderNodes() {
             </div>
           </article>
         `).join('') : '<p class="hint">No .nbt files reported on this node.</p>'}
+        <div style="margin-top:14px;">
+          <strong>Logs</strong>
+        </div>
+        ${logs.length ? logs.map((file) => `
+          <article class="file-item compact-file-item">
+            <div class="file-row">
+              <div>
+                <strong>${escapeHtml(file.fileName)}</strong>
+                <p class="file-meta">${escapeHtml(formatFileSize(file.sizeBytes))} · ${escapeHtml(formatTime(file.modifiedAt))}</p>
+              </div>
+              <button class="ghost-button small-button" type="button" data-action="download-node-log" data-permission-needed="canViewLogs" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Download</button>
+            </div>
+          </article>
+        `).join('') : '<p class="hint">No .log files reported on this node.</p>'}
       </article>
     `
   }).join('')
@@ -1071,10 +1116,9 @@ async function onUpload(event) {
       elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name}`
       try {
         const base64 = await fileToBase64(file)
-        await submitJson('/api/dashboard/files', {
-          originalName: file.name,
+        await submitJson(`/api/dashboard/nodes/${encodeURIComponent(targetHostLabel)}/nbt/upload`, {
+          fileName: file.name,
           contentBase64: base64,
-          targetHostLabel
         })
         completed += 1
       } catch (error) {
@@ -1239,6 +1283,9 @@ document.addEventListener('click', async (event) => {
     button.disabled = true
     if (button.dataset.action === 'delete-node-file') {
       await onDeleteNodeFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
+    } else if (button.dataset.action === 'download-node-log') {
+      await downloadNodeLogFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
+      pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
     } else if (button.dataset.action === 'delete-operator') {
       await onDeleteOperator(button.dataset.username || '')
     } else if (button.dataset.action === 'download-log') {
