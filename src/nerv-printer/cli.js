@@ -11071,6 +11071,7 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
   const runtime = classifyRuntimePosition(bot, config, `lobby-portal-leg-${legIndex}`)
   const matchedRegion = getMatchedLobbyRegion(pos, portalConfig)
   const matchedSpawnRegion = matchedRegion?.action === 'spawn-portal' ? matchedRegion : null
+  const forcedSpawnRouteMatched = isInsideForcedStraightSpawnRouteTrigger(pos, portalConfig?.spawnDisk || {})
   const sceneAction = String(runtime?.meteor?.best?.action || '')
   const scenePortalPoint = runtime?.meteor?.best?.portalPoint || buildMeteorScenePortalPoint(runtime?.meteor?.best?.scene)
   const savedSpatialEntry = chooseSavedSpatialPortalStep(
@@ -11109,15 +11110,17 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     return true
   }
 
-  if (matchedSpawnRegion || isInsideLobbySpawnDisk(pos, portalConfig) || sceneAction === 'spawn-portal') {
+  if (matchedSpawnRegion || isInsideLobbySpawnDisk(pos, portalConfig) || forcedSpawnRouteMatched || sceneAction === 'spawn-portal') {
     const spawn = portalConfig.spawnDisk || {}
     const regionLabel = matchedSpawnRegion ? ` region=${matchedSpawnRegion.name}` : ''
-    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: matched spawn portal route${regionLabel}; running spawn portal route.`)
+    const forcedLabel = forcedSpawnRouteMatched ? ' forcedStraightRoute' : ''
+    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: matched spawn portal route${regionLabel}${forcedLabel}; running spawn portal route.`)
     await delay(Math.max(0, toNumber(spawn.waitBeforeMoveMs, 2500)))
     if (!isBotSessionLive(bot)) return false
     const currentSpawnRegion = getMatchedLobbyRegion(bot?.entity?.position, portalConfig)
     const stillInsideSpawnRegion = currentSpawnRegion?.action === 'spawn-portal'
-    if (!stillInsideSpawnRegion && !isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && sceneAction !== 'spawn-portal') {
+    const stillInsideForcedRoute = isInsideForcedStraightSpawnRouteTrigger(bot?.entity?.position, spawn)
+    if (!stillInsideSpawnRegion && !isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && !stillInsideForcedRoute && sceneAction !== 'spawn-portal') {
       console.log(`[LOBBY-PORTAL] Leg ${legIndex}: left configured spawn disk before search; skipping portal movement.`)
       return false
     }
@@ -11134,17 +11137,7 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
       }
     }
 
-    const portalBlock = findNearestNetherPortal(bot, searchRadius)
-    if (portalBlock?.position) {
-      await gotoLobbyPortalPoint(bot, config, {
-        x: portalBlock.position.x,
-        y: portalBlock.position.y,
-        z: portalBlock.position.z,
-        range: toNumber(spawn.goalRange, 2)
-      }, 'spawn nether portal block', timeoutMs, toNumber(spawn.goalRange, 2))
-    } else if (scenePortalPoint) {
-      await gotoLobbyPortalPoint(bot, config, { ...scenePortalPoint, range: toNumber(spawn.goalRange, 2) }, 'scene-matched spawn portal', timeoutMs, toNumber(spawn.goalRange, 2))
-    } else if (spawn.useConfiguredPortalTarget === true) {
+    if (spawn.useConfiguredPortalTarget === true) {
       if (spawn.twoStepRoute === true) {
         await gotoLobbyPortalPoint(bot, config, blockPosFromConfig(spawn.waypoint), 'spawn portal waypoint', timeoutMs, 2)
       }
@@ -11155,8 +11148,20 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
       }
       await gotoLobbyPortalPoint(bot, config, { ...target, range: toNumber(spawn.goalRange, 2) }, 'configured spawn portal', timeoutMs, toNumber(spawn.goalRange, 2))
     } else {
-      console.log(`[LOBBY-PORTAL-WARN] Leg ${legIndex}: no loaded nether_portal block found within ${searchRadius} blocks. Set spawnDisk.useConfiguredPortalTarget=true and spawnDisk.portal coords if Mineflayer cannot see it.`)
-      return false
+      const portalBlock = findNearestNetherPortal(bot, searchRadius)
+      if (portalBlock?.position) {
+        await gotoLobbyPortalPoint(bot, config, {
+          x: portalBlock.position.x,
+          y: portalBlock.position.y,
+          z: portalBlock.position.z,
+          range: toNumber(spawn.goalRange, 2)
+        }, 'spawn nether portal block', timeoutMs, toNumber(spawn.goalRange, 2))
+      } else if (scenePortalPoint) {
+        await gotoLobbyPortalPoint(bot, config, { ...scenePortalPoint, range: toNumber(spawn.goalRange, 2) }, 'scene-matched spawn portal', timeoutMs, toNumber(spawn.goalRange, 2))
+      } else {
+        console.log(`[LOBBY-PORTAL-WARN] Leg ${legIndex}: no loaded nether_portal block found within ${searchRadius} blocks. Set spawnDisk.useConfiguredPortalTarget=true and spawnDisk.portal coords if Mineflayer cannot see it.`)
+        return false
+      }
     }
 
     await holdForwardIntoPortal(bot, config, entryMs)
@@ -11183,6 +11188,7 @@ async function runLobbyPortalAutomation(bot, config) {
   if (!isPositionUsable(currentPos)) return false
   if (isPositionInsidePlatformBounds(currentPos, config)) return false
   const region = getMatchedLobbyRegion(currentPos, portalConfig)
+  const forcedSpawnRouteMatched = isInsideForcedStraightSpawnRouteTrigger(currentPos, portalConfig?.spawnDisk || {})
   const runtime = classifyRuntimePosition(bot, config, 'lobby-portal-preflight')
   const sceneAction = String(runtime?.meteor?.best?.action || '')
   const savedLoginStep = chooseSavedSpatialPortalStep(bot, config, ['login-portal'])
@@ -11196,6 +11202,7 @@ async function runLobbyPortalAutomation(bot, config) {
     !region &&
     !isInsideLoginPortalZone(currentPos, portalConfig) &&
     !isInsideLobbySpawnDisk(currentPos, portalConfig) &&
+    !forcedSpawnRouteMatched &&
     sceneAction !== 'login-portal' &&
     sceneAction !== 'spawn-portal' &&
     !savedLoginStep &&
