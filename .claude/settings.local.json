@@ -9,7 +9,14 @@
       "Bash(exit 0)",
       "Bash(awk -F: '$2 >= 5900 && $2 <= 5970')",
       "Bash(node -e ' *)",
-      "Bash(grep -E \"\\\\.\\(js|html|css|json\\)$\")"
+      "Bash(grep -E \"\\\\.\\(js|html|css|json\\)$\")",
+      "Bash(node dashboard-service/src/server.js --dry-run)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(timeout 3 node dashboard-service/src/server.js)",
+      "Bash(curl -s http://localhost:4080/health)",
+      "Bash(curl -s http://localhost:4080/api/dashboard/bots)",
+      "Bash(curl -s --connect-timeout 5 http://54.83.185.104:4080/health)",
+      "Bash(curl -s http://54.83.185.104:4080/api/dashboard/nodes)"
     ]
   }
 }

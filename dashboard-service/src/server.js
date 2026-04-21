@@ -481,7 +481,7 @@ async function route(req, res) {
   }
 
   if (req.method === 'POST' && pathname === '/api/dashboard/data/clear') {
-    if (!actor.canManageOperators) return forbidden(res, 'admin permission required')
+    if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
     const PROTECTED = new Set(['operators.json'])
     const deleted = []
     const errors = []
@@ -505,7 +505,7 @@ async function route(req, res) {
   }
 
   if (pathname === '/api/dashboard/config') {
-    if (!actor.canManageOperators) return forbidden(res, 'admin permission required')
+    if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
     if (req.method !== 'GET') return methodNotAllowed(res)
     const files = []
     try {
@@ -523,7 +523,7 @@ async function route(req, res) {
 
   const configFileParams = matchPath(pathname, '/api/dashboard/config/:fileName')
   if (configFileParams) {
-    if (!actor.canManageOperators) return forbidden(res, 'admin permission required')
+    if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
     const safeName = String(configFileParams.fileName || '')
     if (!safeName || !safeName.toLowerCase().endsWith('.json')) return notFound(res)
     const filePath = path.join(CONFIG_DIR, safeName)
