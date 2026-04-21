@@ -159,7 +159,7 @@
               "enabled": true,
               "centerX": 0,
               "centerZ": 4,
-              "radius": 24,
+              "radius": 100,
               "waitBeforeMoveMs": 2500,
               "forcedStraightRoute": {
                 "enabled": true,
