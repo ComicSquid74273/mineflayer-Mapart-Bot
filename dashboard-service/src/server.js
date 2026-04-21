@@ -849,20 +849,33 @@ async function route(req, res) {
       return badRequest(res, 'originalName and contentBase64 are required')
     }
     const targetBotName = String(body?.targetBotName || '').trim()
+    const targetHostLabel = String(body?.targetHostLabel || '').trim()
     if (targetBotName && !store.listBots().some((b) => b.botName === targetBotName)) {
       return badRequest(res, `unknown targetBotName: ${targetBotName}`)
     }
-    const item = store.createFileUpload({ ...body, uploadedBy: body?.uploadedBy || actor.username })
+    if (targetHostLabel && !store.listBotsForHost(targetHostLabel).length) {
+      return badRequest(res, `unknown targetHostLabel: ${targetHostLabel}`)
+    }
+    const item = store.createFileUpload({ ...body, uploadedBy: body?.uploadedBy || actor.username, targetHostLabel })
     let finalItem = item
     if (targetBotName) {
       finalItem = store.assignFile(item.fileId, targetBotName) || item
+    } else if (targetHostLabel) {
+      finalItem = store.assignFileToNode(item.fileId, targetHostLabel) || item
     }
-    auditOperatorAction(actor, targetBotName ? 'upload-file-assign-bot' : 'upload-file', targetBotName ? `Uploaded ${item.originalName} and assigned to bot ${targetBotName}.` : `Uploaded ${item.originalName}.`, {
+    auditOperatorAction(
+      actor,
+      targetBotName ? 'upload-file-assign-bot' : (targetHostLabel ? 'upload-file-assign-node' : 'upload-file'),
+      targetBotName
+        ? `Uploaded ${item.originalName} and assigned to bot ${targetBotName}.`
+        : (targetHostLabel ? `Uploaded ${item.originalName} and assigned to node ${targetHostLabel}.` : `Uploaded ${item.originalName}.`),
+      {
       fileId: item.fileId,
       originalName: item.originalName,
       sizeBytes: item.sizeBytes,
       nameConflictCount: item.nameConflictCount,
-      targetBotName: targetBotName || null
+      targetBotName: targetBotName || null,
+      targetHostLabel: targetHostLabel || null
     })
     return sendJson(res, 201, { item: finalItem })
   }

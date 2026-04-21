@@ -425,13 +425,13 @@ function activeElementInsideForm() {
 }
 
 function captureFormState() {
-  return { uploadBot: elements.uploadNodeSelect.value }
+  return { uploadNode: elements.uploadNodeSelect.value }
 }
 
 function restoreFormState(snapshot) {
   if (!snapshot) return
-  if (snapshot.uploadBot && Array.from(elements.uploadNodeSelect.options).some((option) => option.value === snapshot.uploadBot)) {
-    elements.uploadNodeSelect.value = snapshot.uploadBot
+  if (snapshot.uploadNode && Array.from(elements.uploadNodeSelect.options).some((option) => option.value === snapshot.uploadNode)) {
+    elements.uploadNodeSelect.value = snapshot.uploadNode
   }
 }
 
@@ -656,12 +656,12 @@ function renderFiles() {
   state.renderCache.files = sig
 
   const snapshot = captureFormState()
-  const nodeOptions = ['<option value="">Select bot</option>']
+  const nodeOptions = ['<option value="">Select node</option>']
 
   // Group bots by hostLabel so related bots appear together
   const byNode = new Map()
   for (const bot of state.bots) {
-    const label = bot.hostLabel || 'unknown'
+    const label = String(bot.hostLabel || 'unknown').trim() || 'unknown'
     if (!byNode.has(label)) byNode.set(label, [])
     byNode.get(label).push(bot)
   }
@@ -670,18 +670,16 @@ function renderFiles() {
     // Multiple nodes — use <optgroup> to separate them
     for (const [nodeLabel, bots] of byNode.entries()) {
       nodeOptions.push(`<optgroup label="${escapeHtml(nodeLabel)}">`)
-      for (const bot of bots) {
-        const status = bot.online ? 'online' : 'offline'
-        nodeOptions.push(`<option value="${escapeHtml(bot.botName)}">${escapeHtml(bot.botName)} (${status})</option>`)
-      }
+      const onlineCount = bots.filter((bot) => bot.online).length
+      nodeOptions.push(`<option value="${escapeHtml(nodeLabel)}">${escapeHtml(nodeLabel)} (${onlineCount}/${bots.length} online)</option>`)
       nodeOptions.push('</optgroup>')
     }
   } else {
     // Single node — flat list, no group header needed
-    for (const bot of state.bots) {
-      const status = bot.online ? 'online' : 'offline'
-      nodeOptions.push(`<option value="${escapeHtml(bot.botName)}">${escapeHtml(bot.botName)} (${status})</option>`)
-    }
+    const nodeLabel = byNode.keys().next().value || 'unknown'
+    const bots = byNode.get(nodeLabel) || []
+    const onlineCount = bots.filter((bot) => bot.online).length
+    nodeOptions.push(`<option value="${escapeHtml(nodeLabel)}">${escapeHtml(nodeLabel)} (${onlineCount}/${bots.length} online)</option>`)
   }
 
   elements.uploadNodeSelect.innerHTML = nodeOptions.join('')
@@ -1057,10 +1055,10 @@ async function onUpload(event) {
     return
   }
   const files = Array.from(elements.fileInput.files || [])
-  const targetBotName = elements.uploadNodeSelect.value
+  const targetHostLabel = elements.uploadNodeSelect.value
   if (!files.length) return
-  if (!targetBotName) {
-    pushEvent('warn', 'Select a target bot before uploading.')
+  if (!targetHostLabel) {
+    pushEvent('warn', 'Select a target node before uploading.')
     return
   }
 
@@ -1076,7 +1074,7 @@ async function onUpload(event) {
         await submitJson('/api/dashboard/files', {
           originalName: file.name,
           contentBase64: base64,
-          targetBotName
+          targetHostLabel
         })
         completed += 1
       } catch (error) {
@@ -1087,8 +1085,8 @@ async function onUpload(event) {
 
     elements.uploadStatus.textContent = failed > 0
       ? `Upload finished: ${completed} succeeded, ${failed} failed.`
-      : `${completed} file(s) uploaded and assigned to ${targetBotName}.`
-    pushEvent('info', `Uploaded → ${targetBotName}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
+      : `${completed} file(s) uploaded and assigned to node ${targetHostLabel}.`
+    pushEvent('info', `Uploaded -> ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
     elements.uploadForm.reset()
     await refreshData()
   } finally {
