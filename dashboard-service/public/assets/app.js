@@ -425,13 +425,13 @@ function activeElementInsideForm() {
 }
 
 function captureFormState() {
-  return { uploadNode: elements.uploadNodeSelect.value }
+  return { uploadBot: elements.uploadNodeSelect.value }
 }
 
 function restoreFormState(snapshot) {
   if (!snapshot) return
-  if (snapshot.uploadNode && Array.from(elements.uploadNodeSelect.options).some((option) => option.value === snapshot.uploadNode)) {
-    elements.uploadNodeSelect.value = snapshot.uploadNode
+  if (snapshot.uploadBot && Array.from(elements.uploadNodeSelect.options).some((option) => option.value === snapshot.uploadBot)) {
+    elements.uploadNodeSelect.value = snapshot.uploadBot
   }
 }
 
@@ -611,6 +611,7 @@ function renderBots() {
           </div>
           <div class="fleet-node-controls">
             <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
+            <button class="ghost-button small-button" type="button" data-action="edit-node-config" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" title="Edit nerv-printer-config.json for this node">Edit Config</button>
             <button class="accent-button small-button" type="button" data-action="start-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Start Node</button>
             <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Stop Node</button>
           </div>
@@ -650,15 +651,39 @@ function renderBots() {
 }
 
 function renderFiles() {
-  const sig = JSON.stringify(state.nodes.map((n) => `${n.hostLabel}:${n.onlineCount}/${n.botCount}`))
+  const sig = JSON.stringify(state.bots.map((b) => `${b.botName}:${b.hostLabel}:${b.online}`))
   if (state.renderCache.files === sig) return
   state.renderCache.files = sig
 
   const snapshot = captureFormState()
-  const nodeOptions = ['<option value="">Select node</option>']
-  state.nodes.forEach((item) => {
-    nodeOptions.push(`<option value="${escapeHtml(item.hostLabel)}">${escapeHtml(item.hostLabel)} (${escapeHtml(item.onlineCount)}/${escapeHtml(item.botCount)} online)</option>`)
-  })
+  const nodeOptions = ['<option value="">Select bot</option>']
+
+  // Group bots by hostLabel so related bots appear together
+  const byNode = new Map()
+  for (const bot of state.bots) {
+    const label = bot.hostLabel || 'unknown'
+    if (!byNode.has(label)) byNode.set(label, [])
+    byNode.get(label).push(bot)
+  }
+
+  if (byNode.size > 1) {
+    // Multiple nodes — use <optgroup> to separate them
+    for (const [nodeLabel, bots] of byNode.entries()) {
+      nodeOptions.push(`<optgroup label="${escapeHtml(nodeLabel)}">`)
+      for (const bot of bots) {
+        const status = bot.online ? 'online' : 'offline'
+        nodeOptions.push(`<option value="${escapeHtml(bot.botName)}">${escapeHtml(bot.botName)} (${status})</option>`)
+      }
+      nodeOptions.push('</optgroup>')
+    }
+  } else {
+    // Single node — flat list, no group header needed
+    for (const bot of state.bots) {
+      const status = bot.online ? 'online' : 'offline'
+      nodeOptions.push(`<option value="${escapeHtml(bot.botName)}">${escapeHtml(bot.botName)} (${status})</option>`)
+    }
+  }
+
   elements.uploadNodeSelect.innerHTML = nodeOptions.join('')
   restoreFormState(snapshot)
 }
@@ -810,27 +835,28 @@ function renderConfigs() {
     return
   }
 
-  if (!state.configs.length) {
+  const mainConfig = state.configs.find((f) => f.name === 'nerv-printer-config.json')
+  if (!mainConfig) {
     elements.configFilesList.innerHTML = `
       <article class="empty-card">
-        <h3>No config files found</h3>
-        <p>Set DASHBOARD_CONFIG_DIR on the server to point to your config directory.</p>
+        <h3>nerv-printer-config.json not found</h3>
+        <p>Make sure DASHBOARD_CONFIG_DIR points to the _configs directory.</p>
       </article>`
     return
   }
 
-  elements.configFilesList.innerHTML = state.configs.map((f) => `
+  elements.configFilesList.innerHTML = `
     <article class="file-item">
       <div class="file-row">
         <div>
-          <strong>${escapeHtml(f.name)}</strong>
-          <p class="file-meta">${formatFileSize(f.sizeBytes)} · modified ${escapeHtml(formatTime(f.modifiedAt))}</p>
+          <strong>${escapeHtml(mainConfig.name)}</strong>
+          <p class="file-meta">${formatFileSize(mainConfig.sizeBytes)} · modified ${escapeHtml(formatTime(mainConfig.modifiedAt))}</p>
         </div>
         <button class="ghost-button small-button" type="button"
           data-action="edit-config" data-permission-needed="canManageOperators"
-          data-config-name="${escapeHtml(f.name)}">Edit</button>
+          data-config-name="${escapeHtml(mainConfig.name)}">Edit</button>
       </div>
-    </article>`).join('')
+    </article>`
 }
 
 function renderConfigEditor() {
@@ -1031,10 +1057,10 @@ async function onUpload(event) {
     return
   }
   const files = Array.from(elements.fileInput.files || [])
-  const targetHostLabel = elements.uploadNodeSelect.value
+  const targetBotName = elements.uploadNodeSelect.value
   if (!files.length) return
-  if (!targetHostLabel) {
-    pushEvent('warn', 'Select a target node before uploading.')
+  if (!targetBotName) {
+    pushEvent('warn', 'Select a target bot before uploading.')
     return
   }
 
@@ -1050,7 +1076,7 @@ async function onUpload(event) {
         await submitJson('/api/dashboard/files', {
           originalName: file.name,
           contentBase64: base64,
-          targetHostLabel
+          targetBotName
         })
         completed += 1
       } catch (error) {
@@ -1061,8 +1087,8 @@ async function onUpload(event) {
 
     elements.uploadStatus.textContent = failed > 0
       ? `Upload finished: ${completed} succeeded, ${failed} failed.`
-      : `${completed} file(s) uploaded to dashboard for node ${targetHostLabel}.`
-    pushEvent('info', `Uploaded to dashboard → ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
+      : `${completed} file(s) uploaded and assigned to ${targetBotName}.`
+    pushEvent('info', `Uploaded → ${targetBotName}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
     elements.uploadForm.reset()
     await refreshData()
   } finally {
@@ -1236,6 +1262,9 @@ document.addEventListener('click', async (event) => {
       await onReconnectBot(button.dataset.botName || '')
     } else if (button.dataset.action === 'edit-config') {
       await onEditConfig(button.dataset.configName || '')
+    } else if (button.dataset.action === 'edit-node-config') {
+      await onEditConfig('nerv-printer-config.json')
+      document.getElementById('configEditorSection')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     } else if (button.dataset.action === 'chat-send') {
       const botName = button.dataset.botName || ''
       const input = document.querySelector(`.chat-input[data-chat-bot="${CSS.escape(botName)}"]`)

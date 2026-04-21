@@ -848,19 +848,23 @@ async function route(req, res) {
     if (!body?.originalName || !body?.contentBase64) {
       return badRequest(res, 'originalName and contentBase64 are required')
     }
-    const targetHostLabel = String(body?.targetHostLabel || '').trim()
-    if (targetHostLabel && !store.listNodes().some((item) => item.hostLabel === targetHostLabel)) {
-      return badRequest(res, `unknown targetHostLabel: ${targetHostLabel}`)
+    const targetBotName = String(body?.targetBotName || '').trim()
+    if (targetBotName && !store.listBots().some((b) => b.botName === targetBotName)) {
+      return badRequest(res, `unknown targetBotName: ${targetBotName}`)
     }
     const item = store.createFileUpload({ ...body, uploadedBy: body?.uploadedBy || actor.username })
-    auditOperatorAction(actor, targetHostLabel ? 'upload-file-direct-node' : 'upload-file', targetHostLabel ? `Uploaded ${item.originalName} directly to node ${targetHostLabel}.` : `Uploaded ${item.originalName}.`, {
+    let finalItem = item
+    if (targetBotName) {
+      finalItem = store.assignFile(item.fileId, targetBotName) || item
+    }
+    auditOperatorAction(actor, targetBotName ? 'upload-file-assign-bot' : 'upload-file', targetBotName ? `Uploaded ${item.originalName} and assigned to bot ${targetBotName}.` : `Uploaded ${item.originalName}.`, {
       fileId: item.fileId,
       originalName: item.originalName,
       sizeBytes: item.sizeBytes,
       nameConflictCount: item.nameConflictCount,
-      targetHostLabel: item.assignedHostLabel
+      targetBotName: targetBotName || null
     })
-    return sendJson(res, 201, { item })
+    return sendJson(res, 201, { item: finalItem })
   }
 
   params = matchPath(pathname, '/api/dashboard/files/:fileId/assign')
