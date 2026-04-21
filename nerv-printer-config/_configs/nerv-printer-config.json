@@ -153,15 +153,6 @@
                 "y": 20,
                 "z": 4,
                 "radius": 100
-              },
-              {
-                "name": "spawn-portal-overworld-33",
-                "type": "box",
-                "action": "spawn-portal",
-                "x": 33,
-                "y": 61,
-                "z": -53,
-                "radius": 16
               }
             ],
             "spawnDisk": {
