@@ -1047,9 +1047,10 @@ async function onUpload(event) {
       elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name}`
       try {
         const base64 = await fileToBase64(file)
-        await submitJson(`/api/dashboard/nodes/${encodeURIComponent(targetHostLabel)}/nbt/upload`, {
-          fileName: file.name,
-          contentBase64: base64
+        await submitJson('/api/dashboard/files', {
+          originalName: file.name,
+          contentBase64: base64,
+          targetHostLabel
         })
         completed += 1
       } catch (error) {
@@ -1060,8 +1061,8 @@ async function onUpload(event) {
 
     elements.uploadStatus.textContent = failed > 0
       ? `Upload finished: ${completed} succeeded, ${failed} failed.`
-      : `${completed} file(s) written directly to ${targetHostLabel}.`
-    pushEvent('info', `Direct upload to ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
+      : `${completed} file(s) uploaded to dashboard for node ${targetHostLabel}.`
+    pushEvent('info', `Uploaded to dashboard → ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
     elements.uploadForm.reset()
     await refreshData()
   } finally {
