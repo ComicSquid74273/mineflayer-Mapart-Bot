@@ -10901,8 +10901,10 @@ async function walkStraightToLobbyPortalPoint(bot, config, point, label, timeout
   const sprint = options.sprint !== false && getPrinterSprintMode(config) !== 'off'
   const jump = options.jump !== false
   const Vec3 = bot?.entity?.position?.constructor
-  let lastProgressAt = Date.now()
+  const startedAt = Date.now()
+  let lastProgressAt = startedAt
   let bestDistance = Number.POSITIVE_INFINITY
+  let lastPos = bot?.entity?.position?.clone?.() || (bot?.entity?.position ? { ...bot.entity.position } : null)
   stopBotMovement(bot)
   console.log(`[LOBBY-PORTAL] Walking straight to ${label}: ${Math.round(point.x)} ${Math.round(point.y)} ${Math.round(point.z)} range=${range}`)
 
@@ -10915,11 +10917,19 @@ async function walkStraightToLobbyPortalPoint(bot, config, point, label, timeout
       if (distance + 0.05 < bestDistance) {
         bestDistance = distance
         lastProgressAt = Date.now()
-      } else if ((Date.now() - lastProgressAt) >= Math.min(timeout, Math.max(3000, tickMs * 20))) {
+      } else if (lastPos && pos) {
+        const movedDistance = distanceToPoint(pos, lastPos)
+        if (movedDistance >= Math.max(0.35, toNumber(options.progressStep, 0.5))) {
+          lastProgressAt = Date.now()
+          lastPos = pos.clone?.() || { ...pos }
+        }
+      }
+
+      if ((Date.now() - lastProgressAt) >= Math.min(timeout, Math.max(12000, tickMs * 60))) {
         throw new Error(`Straight walk to ${label} stalled at ${formatBotPosition(bot)}`)
       }
 
-      if ((Date.now() - lastProgressAt) > timeout) {
+      if ((Date.now() - startedAt) > timeout) {
         throw new Error(`Straight walk to ${label} timed out at ${formatBotPosition(bot)}`)
       }
 
@@ -10939,13 +10949,16 @@ async function walkStraightToLobbyPortalPoint(bot, config, point, label, timeout
   return true
 }
 
-async function runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs) {
+async function runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs, options = {}) {
   const route = getForcedStraightSpawnRoute(spawn)
-  if (!route || !isInsideForcedStraightSpawnRouteTrigger(bot?.entity?.position, spawn)) return false
-  console.log(`[LOBBY-PORTAL] Forced straight spawn route matched near ${Math.round(route.trigger.x)} ${Math.round(route.trigger.y ?? bot?.entity?.position?.y ?? 0)} ${Math.round(route.trigger.z)} radius=${route.trigger.radius}.`)
+  if (!route) return false
+  const matchedTrigger = isInsideForcedStraightSpawnRouteTrigger(bot?.entity?.position, spawn)
+  const alwaysUse = options.alwaysUse === true
+  if (!matchedTrigger && !alwaysUse) return false
+  console.log(`[LOBBY-PORTAL] Forced straight spawn route ${matchedTrigger ? 'matched' : 'continued'} near ${Math.round(route.trigger.x)} ${Math.round(route.trigger.y ?? bot?.entity?.position?.y ?? 0)} ${Math.round(route.trigger.z)} radius=${route.trigger.radius}.`)
 
   const backoffPoint = buildForcedStraightSpawnBackoffPoint(bot?.entity?.position, spawn)
-  if (backoffPoint) {
+  if (backoffPoint && matchedTrigger) {
     await walkStraightToLobbyPortalPoint(bot, config, backoffPoint, 'forced spawn backoff', timeoutMs, backoffPoint.range, { jump: true })
   }
 
@@ -11125,7 +11138,7 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
       return false
     }
 
-    if (await runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs)) {
+    if (await runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs, { alwaysUse: true })) {
       return true
     }
 
