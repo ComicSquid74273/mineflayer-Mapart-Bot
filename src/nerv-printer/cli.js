@@ -9,6 +9,9 @@ process.on('unhandledRejection', (reason) => {
 
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
+// Persists across session reconnects within one process run.
+// Set true by any 'start' command; false by any 'stop' or dashboard-disconnect.
+let printingIntentActive = false
 const fs = require('fs')
 const http = require('http')
 const https = require('https')
@@ -835,6 +838,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
     switch (claimed.commandType) {
       case 'start': {
+        printingIntentActive = true
         runtimeControl?.requestStart('dashboard')
         state.startRequested = true
         state.stopRequested = false
@@ -843,6 +847,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         break
       }
       case 'stop': {
+        printingIntentActive = false
         runtimeControl?.requestStop('dashboard')
         state.stopRequested = true
         state.startRequested = false
@@ -9477,6 +9482,7 @@ function ensureStdinCommandInterface() {
         console.log('[COMMAND] No managed runtime is active. Use --wait-for-command or enable dashboard control first.')
         return
       }
+      printingIntentActive = true
       console.log(`[COMMAND] ${stdinCommandState.runtimeControl.requestStart('terminal')}`)
       return
     }
@@ -9486,6 +9492,7 @@ function ensureStdinCommandInterface() {
         console.log('[COMMAND] No managed runtime is active. Use --wait-for-command or enable dashboard control first.')
         return
       }
+      printingIntentActive = false
       console.log(`[COMMAND] ${stdinCommandState.runtimeControl.requestStop('terminal')}`)
       return
     }
@@ -11608,9 +11615,13 @@ function runSingleSession(config, sessionNumber) {
       }
 
       if (printer.startOnSpawn === false) {
-        console.log('[STATE] startOnSpawn is false. Waiting idle.')
+        if (printingIntentActive) {
+          console.log('[STATE] startOnSpawn is false but printing intent is active — resuming printing after reconnect.')
+        } else {
+          console.log('[STATE] startOnSpawn is false. Waiting idle for start command.')
+        }
         dashboardRuntime?.setPhase('idle')
-        await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, false)
+        await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, printingIntentActive)
         return
       }
 
@@ -13515,6 +13526,7 @@ async function start() {
     }
 
     if (String(lastEndReason || '').includes('dashboard-disconnect') && config?.dashboard?.enabled !== false) {
+      printingIntentActive = false
       const shouldRestart = await standbyWaitForReconnect(config)
       if (shouldRestart) {
         continueOuter = true
