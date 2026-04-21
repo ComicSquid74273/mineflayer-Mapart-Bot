@@ -16,7 +16,9 @@
       "Bash(curl -s http://localhost:4080/health)",
       "Bash(curl -s http://localhost:4080/api/dashboard/bots)",
       "Bash(curl -s --connect-timeout 5 http://54.83.185.104:4080/health)",
-      "Bash(curl -s http://54.83.185.104:4080/api/dashboard/nodes)"
+      "Bash(curl -s http://54.83.185.104:4080/api/dashboard/nodes)",
+      "Bash(curl -s -u admin-demo:admin-demo http://54.83.185.104:4080/api/dashboard/logs)",
+      "Bash(node --check dashboard-service/src/server.js)"
     ]
   }
 }

@@ -9,6 +9,7 @@ const DATA_DIR = process.env.DASHBOARD_DATA_DIR || path.resolve(__dirname, '..',
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public')
 const LOGS_DIR = process.env.DASHBOARD_LOGS_DIR || path.resolve(__dirname, '..', '..', 'logs')
 const CONFIG_DIR = process.env.DASHBOARD_CONFIG_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config', '_configs')
+const NBT_DIR = process.env.DASHBOARD_NBT_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config')
 const store = createStore(DATA_DIR)
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
@@ -189,28 +190,38 @@ function ensureWithinDir(filePath, dirPath) {
 }
 
 function listDownloadableLogs() {
-  if (!fs.existsSync(LOGS_DIR)) return []
-  return fs.readdirSync(LOGS_DIR, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.log'))
-    .map((entry) => {
-      const filePath = path.join(LOGS_DIR, entry.name)
+  const dirs = [LOGS_DIR]
+  const cwdLogs = path.resolve(process.cwd(), 'logs')
+  if (cwdLogs !== LOGS_DIR) dirs.push(cwdLogs)
+
+  const seen = new Set()
+  const results = []
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.log')) continue
+      if (seen.has(entry.name)) continue
+      seen.add(entry.name)
+      const filePath = path.join(dir, entry.name)
       const stats = fs.statSync(filePath)
-      return {
-        fileName: entry.name,
-        sizeBytes: stats.size,
-        modifiedAt: stats.mtime.toISOString()
-      }
-    })
-    .sort((left, right) => String(right.modifiedAt).localeCompare(String(left.modifiedAt)))
+      results.push({ fileName: entry.name, sizeBytes: stats.size, modifiedAt: stats.mtime.toISOString(), _dir: dir })
+    }
+  }
+  return results.sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))
 }
 
 function resolveLogFilePath(fileName) {
   const safeName = path.basename(String(fileName || '').trim())
   if (!safeName || !safeName.toLowerCase().endsWith('.log')) return null
-  const filePath = path.join(LOGS_DIR, safeName)
-  if (!ensureWithinDir(filePath, LOGS_DIR)) return null
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return null
-  return filePath
+  const dirs = [LOGS_DIR]
+  const cwdLogs = path.resolve(process.cwd(), 'logs')
+  if (cwdLogs !== LOGS_DIR) dirs.push(cwdLogs)
+  for (const dir of dirs) {
+    const filePath = path.join(dir, safeName)
+    if (!ensureWithinDir(filePath, dir)) continue
+    if (fs.existsSync(filePath) && !fs.statSync(filePath).isDirectory()) return filePath
+  }
+  return null
 }
 
 function projectOperatorAccount(existing, input) {
@@ -543,6 +554,28 @@ async function route(req, res) {
       return sendJson(res, 200, { ok: true })
     }
     return methodNotAllowed(res)
+  }
+
+  const nbtUploadParams = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload')
+  if (nbtUploadParams) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const fileName = path.basename(String(body?.fileName || '').trim())
+    if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) {
+      return badRequest(res, 'fileName must end in .nbt')
+    }
+    const contentBase64 = String(body?.contentBase64 || '')
+    if (!contentBase64) return badRequest(res, 'contentBase64 is required')
+    let buffer
+    try { buffer = Buffer.from(contentBase64, 'base64') } catch { return badRequest(res, 'invalid base64 content') }
+    if (!fs.existsSync(NBT_DIR)) fs.mkdirSync(NBT_DIR, { recursive: true })
+    const destPath = path.join(NBT_DIR, fileName)
+    if (!ensureWithinDir(destPath, NBT_DIR)) return badRequest(res, 'invalid file name')
+    fs.writeFileSync(destPath, buffer)
+    auditOperatorAction(actor, 'upload-nbt', `Uploaded ${fileName} directly to node ${nbtUploadParams.hostLabel}.`, {
+      hostLabel: nbtUploadParams.hostLabel, fileName, sizeBytes: buffer.length
+    })
+    return sendJson(res, 201, { ok: true, fileName, sizeBytes: buffer.length })
   }
 
   if (req.method === 'POST' && pathname === '/api/bots/status') {
@@ -880,5 +913,6 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[dashboard-service] listening on http://${HOST}:${PORT}`)
   console.log(`[dashboard-service] loaded ${store.listOperators().length} operator account(s) from ${path.join(DATA_DIR, 'operators.json')}`)
-  console.log(`[dashboard-service] log downloads served from ${LOGS_DIR}`)
+  console.log(`[dashboard-service] log downloads served from ${LOGS_DIR} (also checks ${path.resolve(process.cwd(), 'logs')})`)
+  console.log(`[dashboard-service] direct NBT uploads go to ${NBT_DIR}`)
 })

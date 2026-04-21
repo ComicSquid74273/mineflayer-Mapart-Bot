@@ -1,7 +1,6 @@
 const state = {
   bots: [],
   nodes: [],
-  files: [],
   logs: [],
   operators: [],
   configs: [],
@@ -46,19 +45,14 @@ const ALLOWED_REFRESH_INTERVALS = [60000, 300000, 600000]
 const UI_ACTIVITY_HOLD_MS = 15000
 
 const elements = {
-  assignForm: document.getElementById('assignForm'),
   authStatus: document.getElementById('authStatus'),
-  nodeSelect: document.getElementById('nodeSelect'),
   botsGrid: document.getElementById('botsGrid'),
   botSummary: document.getElementById('botSummary'),
   eventLog: document.getElementById('eventLog'),
   fileInput: document.getElementById('fileInput'),
-  fileSelect: document.getElementById('fileSelect'),
-  filesList: document.getElementById('filesList'),
   lastRefresh: document.getElementById('lastRefresh'),
   logsList: document.getElementById('logsList'),
   nodesGrid: document.getElementById('nodesGrid'),
-  notesInput: document.getElementById('notesInput'),
   operatorForm: document.getElementById('operatorForm'),
   loginButton: document.getElementById('loginButton'),
   logoutButton: document.getElementById('logoutButton'),
@@ -80,7 +74,6 @@ const elements = {
   stopAllButton: document.getElementById('stopAllButton'),
   uploadNodeSelect: document.getElementById('uploadNodeSelect'),
   uploadForm: document.getElementById('uploadForm'),
-  uploadedByInput: document.getElementById('uploadedByInput'),
   uploadStatus: document.getElementById('uploadStatus'),
   clearDataButton: document.getElementById('clearDataButton'),
   configFilesList: document.getElementById('configFilesList'),
@@ -306,17 +299,7 @@ function renderAuthState() {
   }
 
   const canOperate = hasPermission('canOperate')
-  if (elements.assignForm) {
-    const submit = elements.assignForm.querySelector('button[type="submit"]')
-    if (submit) submit.disabled = !canOperate
-  }
-  if (elements.uploadForm) {
-    const submit = elements.uploadForm.querySelector('button[type="submit"]')
-    if (submit) submit.disabled = !canOperate
-  }
-  for (const element of [elements.fileInput, elements.uploadedByInput, elements.notesInput, elements.fileSelect, elements.nodeSelect]) {
-    if (element) element.disabled = !canOperate
-  }
+  if (elements.fileInput) elements.fileInput.disabled = !canOperate
   if (elements.uploadNodeSelect) elements.uploadNodeSelect.disabled = !canOperate
   if (elements.operatorForm) {
     const disabled = !hasPermission('canManageOperators')
@@ -436,33 +419,17 @@ async function downloadLogFile(fileName) {
 function activeElementInsideForm() {
   const active = document.activeElement
   return Boolean(active && (
-    elements.assignForm.contains(active)
-    || elements.uploadForm.contains(active)
+    elements.uploadForm.contains(active)
     || elements.operatorForm.contains(active)
   ))
 }
 
 function captureFormState() {
-  return {
-    fileId: elements.fileSelect.value,
-    node: elements.nodeSelect.value,
-    uploadNode: elements.uploadNodeSelect.value,
-    uploadedBy: elements.uploadedByInput.value,
-    notes: elements.notesInput.value
-  }
+  return { uploadNode: elements.uploadNodeSelect.value }
 }
 
 function restoreFormState(snapshot) {
   if (!snapshot) return
-  elements.uploadedByInput.value = snapshot.uploadedBy || elements.uploadedByInput.value
-  elements.notesInput.value = snapshot.notes || elements.notesInput.value
-
-  if (snapshot.fileId && Array.from(elements.fileSelect.options).some((option) => option.value === snapshot.fileId)) {
-    elements.fileSelect.value = snapshot.fileId
-  }
-  if (snapshot.node && Array.from(elements.nodeSelect.options).some((option) => option.value === snapshot.node)) {
-    elements.nodeSelect.value = snapshot.node
-  }
   if (snapshot.uploadNode && Array.from(elements.uploadNodeSelect.options).some((option) => option.value === snapshot.uploadNode)) {
     elements.uploadNodeSelect.value = snapshot.uploadNode
   }
@@ -683,51 +650,17 @@ function renderBots() {
 }
 
 function renderFiles() {
-  const filesSignature = JSON.stringify({ files: state.files, nodes: state.nodes })
-  if (state.renderCache.files === filesSignature) return
-  state.renderCache.files = filesSignature
+  const sig = JSON.stringify(state.nodes.map((n) => `${n.hostLabel}:${n.onlineCount}/${n.botCount}`))
+  if (state.renderCache.files === sig) return
+  state.renderCache.files = sig
 
   const snapshot = captureFormState()
-  const fileOptions = ['<option value="">Select uploaded file</option>']
   const nodeOptions = ['<option value="">Select node</option>']
-
-  state.files.forEach((item) => {
-    const duplicateLabel = Number(item.nameConflictCount || 0) > 0 ? ` · dup ${Number(item.nameConflictCount) + 1}` : ''
-    fileOptions.push(`<option value="${escapeHtml(item.fileId)}">${escapeHtml(item.originalName)} · ${escapeHtml(item.deliveryStatus)}${escapeHtml(duplicateLabel)}</option>`)
-  })
   state.nodes.forEach((item) => {
     nodeOptions.push(`<option value="${escapeHtml(item.hostLabel)}">${escapeHtml(item.hostLabel)} (${escapeHtml(item.onlineCount)}/${escapeHtml(item.botCount)} online)</option>`)
   })
-
-  elements.fileSelect.innerHTML = fileOptions.join('')
-  elements.nodeSelect.innerHTML = nodeOptions.join('')
   elements.uploadNodeSelect.innerHTML = nodeOptions.join('')
   restoreFormState(snapshot)
-
-  if (!state.files.length) {
-    elements.filesList.innerHTML = `
-      <article class="empty-card">
-        <h3>No uploaded files</h3>
-        <p>Upload one or more NBT files directly to a node. Existing uploads can still be reassigned here.</p>
-      </article>
-    `
-    return
-  }
-
-  elements.filesList.innerHTML = state.files.map((item) => `
-    <article class="file-item">
-      <div class="file-row">
-        <div>
-          <strong>${escapeHtml(item.originalName)}</strong>
-          <p class="file-meta">${escapeHtml(item.sizeBytes)} bytes · ${escapeHtml(item.sha256.slice(0, 12))}...</p>
-        </div>
-        <span class="tag ${item.deliveryStatus === 'failed' ? 'status-offline' : 'status-neutral'}">${escapeHtml(item.deliveryStatus)}</span>
-      </div>
-      <p class="hint">Assigned node: ${escapeHtml(item.assignedHostLabel || 'nobody')} · Uploaded: ${escapeHtml(formatTime(item.uploadedAt))}</p>
-      ${Number(item.nameConflictCount || 0) > 0 ? `<p class="hint">Duplicate upload name detected. Existing copies: ${escapeHtml(item.nameConflictCount)}</p>` : ''}
-      ${item.failedReason ? `<p class="hint">Failure: ${escapeHtml(item.failedReason)}</p>` : ''}
-    </article>
-  `).join('')
 }
 
 function renderNodes() {
@@ -1023,11 +956,10 @@ async function refreshData(options = {}) {
 
   state.busy = true
   try {
-    const [health, bots, nodes, files, events] = await Promise.all([
+    const [health, bots, nodes, events] = await Promise.all([
       requestJson('/health'),
       requestJson('/api/dashboard/bots'),
       requestJson('/api/dashboard/nodes'),
-      requestJson('/api/dashboard/files'),
       requestJson('/api/dashboard/events')
     ])
     const logs = state.auth.verified && hasPermission('canViewLogs')
@@ -1041,7 +973,6 @@ async function refreshData(options = {}) {
       : { files: [] }
     state.bots = Array.isArray(bots.items) ? bots.items : []
     state.nodes = Array.isArray(nodes.items) ? nodes.items : []
-    state.files = Array.isArray(files.items) ? files.items : []
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = Array.isArray(configs.files) ? configs.files : []
@@ -1103,13 +1034,11 @@ async function onUpload(event) {
   const targetHostLabel = elements.uploadNodeSelect.value
   if (!files.length) return
   if (!targetHostLabel) {
-    pushEvent('warn', 'Select a target node before uploading files.')
+    pushEvent('warn', 'Select a target node before uploading.')
     return
   }
 
   state.uploadBusy = true
-  const uploadedBy = elements.uploadedByInput.value.trim()
-  const notes = elements.notesInput.value.trim()
   let completed = 0
   let failed = 0
 
@@ -1118,12 +1047,9 @@ async function onUpload(event) {
       elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name}`
       try {
         const base64 = await fileToBase64(file)
-        await submitJson('/api/dashboard/files', {
-          originalName: file.name,
-          contentBase64: base64,
-          targetHostLabel,
-          uploadedBy,
-          notes
+        await submitJson(`/api/dashboard/nodes/${encodeURIComponent(targetHostLabel)}/nbt/upload`, {
+          fileName: file.name,
+          contentBase64: base64
         })
         completed += 1
       } catch (error) {
@@ -1134,29 +1060,15 @@ async function onUpload(event) {
 
     elements.uploadStatus.textContent = failed > 0
       ? `Upload finished: ${completed} succeeded, ${failed} failed.`
-      : `Upload finished: ${completed} file(s) queued for ${targetHostLabel}.`
-    pushEvent('info', `Upload batch complete for ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
+      : `${completed} file(s) written directly to ${targetHostLabel}.`
+    pushEvent('info', `Direct upload to ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
     elements.uploadForm.reset()
-    elements.uploadNodeSelect.value = ''
     await refreshData()
   } finally {
     state.uploadBusy = false
   }
 }
 
-async function onAssign(event) {
-  event.preventDefault()
-  if (!hasPermission('canOperate')) {
-    pushEvent('warn', 'Login as an operator before assigning files.')
-    return
-  }
-  const fileId = elements.fileSelect.value
-  const targetHostLabel = elements.nodeSelect.value
-  if (!fileId || !targetHostLabel) return
-  await submitJson(`/api/dashboard/files/${encodeURIComponent(fileId)}/assign`, { targetHostLabel })
-  pushEvent('info', `Assigned file to node ${targetHostLabel}`)
-  await refreshData()
-}
 
 async function onSendChat(botName, message) {
   if (!hasPermission('canOperate')) {
@@ -1411,10 +1323,6 @@ elements.stopAllButton.addEventListener('click', async () => {
 
 elements.uploadForm.addEventListener('submit', (event) => {
   void onUpload(event).catch((error) => pushEvent('error', error.message))
-})
-
-elements.assignForm.addEventListener('submit', (event) => {
-  void onAssign(event).catch((error) => pushEvent('error', error.message))
 })
 
 elements.operatorForm.addEventListener('submit', (event) => {
