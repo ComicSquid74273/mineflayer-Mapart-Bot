@@ -170,6 +170,19 @@
               "centerZ": 4,
               "radius": 24,
               "waitBeforeMoveMs": 2500,
+              "forcedStraightRoute": {
+                "enabled": true,
+                "trigger": {
+                  "x": 31,
+                  "y": 62,
+                  "z": -3.5,
+                  "radius": 10
+                },
+                "backoffBlocks": 5,
+                "backoffGoalRange": 1.5,
+                "waypointGoalRange": 2,
+                "portalGoalRange": 2
+              },
               "backoffWhenNearWaypoint": true,
               "backoffBlocks": 5,
               "backoffTriggerRadius": 12,

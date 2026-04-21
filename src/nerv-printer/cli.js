@@ -10053,6 +10053,61 @@ function buildSpawnWaypointBackoffPoint(spawn, fallbackY = null) {
   }
 }
 
+function getForcedStraightSpawnRoute(spawn) {
+  const route = spawn?.forcedStraightRoute
+  if (!route || route.enabled === false) return null
+  const trigger = route.trigger || {}
+  const hasTriggerPoint = Number.isFinite(Number(trigger.x)) && Number.isFinite(Number(trigger.z))
+  if (!hasTriggerPoint) return null
+  return {
+    ...route,
+    trigger: {
+      x: Number(trigger.x),
+      y: Number.isFinite(Number(trigger.y)) ? Number(trigger.y) : null,
+      z: Number(trigger.z),
+      radius: Math.max(1, toNumber(trigger.radius, 10))
+    }
+  }
+}
+
+function isInsideForcedStraightSpawnRouteTrigger(pos, spawn) {
+  const route = getForcedStraightSpawnRoute(spawn)
+  if (!route || !pos) return false
+  const trigger = route.trigger
+  if (!Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.z))) return false
+  const withinHorizontal = distance2d(pos, trigger.x, trigger.z) <= trigger.radius
+  if (!withinHorizontal) return false
+  if (!Number.isFinite(trigger.y) || !Number.isFinite(Number(pos.y))) return true
+  return Math.abs(Number(pos.y) - trigger.y) <= trigger.radius
+}
+
+function buildForcedStraightSpawnBackoffPoint(pos, spawn) {
+  const route = getForcedStraightSpawnRoute(spawn)
+  if (!route || !pos) return null
+  const waypoint = getSpawnWaypointPoint(spawn, pos?.y)
+  if (!waypoint) return null
+  const backoffBlocks = Math.max(1, toNumber(route.backoffBlocks, 5))
+  let dx = Number(pos.x) - Number(waypoint.x)
+  let dz = Number(pos.z) - Number(waypoint.z)
+  let length = Math.sqrt((dx * dx) + (dz * dz))
+
+  if (!(length > 0.001)) {
+    const portal = blockPosFromConfig(spawn?.portal)
+    dx = Number(waypoint.x) - Number(portal?.x || 0)
+    dz = Number(waypoint.z) - Number(portal?.z || 1)
+    length = Math.sqrt((dx * dx) + (dz * dz))
+  }
+
+  if (!(length > 0.001)) return null
+
+  return {
+    x: Number(pos.x) + ((dx / length) * backoffBlocks),
+    y: Number.isFinite(Number(pos.y)) ? Number(pos.y) : Number(waypoint.y),
+    z: Number(pos.z) + ((dz / length) * backoffBlocks),
+    range: Math.max(0.5, toNumber(route.backoffGoalRange, 1.5))
+  }
+}
+
 function isInsideLoginPortalZone(pos, portalConfig) {
   const login = portalConfig?.loginPortal || {}
   if (login.enabled === false) return false
@@ -10838,6 +10893,85 @@ async function holdForwardIntoPortal(bot, config, ms) {
   console.log(`[LOBBY-PORTAL] Forward hold finished. insidePortal=${insidePortal}`)
 }
 
+async function walkStraightToLobbyPortalPoint(bot, config, point, label, timeoutMs, defaultRange = 2, options = {}) {
+  if (!point || !isBotSessionLive(bot)) return false
+  const range = Math.max(0.5, toNumber(point.range, defaultRange))
+  const timeout = Math.max(1000, toNumber(timeoutMs, 15000))
+  const tickMs = Math.max(50, toNumber(options.tickMs, 100))
+  const sprint = options.sprint !== false && getPrinterSprintMode(config) !== 'off'
+  const jump = options.jump !== false
+  const Vec3 = bot?.entity?.position?.constructor
+  let lastProgressAt = Date.now()
+  let bestDistance = Number.POSITIVE_INFINITY
+  stopBotMovement(bot)
+  console.log(`[LOBBY-PORTAL] Walking straight to ${label}: ${Math.round(point.x)} ${Math.round(point.y)} ${Math.round(point.z)} range=${range}`)
+
+  try {
+    while (isBotSessionLive(bot)) {
+      const pos = bot?.entity?.position
+      const distance = distanceToPoint(pos, point)
+      if (distance <= range) break
+
+      if (distance + 0.05 < bestDistance) {
+        bestDistance = distance
+        lastProgressAt = Date.now()
+      } else if ((Date.now() - lastProgressAt) >= Math.min(timeout, Math.max(3000, tickMs * 20))) {
+        throw new Error(`Straight walk to ${label} stalled at ${formatBotPosition(bot)}`)
+      }
+
+      if ((Date.now() - lastProgressAt) > timeout) {
+        throw new Error(`Straight walk to ${label} timed out at ${formatBotPosition(bot)}`)
+      }
+
+      try {
+        await bot.lookAt(new Vec3(Number(point.x) + 0.5, Number(point.y) + 0.5, Number(point.z) + 0.5), true)
+      } catch { }
+      bot.setControlState('sprint', sprint)
+      bot.setControlState('forward', true)
+      bot.setControlState('jump', jump)
+      await delay(tickMs)
+    }
+  } finally {
+    stopBotMovement(bot)
+  }
+
+  console.log(`[LOBBY-PORTAL] Reached ${label} using straight walk.`)
+  return true
+}
+
+async function runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs) {
+  const route = getForcedStraightSpawnRoute(spawn)
+  if (!route || !isInsideForcedStraightSpawnRouteTrigger(bot?.entity?.position, spawn)) return false
+  console.log(`[LOBBY-PORTAL] Forced straight spawn route matched near ${Math.round(route.trigger.x)} ${Math.round(route.trigger.y ?? bot?.entity?.position?.y ?? 0)} ${Math.round(route.trigger.z)} radius=${route.trigger.radius}.`)
+
+  const backoffPoint = buildForcedStraightSpawnBackoffPoint(bot?.entity?.position, spawn)
+  if (backoffPoint) {
+    await walkStraightToLobbyPortalPoint(bot, config, backoffPoint, 'forced spawn backoff', timeoutMs, backoffPoint.range, { jump: true })
+  }
+
+  const waypoint = getSpawnWaypointPoint(spawn, bot?.entity?.position?.y)
+  if (waypoint) {
+    await walkStraightToLobbyPortalPoint(bot, config, {
+      ...waypoint,
+      range: Math.max(0.5, toNumber(route.waypointGoalRange, 2))
+    }, 'forced spawn waypoint', timeoutMs, Math.max(0.5, toNumber(route.waypointGoalRange, 2)), { jump: true })
+  }
+
+  const portalTarget = blockPosFromConfig(spawn?.portal)
+  if (!portalTarget) {
+    console.log('[LOBBY-PORTAL-WARN] Forced straight spawn route is enabled but spawnDisk.portal is missing.')
+    return false
+  }
+
+  await walkStraightToLobbyPortalPoint(bot, config, {
+    ...portalTarget,
+    range: Math.max(0.5, toNumber(route.portalGoalRange, toNumber(spawn?.goalRange, 2)))
+  }, 'forced spawn portal', timeoutMs, Math.max(0.5, toNumber(route.portalGoalRange, toNumber(spawn?.goalRange, 2))), { jump: true })
+  await holdForwardIntoPortal(bot, config, entryMs)
+  await delay(waitAfterMs)
+  return true
+}
+
 async function replayMeteorSceneMovement(bot, config, match, fallbackMs = 3000, context = 'scene-replay') {
   const hint = match?.best?.movementHint
   const portalPoint = match?.best?.portalPoint
@@ -10986,6 +11120,10 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     if (!stillInsideSpawnRegion && !isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && sceneAction !== 'spawn-portal') {
       console.log(`[LOBBY-PORTAL] Leg ${legIndex}: left configured spawn disk before search; skipping portal movement.`)
       return false
+    }
+
+    if (await runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs)) {
+      return true
     }
 
     if (spawn.backoffWhenNearWaypoint !== false && isNearSpawnWaypoint(bot?.entity?.position, spawn)) {
