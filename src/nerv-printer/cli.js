@@ -3024,9 +3024,9 @@ function getMaterialChestGroupsForRefill(bot, config, blockName) {
 async function openContainerAt(bot, position, accessPosition) {
   const Vec3 = bot.entity.position.constructor
   const blockPos = new Vec3(position.x, position.y, position.z)
-  const goalPos = accessPosition && bot.entity.position.distanceTo(new Vec3(accessPosition.x, accessPosition.y, accessPosition.z)) <= 6
-    ? accessPosition
-    : position
+  // Always navigate to accessPosition if provided — it is the configured standing spot for the chest.
+  // Falling back to the chest block position when far away caused the bot to pathfind into walls/inaccessible spots.
+  const goalPos = accessPosition || position
   const goal = new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2)
 
   const gotoPromise = bot.pathfinder.goto(goal)
@@ -3108,8 +3108,15 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         // Count ALL of the target item in this chest — including partial stacks.
         // BUG FIX: old code used Math.floor(total/64) which silently skipped chests
         // with partial stacks (e.g. 30 carpets -> 30/64=0 -> skipped entirely).
-        const chestSlots = container.containerItems().filter((entry) => entry.type === itemId)
-        const totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+        let chestSlots = container.containerItems().filter((entry) => entry.type === itemId)
+        let totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+
+        // On laggy servers the chest window may not have synced yet — retry once after a short wait
+        if (totalInChest <= 0) {
+          await delay(Math.max(200, toNumber(advanced.preRestockDelayMs, 200)))
+          chestSlots = container.containerItems().filter((entry) => entry.type === itemId)
+          totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+        }
 
         if (totalInChest <= 0) {
           if (config.advanced?.debugPrints) {
@@ -4651,7 +4658,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   const maxIterations = Math.max(20, toNumber(advanced.nervInventoryMaxPlanIterations, 80))
   const stableRequired = getNervRequiredItems(bot, config, planningTargets)
   const stableNeededByBlock = new Map(stableRequired.requiredItems)
-  const restockBuffer = Math.max(0, toNumber(advanced.restockBufferItems, 0))
+  const restockBuffer = Math.max(0, toNumber(advanced.restockBufferItems, 10))
   if (restockBuffer > 0) {
     for (const [blockName, count] of stableNeededByBlock.entries()) {
       stableNeededByBlock.set(blockName, count + restockBuffer)
