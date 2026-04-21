@@ -10108,6 +10108,39 @@ function buildForcedStraightSpawnBackoffPoint(pos, spawn) {
   }
 }
 
+async function backoffFromLobbyPortalPoint(bot, config, point, label, backoffBlocks, options = {}) {
+  if (!point || !isBotSessionLive(bot)) return false
+  const tickMs = Math.max(50, toNumber(options.tickMs, 100))
+  const msPerBlock = Math.max(100, toNumber(options.msPerBlock, 350))
+  const duration = Math.max(250, Math.round(Math.max(1, toNumber(backoffBlocks, 5)) * msPerBlock))
+  const sprint = options.sprint !== false && getPrinterSprintMode(config) !== 'off'
+  const jump = options.jump !== false
+  const Vec3 = bot?.entity?.position?.constructor
+  stopBotMovement(bot)
+  console.log(`[LOBBY-PORTAL] Backing off from ${label} for ${duration}ms (~${Math.max(1, toNumber(backoffBlocks, 5))} blocks).`)
+
+  try {
+    if (Vec3) {
+      try {
+        await bot.lookAt(new Vec3(Number(point.x) + 0.5, Number(point.y) + 0.5, Number(point.z) + 0.5), true)
+      } catch { }
+    }
+    bot.setControlState('sprint', sprint)
+    bot.setControlState('back', true)
+    bot.setControlState('jump', jump)
+    let elapsed = 0
+    while (isBotSessionLive(bot) && elapsed < duration) {
+      await delay(tickMs)
+      elapsed += tickMs
+    }
+  } finally {
+    stopBotMovement(bot)
+  }
+
+  console.log(`[LOBBY-PORTAL] Backoff from ${label} finished at ${formatBotPosition(bot)}.`)
+  return true
+}
+
 function isInsideLoginPortalZone(pos, portalConfig) {
   const login = portalConfig?.loginPortal || {}
   if (login.enabled === false) return false
@@ -10957,12 +10990,21 @@ async function runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryM
   if (!matchedTrigger && !alwaysUse) return false
   console.log(`[LOBBY-PORTAL] Forced straight spawn route ${matchedTrigger ? 'matched' : 'continued'} near ${Math.round(route.trigger.x)} ${Math.round(route.trigger.y ?? bot?.entity?.position?.y ?? 0)} ${Math.round(route.trigger.z)} radius=${route.trigger.radius}.`)
 
-  const backoffPoint = buildForcedStraightSpawnBackoffPoint(bot?.entity?.position, spawn)
-  if (backoffPoint && matchedTrigger) {
-    await walkStraightToLobbyPortalPoint(bot, config, backoffPoint, 'forced spawn backoff', timeoutMs, backoffPoint.range, { jump: true })
+  const waypoint = getSpawnWaypointPoint(spawn, bot?.entity?.position?.y)
+  if (waypoint && matchedTrigger) {
+    await backoffFromLobbyPortalPoint(
+      bot,
+      config,
+      waypoint,
+      'forced spawn waypoint',
+      Math.max(1, toNumber(route.backoffBlocks, 5)),
+      {
+        jump: true,
+        msPerBlock: Math.max(150, toNumber(route.backoffMsPerBlock, 350))
+      }
+    )
   }
 
-  const waypoint = getSpawnWaypointPoint(spawn, bot?.entity?.position?.y)
   if (waypoint) {
     await walkStraightToLobbyPortalPoint(bot, config, {
       ...waypoint,
