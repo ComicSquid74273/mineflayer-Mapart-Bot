@@ -673,7 +673,13 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       tokenWaiting: stdinCommandState.status?.tokenWaiting === true,
       currentNbtStartedAt: state.currentNbtStartedAt || null,
       recentChat: chatBuffer.slice(),
-      latencyMs: typeof bot._client?.latency === 'number' ? Math.round(bot._client.latency) : null,
+      latencyMs: (() => {
+        const playerPing = bot.players?.[botName]?.ping ?? bot.players?.[bot.username]?.ping
+        if (typeof playerPing === 'number' && playerPing > 0) return Math.round(playerPing)
+        const clientLatency = bot._client?.latency
+        if (typeof clientLatency === 'number' && clientLatency > 0) return Math.round(clientLatency)
+        return null
+      })(),
       tpaTarget: getTpaTarget(config)
     }
   }
@@ -3112,18 +3118,36 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         // How much do we need vs what the chest has?
         const haveAtStart = countInventoryItems(bot, blockName)
         const stillNeedTotal = Math.max(0, desiredItemCount - haveAtStart)
-        // Cap by actual inventory capacity so targetCount is always reachable.
-        // Without this cap, desiredItemCount may exceed what fits (e.g. need=66 but capacity=62)
-        // causing the loop to pull as much as possible, then fail the ">= desiredItemCount" check.
-        const capacityBeforePull = inventoryCapacityForItem(bot, blockName)
+        // Use empty-slots-only capacity for the chest interaction budget.
+        // mineflayer's container.withdraw() can fail with "inventory full" when
+        // there are no empty slots even if a partial same-item stack exists —
+        // the server may not merge partial stacks during shift-click withdrawal.
+        // Count both empty slots AND partial same-item slots as capacity.
+        const emptySlotCapacity = countEmptyInventorySlots(bot) * stackSize
+        const partialCapacity = inventoryCapacityForItem(bot, blockName) - emptySlotCapacity
+        const capacityBeforePull = emptySlotCapacity + Math.max(0, partialCapacity)
         const willPullTotal = Math.min(totalInChest, stillNeedTotal, capacityBeforePull)
 
-        if (config.errorHandling?.logErrors !== false) {
-          console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} need=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal}`)
+        if (willPullTotal <= 0) {
+          try { container.close() } catch { }
+          container = null
+          if (haveAtStart >= desiredItemCount) {
+            // Already have enough from a previous chest pull in this call
+            restockFailureCache.delete(blockName)
+            unavailableMaterialCache.delete(blockName)
+            const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
+            if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
+            return true
+          }
+          // No capacity; skip remaining spots in this group and fall through to return false
+          break
         }
 
-        // Pull in increments until we get what we need from this chest.
-        // Handles fragmented chests (many small stacks) correctly.
+        if (config.errorHandling?.logErrors !== false) {
+          console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} need=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal} empty=${Math.floor(emptySlotCapacity / stackSize)}slots`)
+        }
+
+        // Pull in stack-sized increments until we get what we need from this chest.
         let plannedHaveAfterPulls = haveAtStart
         const targetCount = haveAtStart + willPullTotal
         let attempts = 0
@@ -3147,8 +3171,13 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             plannedHaveAfterPulls += pullAmount
             await delay(toNumber(advanced.inventoryActionDelayMs, 80))
             const haveAfterPull = countInventoryItems(bot, blockName)
-            if (haveAfterPull <= haveBeforePull && config.errorHandling?.logErrors !== false) {
-              console.log(`[RESTOCK-WARN] ${blockName} inventory update pending: before=${haveBeforePull} after=${haveAfterPull} requested=${pullAmount} planned=${plannedHaveAfterPulls}/${targetCount}`)
+            if (haveAfterPull <= haveBeforePull) {
+              // Items not yet reflected in inventory — wait longer for server sync
+              await delay(250)
+              const haveAfterWait = countInventoryItems(bot, blockName)
+              if (config.errorHandling?.logErrors !== false && haveAfterWait <= haveBeforePull) {
+                console.log(`[RESTOCK-WARN] ${blockName} inventory update pending: before=${haveBeforePull} after=${haveAfterWait} requested=${pullAmount} planned=${plannedHaveAfterPulls}/${targetCount}`)
+              }
             }
           } catch (err) {
             const message = String(err?.message || err).toLowerCase()
@@ -3159,7 +3188,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               message.includes('no space')
 
             if (inventoryFull) {
-              if (config.errorHandling?.logErrors !== false) {
+              // Check if we actually got some items despite the error
+              const haveNowCheck = countInventoryItems(bot, blockName)
+              if (haveNowCheck > haveAtStart) {
+                plannedHaveAfterPulls = haveNowCheck
+              } else if (config.errorHandling?.logErrors !== false) {
                 console.log(`[RESTOCK-WARN] Inventory full while pulling ${blockName}; stopping this chest.`)
               }
               stoppedForInventoryFull = true
@@ -4716,10 +4749,22 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       const remainingCapacity = inventoryCapacityForItem(bot, closestItem.blockName)
       const retryPlan = buildNervInventoryPlanFromRequired(bot, config, planningTargets, stableNeededByBlock, stableRequired)
 
-      if (advanced.dumpUnneededBeforeRefill !== false && retryPlan.dumpSlots.length > 0) {
+      if (advanced.dumpUnneededBeforeRefill !== false && retryPlan.dumpSlots.length > 0 && stillNeed > 0) {
         restockFailureCache.delete(closestItem.blockName)
         unavailableMaterialCache.delete(closestItem.blockName)
-        console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} needs ${stillNeed} more but capacity is ${remainingCapacity}; dumping from fresh plan before retry.`)
+        const dumpsNeeded = Math.max(1, estimateDumpSlotsNeededForRestock(bot, [closestItem]))
+        const dumpSlots = retryPlan.dumpSlots.slice(0, dumpsNeeded)
+        console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} needs ${stillNeed} more but capacity is ${remainingCapacity}; dumping ${dumpSlots.length} slot(s) before retry.`)
+        const dumped = await dumpNervInventorySlots(bot, config, dumpSlots, 'nervCapacityRetryDump')
+        if (dumped > 0) {
+          didRestockThisWindow = false
+          await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+          continue
+        }
+        if (stillNeed > remainingCapacity) {
+          console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} still needs ${stillNeed} but dump failed and capacity is only ${remainingCapacity}. Stopping refill.`)
+          return false
+        }
         continue
       }
 
@@ -9201,6 +9246,53 @@ function getReconnectDelayForSession(session, reconnect) {
   return reconnect.delayMs
 }
 
+async function standbyWaitForReconnect(config) {
+  const dashCfg = config?.dashboard || {}
+  const serviceUrl = String(dashCfg.serviceUrl || '').replace(/\/$/, '')
+  const botName = config?.bot?.username || ''
+  const pollMs = toNumber(dashCfg.commandPollMs, 3000)
+  if (!serviceUrl || !botName) return false
+
+  console.log(`[STANDBY] Bot disconnected by dashboard. Polling every ${pollMs}ms for reconnect command...`)
+
+  const postStandbyStatus = () => createDashboardRequest(`${serviceUrl}/api/bots/status`, 'POST', {
+    botName,
+    hostLabel: dashCfg.hostLabel || '',
+    runtime: 'nerv-printer',
+    online: false,
+    phase: 'standby',
+    heartbeatAt: new Date().toISOString(),
+    lastStatusAt: new Date().toISOString()
+  }).catch(() => {})
+
+  await postStandbyStatus()
+
+  while (true) {
+    await delay(pollMs)
+    await postStandbyStatus()
+    try {
+      const response = await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands`, 'GET')
+      const items = Array.isArray(response.body?.items) ? response.body.items : []
+      for (const cmd of items) {
+        if (cmd.commandType === 'reconnect') {
+          try {
+            await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(cmd.commandId)}/claim`, 'POST', {})
+            await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(cmd.commandId)}/result`, 'POST', { status: 'succeeded', resultMessage: 'reconnect accepted; restarting session' })
+          } catch {}
+          console.log('[STANDBY] Reconnect command received. Restarting session...')
+          return true
+        }
+        if (cmd.commandType === 'disconnect') {
+          try {
+            await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(cmd.commandId)}/claim`, 'POST', {})
+            await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(cmd.commandId)}/result`, 'POST', { status: 'succeeded', resultMessage: 'already disconnected; still in standby' })
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+}
+
 function shouldRetryReconnect(session, config) {
   const endReason = String(session?.endReason || '').toLowerCase()
   const lastError = String(session?.lastError || '').toLowerCase()
@@ -10873,11 +10965,6 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     const spawn = portalConfig.spawnDisk || {}
     const regionLabel = matchedSpawnRegion ? ` region=${matchedSpawnRegion.name}` : ''
     console.log(`[LOBBY-PORTAL] Leg ${legIndex}: matched spawn portal route${regionLabel}; running spawn portal route.`)
-    const skiplobbyCmd = spawn.skiplobbyCommand
-    if (skiplobbyCmd && typeof skiplobbyCmd === 'string') {
-      try { bot.chat(skiplobbyCmd) } catch {}
-      console.log(`[LOBBY-PORTAL] Sent skiplobby command: ${skiplobbyCmd}`)
-    }
     await delay(Math.max(0, toNumber(spawn.waitBeforeMoveMs, 2500)))
     if (!isBotSessionLive(bot)) return false
     const currentSpawnRegion = getMatchedLobbyRegion(bot?.entity?.position, portalConfig)
@@ -13368,56 +13455,70 @@ async function start() {
     console.log(`[6B6T-HOSTS] Rotation enabled: ${runtimeHosts.join(', ')}. starting=${runtimeHosts[runtimeHostIndex]}`)
   }
 
-  let attempt = 1
-  while (true) {
-    if (attempt > 1) {
-      console.log(`[RECONNECT] Starting attempt ${attempt}/${reconnect.maxAttempts}.`)
+  let continueOuter = true
+  while (continueOuter) {
+    continueOuter = false
+    let attempt = 1
+    let lastEndReason = null
+
+    while (true) {
+      if (attempt > 1) {
+        console.log(`[RECONNECT] Starting attempt ${attempt}/${reconnect.maxAttempts}.`)
+      }
+
+      const activeHost = runtimeHosts.length ? runtimeHosts[runtimeHostIndex] : config.bot?.host
+      const sessionConfig = activeHost ? makeHostConfig(config, activeHost) : config
+      let session = await runSingleSession(sessionConfig, attempt)
+      session = await resolveTokenVerificationSession({
+        session,
+        account: sessionConfig.bot?.username || 'MapartBot',
+        host: activeHost || sessionConfig.bot?.host || 'unknown-host',
+        version: sessionConfig.bot?.version || 'unknown-version',
+        sessionNumber: attempt,
+        retryDelayMs: Math.max(1000, Math.min(5000, toNumber(reconnect.delayMs, 3000))),
+        rerun: async () => await runSingleSession(sessionConfig, attempt),
+        config: sessionConfig
+      })
+      const retryable = shouldRetryReconnect(session, sessionConfig)
+      lastEndReason = session.endReason
+      console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
+
+      if (!reconnect.enabled) {
+        break
+      }
+
+      if (!retryable) {
+        console.log(`[RECONNECT] Not retrying due to non-retryable reason: ${session.endReason}`)
+        break
+      }
+
+      if (attempt >= reconnect.maxAttempts) {
+        console.log(`[RECONNECT] Stopping after ${attempt} attempts. Last reason: ${session.endReason}`)
+        break
+      }
+
+      const retryDelayMs = getReconnectDelayForSession(session, reconnect)
+      if (runtimeHosts.length > 1 && session.successfulStartup !== true) {
+        const previousHost = runtimeHosts[runtimeHostIndex]
+        runtimeHostIndex = (runtimeHostIndex + 1) % runtimeHosts.length
+        console.log(`[6B6T-HOSTS] Switching host after failed startup: ${previousHost} -> ${runtimeHosts[runtimeHostIndex]}`)
+      }
+
+      console.log(`[RECONNECT] Retrying in ${retryDelayMs}ms. reason=${session.endReason}`)
+      await delay(retryDelayMs)
+      if (session.successfulStartup === true) {
+        if (attempt > 1) console.log('[RECONNECT] Previous session reached startup; resetting reconnect attempt counter.')
+        attempt = 1
+      } else {
+        attempt += 1
+      }
     }
 
-    const activeHost = runtimeHosts.length ? runtimeHosts[runtimeHostIndex] : config.bot?.host
-    const sessionConfig = activeHost ? makeHostConfig(config, activeHost) : config
-    let session = await runSingleSession(sessionConfig, attempt)
-    session = await resolveTokenVerificationSession({
-      session,
-      account: sessionConfig.bot?.username || 'MapartBot',
-      host: activeHost || sessionConfig.bot?.host || 'unknown-host',
-      version: sessionConfig.bot?.version || 'unknown-version',
-      sessionNumber: attempt,
-      retryDelayMs: Math.max(1000, Math.min(5000, toNumber(reconnect.delayMs, 3000))),
-      rerun: async () => await runSingleSession(sessionConfig, attempt),
-      config: sessionConfig
-    })
-    const retryable = shouldRetryReconnect(session, sessionConfig)
-    console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
-
-    if (!reconnect.enabled) {
-      break
-    }
-
-    if (!retryable) {
-      console.log(`[RECONNECT] Not retrying due to non-retryable reason: ${session.endReason}`)
-      break
-    }
-
-    if (attempt >= reconnect.maxAttempts) {
-      console.log(`[RECONNECT] Stopping after ${attempt} attempts. Last reason: ${session.endReason}`)
-      break
-    }
-
-    const retryDelayMs = getReconnectDelayForSession(session, reconnect)
-    if (runtimeHosts.length > 1 && session.successfulStartup !== true) {
-      const previousHost = runtimeHosts[runtimeHostIndex]
-      runtimeHostIndex = (runtimeHostIndex + 1) % runtimeHosts.length
-      console.log(`[6B6T-HOSTS] Switching host after failed startup: ${previousHost} -> ${runtimeHosts[runtimeHostIndex]}`)
-    }
-
-    console.log(`[RECONNECT] Retrying in ${retryDelayMs}ms. reason=${session.endReason}`)
-    await delay(retryDelayMs)
-    if (session.successfulStartup === true) {
-      if (attempt > 1) console.log('[RECONNECT] Previous session reached startup; resetting reconnect attempt counter.')
-      attempt = 1
-    } else {
-      attempt += 1
+    if (String(lastEndReason || '').includes('dashboard-disconnect') && config?.dashboard?.enabled !== false) {
+      const shouldRestart = await standbyWaitForReconnect(config)
+      if (shouldRestart) {
+        continueOuter = true
+      }
     }
   }
 }

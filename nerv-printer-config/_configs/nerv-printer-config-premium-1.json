@@ -260,7 +260,7 @@
   "advanced": {
     "antiHunger": {
       "enabled": true,
-      "sprint": false,
+      "sprint": true,
       "onGround": true
     },
     "meteorSceneAwareness": {

@@ -674,3 +674,12 @@ button:disabled {
   border-color: rgba(209, 154, 42, 0.28);
   box-shadow: 0 0 0 1px rgba(209, 154, 42, 0.14);
 }
+
+.config-editor-textarea {
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 200px;
+  width: 100%;
+}

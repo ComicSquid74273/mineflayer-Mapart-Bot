@@ -8,6 +8,7 @@ const PORT = Number(process.env.DASHBOARD_PORT || 4080)
 const DATA_DIR = process.env.DASHBOARD_DATA_DIR || path.resolve(__dirname, '..', 'data')
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public')
 const LOGS_DIR = process.env.DASHBOARD_LOGS_DIR || path.resolve(__dirname, '..', '..', 'logs')
+const CONFIG_DIR = process.env.DASHBOARD_CONFIG_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config', '_configs')
 const store = createStore(DATA_DIR)
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
@@ -477,6 +478,71 @@ async function route(req, res) {
     fs.unlinkSync(filePath)
     auditOperatorAction(actor, 'delete-log', `Deleted log file ${logDeleteParams.fileName}.`, { fileName: logDeleteParams.fileName }, 'warn')
     return sendJson(res, 200, { ok: true })
+  }
+
+  if (req.method === 'POST' && pathname === '/api/dashboard/data/clear') {
+    if (!actor.canManageOperators) return forbidden(res, 'admin permission required')
+    const PROTECTED = new Set(['operators.json'])
+    const deleted = []
+    const errors = []
+    try {
+      for (const entry of fs.readdirSync(DATA_DIR, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue
+        if (PROTECTED.has(entry.name.toLowerCase())) continue
+        const filePath = path.join(DATA_DIR, entry.name)
+        try {
+          fs.unlinkSync(filePath)
+          deleted.push(entry.name)
+        } catch (err) {
+          errors.push({ name: entry.name, error: err?.message || String(err) })
+        }
+      }
+    } catch (err) {
+      return sendJson(res, 500, { ok: false, error: err?.message || String(err) })
+    }
+    auditOperatorAction(actor, 'clear-data', `Cleared data folder: deleted ${deleted.length} file(s).`, { deleted }, 'warn')
+    return sendJson(res, 200, { ok: true, deleted, errors })
+  }
+
+  if (pathname === '/api/dashboard/config') {
+    if (!actor.canManageOperators) return forbidden(res, 'admin permission required')
+    if (req.method !== 'GET') return methodNotAllowed(res)
+    const files = []
+    try {
+      if (fs.existsSync(CONFIG_DIR)) {
+        for (const entry of fs.readdirSync(CONFIG_DIR, { withFileTypes: true })) {
+          if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue
+          const filePath = path.join(CONFIG_DIR, entry.name)
+          const stats = fs.statSync(filePath)
+          files.push({ name: entry.name, sizeBytes: stats.size, modifiedAt: stats.mtime.toISOString() })
+        }
+      }
+    } catch {}
+    return sendJson(res, 200, { files, configDir: CONFIG_DIR })
+  }
+
+  const configFileParams = matchPath(pathname, '/api/dashboard/config/:fileName')
+  if (configFileParams) {
+    if (!actor.canManageOperators) return forbidden(res, 'admin permission required')
+    const safeName = String(configFileParams.fileName || '')
+    if (!safeName || !safeName.toLowerCase().endsWith('.json')) return notFound(res)
+    const filePath = path.join(CONFIG_DIR, safeName)
+    if (!ensureWithinDir(filePath, CONFIG_DIR)) return notFound(res)
+    if (req.method === 'GET') {
+      if (!fs.existsSync(filePath)) return notFound(res)
+      const content = fs.readFileSync(filePath, 'utf8')
+      return sendJson(res, 200, { name: safeName, content })
+    }
+    if (req.method === 'PUT') {
+      const body = await readBody(req)
+      const content = String(body?.content || '')
+      try { JSON.parse(content) } catch { return badRequest(res, 'invalid JSON') }
+      if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true })
+      fs.writeFileSync(filePath, content, 'utf8')
+      auditOperatorAction(actor, 'edit-config', `Updated config file ${safeName}.`, { fileName: safeName })
+      return sendJson(res, 200, { ok: true })
+    }
+    return methodNotAllowed(res)
   }
 
   if (req.method === 'POST' && pathname === '/api/bots/status') {

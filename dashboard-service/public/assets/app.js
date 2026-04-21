@@ -4,6 +4,8 @@ const state = {
   files: [],
   logs: [],
   operators: [],
+  configs: [],
+  configEditor: { name: null, content: '', dirty: false },
   refreshTimer: null,
   refreshIntervalMs: 300000,
   busy: false,
@@ -17,6 +19,7 @@ const state = {
     nodes: '',
     logs: '',
     operators: '',
+    configs: '',
     events: '',
     auth: ''
   },
@@ -78,7 +81,15 @@ const elements = {
   uploadNodeSelect: document.getElementById('uploadNodeSelect'),
   uploadForm: document.getElementById('uploadForm'),
   uploadedByInput: document.getElementById('uploadedByInput'),
-  uploadStatus: document.getElementById('uploadStatus')
+  uploadStatus: document.getElementById('uploadStatus'),
+  clearDataButton: document.getElementById('clearDataButton'),
+  configFilesList: document.getElementById('configFilesList'),
+  configEditorSection: document.getElementById('configEditorSection'),
+  configEditorTitle: document.getElementById('configEditorTitle'),
+  configEditorClose: document.getElementById('configEditorClose'),
+  configEditorTextarea: document.getElementById('configEditorTextarea'),
+  configEditorSave: document.getElementById('configEditorSave'),
+  configEditorStatus: document.getElementById('configEditorStatus')
 }
 
 function roleDefaults(role) {
@@ -572,9 +583,8 @@ function renderBotCard(bot) {
       <div class="bot-actions">
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
         <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Stop Print</button>
-        <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect (no auto-reconnect)">Disconnect</button>
-        <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Force reconnect">Reconnect</button>
-        ${bot.tpaTarget ? `<button class="ghost-button small-button" type="button" data-action="tpa-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-tpa-target="${escapeHtml(bot.tpaTarget)}">TPA</button>` : ''}
+        <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect from server (no auto-reconnect)">Disconnect</button>
+        <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Reconnect to server">Reconnect</button>
       </div>
       <div class="chat-panel">
         <div class="chat-messages" id="chat-${escapeHtml(bot.botName)}">
@@ -589,7 +599,7 @@ function renderBotCard(bot) {
         <div class="chat-input-row">
           <input class="chat-input" type="text" placeholder="Send chat message…" maxlength="256"
             data-chat-bot="${escapeHtml(bot.botName)}"
-            ${!canOperate ? 'disabled' : ''} />
+            data-permission-needed="canOperate" />
           <button class="accent-button small-button" type="button"
             data-action="chat-send"
             data-permission-needed="canOperate"
@@ -853,6 +863,116 @@ function renderOperators() {
   }).join('')
 }
 
+function renderConfigs() {
+  const sig = JSON.stringify({ canAdmin: hasPermission('canManageOperators'), configs: state.configs })
+  if (state.renderCache.configs === sig) return
+  state.renderCache.configs = sig
+
+  if (!hasPermission('canManageOperators')) {
+    elements.configFilesList.innerHTML = `
+      <article class="empty-card">
+        <h3>Admin only</h3>
+        <p>Log in as admin to view and edit config files.</p>
+      </article>`
+    return
+  }
+
+  if (!state.configs.length) {
+    elements.configFilesList.innerHTML = `
+      <article class="empty-card">
+        <h3>No config files found</h3>
+        <p>Set DASHBOARD_CONFIG_DIR on the server to point to your config directory.</p>
+      </article>`
+    return
+  }
+
+  elements.configFilesList.innerHTML = state.configs.map((f) => `
+    <article class="file-item">
+      <div class="file-row">
+        <div>
+          <strong>${escapeHtml(f.name)}</strong>
+          <p class="file-meta">${formatFileSize(f.sizeBytes)} · modified ${escapeHtml(formatTime(f.modifiedAt))}</p>
+        </div>
+        <button class="ghost-button small-button" type="button"
+          data-action="edit-config" data-permission-needed="canManageOperators"
+          data-config-name="${escapeHtml(f.name)}">Edit</button>
+      </div>
+    </article>`).join('')
+}
+
+function renderConfigEditor() {
+  const { name, content } = state.configEditor
+  if (!name) {
+    elements.configEditorSection.classList.add('hidden')
+    return
+  }
+  elements.configEditorSection.classList.remove('hidden')
+  elements.configEditorTitle.textContent = `Editing: ${name}`
+  if (elements.configEditorTextarea.value !== content) {
+    elements.configEditorTextarea.value = content
+  }
+  if (elements.configEditorStatus) elements.configEditorStatus.textContent = ''
+}
+
+async function onEditConfig(name) {
+  if (!hasPermission('canManageOperators')) return
+  try {
+    const result = await requestJson(`/api/dashboard/config/${encodeURIComponent(name)}`, { requireAuth: true })
+    state.configEditor.name = result.name
+    state.configEditor.content = result.content || ''
+    state.configEditor.dirty = false
+    renderConfigEditor()
+    elements.configEditorTextarea?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  } catch (err) {
+    pushEvent('error', `Failed to load ${name}: ${err.message}`)
+  }
+}
+
+async function onSaveConfig() {
+  if (!hasPermission('canManageOperators')) return
+  const { name } = state.configEditor
+  if (!name) return
+  const content = elements.configEditorTextarea?.value || ''
+  try {
+    JSON.parse(content)
+  } catch {
+    if (elements.configEditorStatus) elements.configEditorStatus.textContent = 'Invalid JSON — not saved.'
+    return
+  }
+  try {
+    if (elements.configEditorSave) elements.configEditorSave.disabled = true
+    await requestJson(`/api/dashboard/config/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+      requireAuth: true
+    })
+    state.configEditor.content = content
+    if (elements.configEditorStatus) elements.configEditorStatus.textContent = `Saved. Restart bot to apply.`
+    pushEvent('info', `Config ${name} saved.`)
+  } catch (err) {
+    if (elements.configEditorStatus) elements.configEditorStatus.textContent = `Save failed: ${err.message}`
+    pushEvent('error', `Save config failed: ${err.message}`)
+  } finally {
+    if (elements.configEditorSave) elements.configEditorSave.disabled = false
+  }
+}
+
+async function onClearData() {
+  if (!hasPermission('canManageOperators')) {
+    pushEvent('warn', 'Admin permission required.')
+    return
+  }
+  const confirmed = confirm('Delete all JSON data files on the server? (operators.json is preserved, configs are NOT affected)')
+  if (!confirmed) return
+  try {
+    const result = await submitJson('/api/dashboard/data/clear', {})
+    pushEvent('warn', `Cleared data folder: deleted ${(result.deleted || []).length} file(s)`)
+    await refreshData()
+  } catch (err) {
+    pushEvent('error', `Clear data failed: ${err.message}`)
+  }
+}
+
 function renderEvents() {
   const eventsSignature = JSON.stringify({
     localEvents: state.localEvents,
@@ -916,11 +1036,15 @@ async function refreshData(options = {}) {
     const operators = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/operators', { requireAuth: true })
       : { items: [] }
+    const configs = state.auth.verified && hasPermission('canManageOperators')
+      ? await requestJson('/api/dashboard/config', { requireAuth: true })
+      : { files: [] }
     state.bots = Array.isArray(bots.items) ? bots.items : []
     state.nodes = Array.isArray(nodes.items) ? nodes.items : []
     state.files = Array.isArray(files.items) ? files.items : []
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
+    state.configs = Array.isArray(configs.files) ? configs.files : []
     state.events = Array.isArray(events.items) ? events.items : []
     // Clear dismissed banners for bots that are no longer verifying
     for (const botName of [...state.dismissedVerify]) {
@@ -937,6 +1061,7 @@ async function refreshData(options = {}) {
     renderNodes()
     renderLogs()
     renderOperators()
+    renderConfigs()
     renderAuthState()
   } catch (error) {
     elements.serviceStatus.textContent = 'Service offline'
@@ -1196,8 +1321,8 @@ document.addEventListener('click', async (event) => {
       await onDisconnectBot(button.dataset.botName || '')
     } else if (button.dataset.action === 'reconnect-bot') {
       await onReconnectBot(button.dataset.botName || '')
-    } else if (button.dataset.action === 'tpa-bot') {
-      await onTpaBot(button.dataset.botName || '', button.dataset.tpaTarget || '')
+    } else if (button.dataset.action === 'edit-config') {
+      await onEditConfig(button.dataset.configName || '')
     } else if (button.dataset.action === 'chat-send') {
       const botName = button.dataset.botName || ''
       const input = document.querySelector(`.chat-input[data-chat-bot="${CSS.escape(botName)}"]`)
@@ -1299,6 +1424,38 @@ elements.operatorForm.addEventListener('submit', (event) => {
 elements.managedRole.addEventListener('change', () => {
   setManagedOperatorDefaults(elements.managedRole.value)
 })
+
+if (elements.clearDataButton) {
+  elements.clearDataButton.addEventListener('click', async () => {
+    try {
+      elements.clearDataButton.disabled = true
+      await onClearData()
+    } catch (error) {
+      pushEvent('error', error.message)
+    } finally {
+      elements.clearDataButton.disabled = false
+    }
+  })
+}
+
+if (elements.configEditorClose) {
+  elements.configEditorClose.addEventListener('click', () => {
+    state.configEditor.name = null
+    state.configEditor.content = ''
+    renderConfigEditor()
+  })
+}
+
+if (elements.configEditorSave) {
+  elements.configEditorSave.addEventListener('click', async () => {
+    try {
+      await onSaveConfig()
+    } catch (error) {
+      pushEvent('error', error.message)
+      if (elements.configEditorStatus) elements.configEditorStatus.textContent = `Error: ${error.message}`
+    }
+  })
+}
 
 renderEvents()
 loadStoredAuth()

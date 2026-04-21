@@ -161,7 +161,6 @@
               "centerZ": 4,
               "radius": 24,
               "waitBeforeMoveMs": 2500,
-              "skiplobbyCommand": "/skiplobby on",
               "backoffWhenNearWaypoint": true,
               "backoffBlocks": 5,
               "backoffTriggerRadius": 12,
@@ -252,7 +251,7 @@
   "advanced": {
     "antiHunger": {
       "enabled": true,
-      "sprint": false,
+      "sprint": true,
       "onGround": true
     },
     "meteorSceneAwareness": {
