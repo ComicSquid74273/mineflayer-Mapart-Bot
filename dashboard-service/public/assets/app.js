@@ -9,6 +9,7 @@ const state = {
   busy: false,
   uploadBusy: false,
   lastInteractionAt: Date.now(),
+  dismissedVerify: new Set(),
   renderCache: {
     summary: '',
     bots: '',
@@ -147,6 +148,14 @@ function formatDuration(value) {
   return parts.slice(0, 2).join(' ')
 }
 
+function formatFileSize(bytes) {
+  const n = Number(bytes)
+  if (!Number.isFinite(n) || n < 0) return 'n/a'
+  if (n < 1024) return `${n} B`
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1048576).toFixed(1)} MB`
+}
+
 function normalizeRefreshInterval(value) {
   const next = Number(value)
   return ALLOWED_REFRESH_INTERVALS.includes(next) ? next : 300000
@@ -154,6 +163,12 @@ function normalizeRefreshInterval(value) {
 
 function phaseClass(phase) {
   return `phase-${String(phase || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+}
+
+function botHealthClass(bot) {
+  if (!bot.online || bot.phase === 'crashed' || bot.phase === 'stopped') return 'health-red'
+  if (bot.tokenWaiting || bot.activeState === 'stale' || bot.reconnectState === 'reconnecting') return 'health-yellow'
+  return 'health-green'
 }
 
 function pushEvent(level, message) {
@@ -503,7 +518,8 @@ function renderBotCard(bot) {
   const currentRunElapsed = bot.currentNbtStartedAt
     ? formatDuration(Date.now() - new Date(bot.currentNbtStartedAt).getTime())
     : 'n/a'
-  const verifyBanner = bot.tokenWaiting ? `
+  const showVerify = bot.tokenWaiting && !state.dismissedVerify.has(bot.botName)
+  const verifyBanner = showVerify ? `
     <div class="verify-banner">
       <div class="verify-info">
         <span class="verify-label">Verification Required</span>
@@ -516,16 +532,23 @@ function renderBotCard(bot) {
       <div class="verify-actions">
         <button class="accent-button small-button" type="button" data-action="verify-done" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">✓ Verified</button>
         <button class="ghost-button small-button" type="button" data-action="verify-refresh" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">↺ Resend</button>
+        <button class="ghost-button small-button" type="button" data-action="verify-close" data-bot-name="${escapeHtml(bot.botName)}" title="Dismiss banner">✕</button>
       </div>
     </div>
   ` : ''
+  const healthClass = botHealthClass(bot)
+  const pingText = typeof bot.latencyMs === 'number' ? `${bot.latencyMs}ms` : 'n/a'
+  const canOperate = hasPermission('canOperate')
   return `
-    <article class="bot-card${bot.tokenWaiting ? ' bot-card-verify' : ''}">
+    <article class="bot-card${showVerify ? ' bot-card-verify' : ''}">
       ${verifyBanner}
       <div class="bot-head">
-        <div>
-          <h3 class="bot-name">${escapeHtml(bot.botName)}</h3>
-          <p class="bot-meta">${escapeHtml(bot.role || 'single')} · ${escapeHtml(bot.location || 'unknown')}${bot.botIp && !bot.tokenWaiting ? ` · ${escapeHtml(bot.botIp)}` : ''}</p>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="health-dot ${escapeHtml(healthClass)}" title="${escapeHtml(healthClass === 'health-green' ? 'Healthy' : healthClass === 'health-yellow' ? 'Warning' : 'Issue')}"></span>
+          <div>
+            <h3 class="bot-name">${escapeHtml(bot.botName)}</h3>
+            <p class="bot-meta">${escapeHtml(bot.role || 'single')} · ${escapeHtml(bot.location || 'unknown')}${bot.botIp && !showVerify ? ` · ${escapeHtml(bot.botIp)}` : ''}</p>
+          </div>
         </div>
         <div class="status-inline">
           <span class="status-pill ${bot.online ? 'status-online' : 'status-offline'}">${bot.online ? 'Online' : 'Offline'}</span>
@@ -537,6 +560,7 @@ function renderBotCard(bot) {
         <div class="metric">Hunger<strong>${escapeHtml(bot.hunger ?? 'n/a')}</strong></div>
         <div class="metric">Activity<strong>${escapeHtml(bot.activeState || 'n/a')}</strong></div>
         <div class="metric">Progress<strong>${escapeHtml(progress)}</strong></div>
+        <div class="metric">Ping<strong>${escapeHtml(pingText)}</strong></div>
       </div>
       <div class="bot-metrics">
         <div class="metric">NBT<strong>${escapeHtml(bot.currentNbt || 'none')}</strong></div>
@@ -548,13 +572,36 @@ function renderBotCard(bot) {
       <div class="bot-actions">
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
         <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Stop Print</button>
+        <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect (no auto-reconnect)">Disconnect</button>
+        <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Force reconnect">Reconnect</button>
+        ${bot.tpaTarget ? `<button class="ghost-button small-button" type="button" data-action="tpa-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-tpa-target="${escapeHtml(bot.tpaTarget)}">TPA</button>` : ''}
+      </div>
+      <div class="chat-panel">
+        <div class="chat-messages" id="chat-${escapeHtml(bot.botName)}">
+          ${(Array.isArray(bot.recentChat) && bot.recentChat.length)
+            ? bot.recentChat.slice(-12).map((entry) => `
+              <div class="chat-line">
+                <span class="chat-ts">${escapeHtml(formatTime(entry.ts).split(', ')[1] || formatTime(entry.ts))}</span>
+                <span class="chat-text">${escapeHtml(entry.text)}</span>
+              </div>`).join('')
+            : '<p class="chat-empty">No recent chat</p>'}
+        </div>
+        <div class="chat-input-row">
+          <input class="chat-input" type="text" placeholder="Send chat message…" maxlength="256"
+            data-chat-bot="${escapeHtml(bot.botName)}"
+            ${!canOperate ? 'disabled' : ''} />
+          <button class="accent-button small-button" type="button"
+            data-action="chat-send"
+            data-permission-needed="canOperate"
+            data-bot-name="${escapeHtml(bot.botName)}">Send</button>
+        </div>
       </div>
     </article>
   `
 }
 
 function renderBots() {
-  const botsSignature = JSON.stringify({ bots: state.bots, nodes: state.nodes })
+  const botsSignature = JSON.stringify({ bots: state.bots, nodes: state.nodes, dismissed: [...state.dismissedVerify] })
   if (state.renderCache.bots === botsSignature) return
   state.renderCache.bots = botsSignature
 
@@ -750,9 +797,12 @@ function renderLogs() {
       <div class="file-row">
         <div>
           <strong>${escapeHtml(item.fileName)}</strong>
-          <p class="file-meta">${escapeHtml(item.sizeBytes)} bytes · ${escapeHtml(formatTime(item.modifiedAt))}</p>
+          <p class="file-meta">${escapeHtml(formatFileSize(item.sizeBytes))} · ${escapeHtml(formatTime(item.modifiedAt))}</p>
         </div>
-        <button class="ghost-button small-button" type="button" data-action="download-log" data-permission-needed="canViewLogs" data-file-name="${escapeHtml(item.fileName)}">Download</button>
+        <div style="display:flex;gap:8px;flex-shrink:0;">
+          <button class="ghost-button small-button" type="button" data-action="download-log" data-permission-needed="canViewLogs" data-file-name="${escapeHtml(item.fileName)}">Download</button>
+          <button class="danger-button small-button" type="button" data-action="delete-log" data-permission-needed="canOperate" data-file-name="${escapeHtml(item.fileName)}">Delete</button>
+        </div>
       </div>
     </article>
   `).join('')
@@ -872,6 +922,12 @@ async function refreshData(options = {}) {
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.events = Array.isArray(events.items) ? events.items : []
+    // Clear dismissed banners for bots that are no longer verifying
+    for (const botName of [...state.dismissedVerify]) {
+      if (!state.bots.some((b) => b.botName === botName && b.tokenWaiting)) {
+        state.dismissedVerify.delete(botName)
+      }
+    }
     elements.serviceStatus.textContent = health.ok ? 'Service online' : 'Service unknown'
     elements.serviceStatus.className = `status-pill ${health.ok ? 'status-online' : 'status-neutral'}`
     elements.lastRefresh.textContent = formatTime(new Date().toISOString())
@@ -977,6 +1033,17 @@ async function onAssign(event) {
   await refreshData()
 }
 
+async function onSendChat(botName, message) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before sending chat.')
+    return
+  }
+  const msg = String(message || '').trim()
+  if (!msg) return
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/chat`, { message: msg })
+  pushEvent('info', `[${botName}] chat sent: ${msg}`)
+}
+
 async function onDeleteNodeFile(hostLabel, fileName) {
   if (!hasPermission('canDeleteNodeFiles')) {
     pushEvent('warn', 'Login as an admin before deleting node files.')
@@ -985,6 +1052,46 @@ async function onDeleteNodeFile(hostLabel, fileName) {
   await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/files/${encodeURIComponent(fileName)}/delete`, {})
   pushEvent('warn', `Queued delete for ${fileName} on ${hostLabel}`)
   await refreshData()
+}
+
+async function onDeleteLog(fileName) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before deleting log files.')
+    return
+  }
+  await submitJson(`/api/dashboard/logs/${encodeURIComponent(fileName)}/delete`, {})
+  pushEvent('warn', `Deleted log file ${fileName}`)
+  await refreshData()
+}
+
+async function onDisconnectBot(botName) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before disconnecting bots.')
+    return
+  }
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/disconnect`, {})
+  pushEvent('warn', `Queued disconnect for ${botName} (auto-reconnect suppressed)`)
+  await refreshData()
+}
+
+async function onReconnectBot(botName) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before reconnecting bots.')
+    return
+  }
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/reconnect`, {})
+  pushEvent('info', `Queued force-reconnect for ${botName}`)
+  await refreshData()
+}
+
+async function onTpaBot(botName, tpaTarget) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before sending TPA commands.')
+    return
+  }
+  const msg = `/tpa ${tpaTarget}`
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/chat`, { message: msg })
+  pushEvent('info', `[${botName}] sent: ${msg}`)
 }
 
 async function onFleetAction(action, botName = null) {
@@ -1075,10 +1182,30 @@ document.addEventListener('click', async (event) => {
     } else if (button.dataset.action === 'download-log') {
       await downloadLogFile(button.dataset.fileName || '')
       pushEvent('info', `Downloaded log ${button.dataset.fileName || ''}`)
+    } else if (button.dataset.action === 'delete-log') {
+      await onDeleteLog(button.dataset.fileName || '')
     } else if (button.dataset.action === 'verify-done') {
       await onVerifyBot(button.dataset.botName || '', 'verified')
     } else if (button.dataset.action === 'verify-refresh') {
       await onVerifyBot(button.dataset.botName || '', 'refresh')
+    } else if (button.dataset.action === 'verify-close') {
+      state.dismissedVerify.add(button.dataset.botName || '')
+      state.renderCache.bots = ''
+      renderBots()
+    } else if (button.dataset.action === 'disconnect-bot') {
+      await onDisconnectBot(button.dataset.botName || '')
+    } else if (button.dataset.action === 'reconnect-bot') {
+      await onReconnectBot(button.dataset.botName || '')
+    } else if (button.dataset.action === 'tpa-bot') {
+      await onTpaBot(button.dataset.botName || '', button.dataset.tpaTarget || '')
+    } else if (button.dataset.action === 'chat-send') {
+      const botName = button.dataset.botName || ''
+      const input = document.querySelector(`.chat-input[data-chat-bot="${CSS.escape(botName)}"]`)
+      const msg = input ? input.value.trim() : ''
+      if (msg) {
+        await onSendChat(botName, msg)
+        if (input) input.value = ''
+      }
     } else {
       await onFleetAction(button.dataset.action, button.dataset.botName || button.dataset.hostLabel || null)
     }
@@ -1086,6 +1213,25 @@ document.addEventListener('click', async (event) => {
     pushEvent('error', error.message)
   } finally {
     button.disabled = false
+  }
+})
+
+document.addEventListener('keydown', async (event) => {
+  if (event.key !== 'Enter') return
+  const input = event.target.closest('.chat-input')
+  if (!input) return
+  const botName = input.dataset.chatBot || ''
+  const msg = input.value.trim()
+  if (!msg) return
+  try {
+    input.disabled = true
+    await onSendChat(botName, msg)
+    input.value = ''
+  } catch (error) {
+    pushEvent('error', error.message)
+  } finally {
+    input.disabled = false
+    input.focus()
   }
 })
 

@@ -576,6 +576,7 @@ function createStore(baseDir) {
       nbtFileId: input.nbtFileId || null,
       fileName: input.fileName || null,
       reason: input.reason || null,
+      message: input.message || null,
       expiresAt: input.expiresAt || null,
       resultMessage: null,
       completedAt: null

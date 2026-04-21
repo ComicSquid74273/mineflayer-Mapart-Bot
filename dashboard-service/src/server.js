@@ -335,7 +335,10 @@ function summarizeBot(bot) {
     verificationCode: bot.verificationCode || null,
     tokenWaiting: bot.tokenWaiting === true,
     botIp: bot.botIp || null,
-    currentNbtStartedAt: bot.currentNbtStartedAt || null
+    currentNbtStartedAt: bot.currentNbtStartedAt || null,
+    latencyMs: typeof bot.latencyMs === 'number' ? bot.latencyMs : null,
+    tpaTarget: bot.tpaTarget || null,
+    recentChat: Array.isArray(bot.recentChat) ? bot.recentChat : []
   }
 }
 
@@ -464,6 +467,16 @@ async function route(req, res) {
     })
     fs.createReadStream(filePath).pipe(res)
     return
+  }
+
+  const logDeleteParams = matchPath(pathname, '/api/dashboard/logs/:fileName/delete')
+  if (logDeleteParams) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const filePath = resolveLogFilePath(logDeleteParams.fileName)
+    if (!filePath) return notFound(res)
+    fs.unlinkSync(filePath)
+    auditOperatorAction(actor, 'delete-log', `Deleted log file ${logDeleteParams.fileName}.`, { fileName: logDeleteParams.fileName }, 'warn')
+    return sendJson(res, 200, { ok: true })
   }
 
   if (req.method === 'POST' && pathname === '/api/bots/status') {
@@ -696,6 +709,38 @@ async function route(req, res) {
       requestedBy: actor.username
     })
     auditOperatorAction(actor, `verify-${action}`, `Sent verification ${action} for ${params.botName}.`, { botName: params.botName })
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/chat')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const message = String(body?.message || '').trim()
+    if (!message) return badRequest(res, 'message is required')
+    const command = store.createCommand({
+      targetBotName: params.botName,
+      commandType: 'chat',
+      message,
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'chat-bot', `Sent chat to ${params.botName}: ${message}`, { botName: params.botName, message })
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/disconnect')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const command = store.createCommand({ targetBotName: params.botName, commandType: 'disconnect', requestedBy: actor.username })
+    auditOperatorAction(actor, 'disconnect-bot', `Queued disconnect for ${params.botName}.`, { botName: params.botName }, 'warn')
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/reconnect')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const command = store.createCommand({ targetBotName: params.botName, commandType: 'reconnect', requestedBy: actor.username })
+    auditOperatorAction(actor, 'reconnect-bot', `Queued force-reconnect for ${params.botName}.`, { botName: params.botName })
     return sendJson(res, 201, { command })
   }
 

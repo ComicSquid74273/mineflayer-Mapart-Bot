@@ -1,3 +1,12 @@
+// Safety net: GoalChanged rejections from mineflayer-pathfinder can become unhandled
+// when the watchdog fires setGoal(null) after a goto already resolved (race condition).
+// These are always safe to swallow — navigation will retry at the call site.
+process.on('unhandledRejection', (reason) => {
+  const msg = String(reason?.message || reason || '').toLowerCase()
+  if (msg.includes('goal was changed') || msg.includes('goalchanged')) return
+  throw reason
+})
+
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
 const fs = require('fs')
@@ -521,11 +530,22 @@ function downloadDashboardFile(urlValue, filePath) {
   })
 }
 
+function getTpaTarget(config) {
+  const activeProfile = config?.connection?.active
+  const profileBot = activeProfile ? config?.connection?.profiles?.[activeProfile]?.bot : null
+  const tpa = profileBot?.platformRecoveryTpa || config?.bot?.platformRecoveryTpa
+  if (!tpa?.enabled || !tpa?.command) return null
+  const match = String(tpa.command || '').match(/\/tpa\s+(.+)/i)
+  return match ? String(match[1]).trim() : null
+}
+
 function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   const dashboard = getDashboardConfig(config)
   if (!dashboard.enabled || !dashboard.serviceUrl) return null
 
   const botName = String(config?.bot?.username || bot?.username || 'MapartBot').trim() || 'MapartBot'
+  const chatBuffer = []
+  const maxChatBuffer = 50
   const state = {
     phase: 'starting',
     recoveryState: 'none',
@@ -541,6 +561,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     commandTimer: null,
     stopped: false
   }
+
+  // Buffer incoming in-game chat for the dashboard to read
+  bot.on('message', (jsonMsg) => {
+    const text = jsonMsg?.toString?.() || String(jsonMsg || '')
+    if (!text) return
+    chatBuffer.push({ ts: new Date().toISOString(), text })
+    if (chatBuffer.length > maxChatBuffer) chatBuffer.shift()
+  })
 
   function noteActivity() {
     state.lastActivityAt = Date.now()
@@ -643,7 +671,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       staleReason: activeState === 'stale' ? (progress ? 'progress-frozen' : 'heartbeat-missed') : undefined,
       verificationCode: stdinCommandState.status?.verificationCode || null,
       tokenWaiting: stdinCommandState.status?.tokenWaiting === true,
-      currentNbtStartedAt: state.currentNbtStartedAt || null
+      currentNbtStartedAt: state.currentNbtStartedAt || null,
+      recentChat: chatBuffer.slice(),
+      latencyMs: typeof bot._client?.latency === 'number' ? Math.round(bot._client.latency) : null,
+      tpaTarget: getTpaTarget(config)
     }
   }
 
@@ -829,6 +860,33 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         } else {
           await reportCommandResult(claimed.commandId, 'failed', 'no active verification prompt')
         }
+        break
+      }
+      case 'chat': {
+        const msg = String(claimed.message || '').trim()
+        if (!msg) {
+          await reportCommandResult(claimed.commandId, 'failed', 'chat message is empty')
+          break
+        }
+        try {
+          bot.chat(msg)
+          noteActivity()
+          await reportCommandResult(claimed.commandId, 'succeeded', `sent: ${msg}`)
+        } catch (err) {
+          await reportCommandResult(claimed.commandId, 'failed', `chat failed: ${err?.message || err}`)
+        }
+        break
+      }
+      case 'disconnect': {
+        await reportCommandResult(claimed.commandId, 'succeeded', 'disconnecting bot; auto-reconnect suppressed')
+        noteActivity()
+        try { bot.quit('dashboard-disconnect') } catch { }
+        break
+      }
+      case 'reconnect': {
+        await reportCommandResult(claimed.commandId, 'succeeded', 'force-reconnecting bot')
+        noteActivity()
+        try { bot.quit('dashboard-reconnect') } catch { }
         break
       }
       case 'restart': {
@@ -2960,7 +3018,9 @@ async function openContainerAt(bot, position, accessPosition) {
     : position
   const goal = new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2)
 
-  await bot.pathfinder.goto(goal)
+  const gotoPromise = bot.pathfinder.goto(goal)
+  gotoPromise.catch(() => {})
+  await gotoPromise
 
   const block = bot.blockAt(blockPos)
   if (!block) {
@@ -2997,11 +3057,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const requestedStackCount = Math.max(1, toNumber(requestedPulls, 1))
   const haveBeforeRestock = countInventoryItems(bot, blockName)
   const desiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
-    ? Math.max(
-      stackSize,
-      haveBeforeRestock + (requestedStackCount * stackSize),
-      toNumber(neededByBlock.get(blockName), requestedStackCount * stackSize)
-    )
+    ? Math.max(haveBeforeRestock + 1, toNumber(neededByBlock.get(blockName), haveBeforeRestock + requestedStackCount * stackSize))
     : Math.max(stackSize, haveBeforeRestock + (requestedStackCount * stackSize))
   const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
 
@@ -3026,7 +3082,16 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         if (config.errorHandling?.logErrors !== false) {
           console.log(`[RESTOCK-CHEST] ${blockName}: chest=${spot.x},${spot.y},${spot.z} open=${travel?.x ?? spot.x},${travel?.y ?? spot.y},${travel?.z ?? spot.z} dist=${Math.round(Math.sqrt(horizontalDist2(bot, spot)))}`)
         }
-        container = await openContainerAt(bot, spot, spot.accessPosition)
+        try {
+          container = await openContainerAt(bot, spot, spot.accessPosition)
+        } catch (navErr) {
+          const navMsg = String(navErr?.message || navErr || '').toLowerCase()
+          if (navMsg.includes('goal was changed') || navMsg.includes('goalchanged')) {
+            console.log(`[RESTOCK-WARN] Navigation interrupted (GoalChanged) going to chest for ${blockName}; skipping this chest.`)
+            continue
+          }
+          throw navErr
+        }
         await delay(toNumber(advanced.preRestockDelayMs, 200))
 
         // Count ALL of the target item in this chest — including partial stacks.
@@ -3047,7 +3112,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         // How much do we need vs what the chest has?
         const haveAtStart = countInventoryItems(bot, blockName)
         const stillNeedTotal = Math.max(0, desiredItemCount - haveAtStart)
-        const willPullTotal = Math.min(totalInChest, stillNeedTotal)
+        // Cap by actual inventory capacity so targetCount is always reachable.
+        // Without this cap, desiredItemCount may exceed what fits (e.g. need=66 but capacity=62)
+        // causing the loop to pull as much as possible, then fail the ">= desiredItemCount" check.
+        const capacityBeforePull = inventoryCapacityForItem(bot, blockName)
+        const willPullTotal = Math.min(totalInChest, stillNeedTotal, capacityBeforePull)
 
         if (config.errorHandling?.logErrors !== false) {
           console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} need=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal}`)
@@ -3064,7 +3133,15 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           attempts++
           const haveBeforePull = countInventoryItems(bot, blockName)
           const amountStillNeeded = targetCount - plannedHaveAfterPulls
-          const pullAmount = Math.min(stackSize, amountStillNeeded)
+          const currentCapacity = inventoryCapacityForItem(bot, blockName)
+          if (currentCapacity <= 0) {
+            if (config.errorHandling?.logErrors !== false) {
+              console.log(`[RESTOCK-WARN] ${blockName} needs ${amountStillNeeded} more but capacity is ${currentCapacity}; stopping pull.`)
+            }
+            stoppedForInventoryFull = true
+            break
+          }
+          const pullAmount = Math.min(stackSize, amountStillNeeded, currentCapacity)
           try {
             await container.withdraw(itemId, null, pullAmount)
             plannedHaveAfterPulls += pullAmount
@@ -3098,13 +3175,23 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         await delay(toNumber(advanced.postRestockDelayMs, 300))
 
         if (stoppedForInventoryFull) {
-          restockFailureCache.set(blockName, Date.now())
           const haveNow = countInventoryItems(bot, blockName)
+          // Inventory is full but check if we actually have enough for what was planned.
+          // desiredItemCount may exceed capacity (e.g. need=66 but max fits=64), so
+          // success = got everything we could actually pull (haveAtStart + willPullTotal).
+          if (haveNow >= haveAtStart + willPullTotal || haveNow >= desiredItemCount) {
+            restockFailureCache.delete(blockName)
+            unavailableMaterialCache.delete(blockName)
+            const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
+            if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
+            return true
+          }
+          restockFailureCache.set(blockName, Date.now())
           console.log(`[RESTOCK-WARN] Stopping ${blockName} restock because inventory is full: have=${haveNow} target=${desiredItemCount}.`)
           return false
         }
 
-        if (countInventoryItems(bot, blockName) >= desiredItemCount) {
+        if (countInventoryItems(bot, blockName) >= haveAtStart + willPullTotal || countInventoryItems(bot, blockName) >= desiredItemCount) {
           const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
           await bot.equip(inventoryItem, 'hand')
           restockFailureCache.delete(blockName)
@@ -3414,7 +3501,9 @@ async function openBlockWindowAt(bot, position, accessPosition) {
   const goalPos = accessPosition && bot.entity.position.distanceTo(new Vec3(accessPosition.x, accessPosition.y, accessPosition.z)) <= 6
     ? accessPosition
     : position
-  await bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
+  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
+  gotoPromise.catch(() => {})
+  await gotoPromise
   const block = bot.blockAt(blockPos)
   if (!block) throw new Error(`No block at ${position.x} ${position.y} ${position.z}`)
   return await bot.openBlock(block)
@@ -3426,7 +3515,9 @@ async function openAnvilAt(bot, position, accessPosition) {
   const goalPos = accessPosition && bot.entity.position.distanceTo(new Vec3(accessPosition.x, accessPosition.y, accessPosition.z)) <= 6
     ? accessPosition
     : position
-  await bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
+  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
+  gotoPromise.catch(() => {})
+  await gotoPromise
   const block = bot.blockAt(blockPos)
   if (!block) throw new Error(`No anvil at ${position.x} ${position.y} ${position.z}`)
   return await bot.openAnvil(block)
@@ -4522,6 +4613,12 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   const maxIterations = Math.max(20, toNumber(advanced.nervInventoryMaxPlanIterations, 80))
   const stableRequired = getNervRequiredItems(bot, config, planningTargets)
   const stableNeededByBlock = new Map(stableRequired.requiredItems)
+  const restockBuffer = Math.max(0, toNumber(advanced.restockBufferItems, 0))
+  if (restockBuffer > 0) {
+    for (const [blockName, count] of stableNeededByBlock.entries()) {
+      stableNeededByBlock.set(blockName, count + restockBuffer)
+    }
+  }
   if (config.advanced?.debugPrints) {
     const windowLabel = planning.cols?.length
       ? `cols=${planning.cols.join(',')}`
@@ -6625,13 +6722,7 @@ async function runPrint(bot, config) {
       dumpAllUnneededBeforeRestock: true
     })
     if (!materialsReady) {
-      console.log('[NERV-INVENTORY-BLOCKED] Could not clean/refill inventory for this window. Stopping before placement to avoid skips with residue items.')
-      return {
-        sourceType: input.sourceType,
-        sourcePath: input.sourcePath,
-        sourceName: input.sourceName,
-        didWork: true
-      }
+      console.log('[NERV-INVENTORY-WARN] Could not fully clean/refill inventory for this window; continuing with current inventory. Emergency restocks will handle any shortfalls.')
     }
 
     let batchStartOnNorthSide = startOnNorthSide
@@ -9127,7 +9218,8 @@ function shouldRetryReconnect(session, config) {
     'disconnect.quitting',
     'manual disconnect',
     'logged out',
-    'already connected'
+    'already connected',
+    'dashboard-disconnect'
   ]
   if (nonRetryHints.some((hint) => text.includes(hint))) {
     return false
@@ -10781,6 +10873,11 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     const spawn = portalConfig.spawnDisk || {}
     const regionLabel = matchedSpawnRegion ? ` region=${matchedSpawnRegion.name}` : ''
     console.log(`[LOBBY-PORTAL] Leg ${legIndex}: matched spawn portal route${regionLabel}; running spawn portal route.`)
+    const skiplobbyCmd = spawn.skiplobbyCommand
+    if (skiplobbyCmd && typeof skiplobbyCmd === 'string') {
+      try { bot.chat(skiplobbyCmd) } catch {}
+      console.log(`[LOBBY-PORTAL] Sent skiplobby command: ${skiplobbyCmd}`)
+    }
     await delay(Math.max(0, toNumber(spawn.waitBeforeMoveMs, 2500)))
     if (!isBotSessionLive(bot)) return false
     const currentSpawnRegion = getMatchedLobbyRegion(bot?.entity?.position, portalConfig)
@@ -11064,9 +11161,13 @@ function installPlatformSafety(bot, config) {
           const goalChanged = message.toLowerCase().includes('goal was changed')
           const offPlatform = !bot.__nervAllowOffPlatformNavigation &&
             (!isPositionUsable(bot?.entity?.position) || !isPositionInsidePlatformBounds(bot.entity.position, config))
-          if (!bot.__nervAllowOffPlatformNavigation && goalChanged) {
-            console.log('[PATH-RECOVER] Pathfinder goal changed during platform/transfer hold; waiting for platform and retrying.')
-            await waitForPlatformReady(bot, config, 'path-goal-changed')
+          if (goalChanged) {
+            if (!bot.__nervAllowOffPlatformNavigation) {
+              console.log('[PATH-RECOVER] Pathfinder goal changed during platform/transfer hold; waiting for platform and retrying.')
+              await waitForPlatformReady(bot, config, 'path-goal-changed')
+            } else {
+              console.log('[PATH-RECOVER] Pathfinder goal changed; retrying navigation.')
+            }
             continue
           }
           if (offPlatform) {
