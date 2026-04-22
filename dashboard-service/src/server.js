@@ -8,6 +8,8 @@ const PORT = Number(process.env.DASHBOARD_PORT || 4080)
 const DATA_DIR = process.env.DASHBOARD_DATA_DIR || path.resolve(__dirname, '..', 'data')
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public')
 const LOGS_DIR = process.env.DASHBOARD_LOGS_DIR || path.resolve(__dirname, '..', '..', 'logs')
+const CONFIG_DIR = process.env.DASHBOARD_CONFIG_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config', '_configs')
+const NBT_DIR = process.env.DASHBOARD_NBT_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config')
 const store = createStore(DATA_DIR)
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
@@ -171,6 +173,7 @@ function reqIsLogPath(pathname, method) {
   if (method !== 'GET') return false
   return pathname === '/api/dashboard/logs'
     || Boolean(matchPath(pathname, '/api/dashboard/logs/:fileName/download'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/logs/:fileName/download'))
 }
 
 function reqIsNodeDeletePath(pathname, method) {
@@ -188,28 +191,38 @@ function ensureWithinDir(filePath, dirPath) {
 }
 
 function listDownloadableLogs() {
-  if (!fs.existsSync(LOGS_DIR)) return []
-  return fs.readdirSync(LOGS_DIR, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.log'))
-    .map((entry) => {
-      const filePath = path.join(LOGS_DIR, entry.name)
+  const dirs = [LOGS_DIR]
+  const cwdLogs = path.resolve(process.cwd(), 'logs')
+  if (cwdLogs !== LOGS_DIR) dirs.push(cwdLogs)
+
+  const seen = new Set()
+  const results = []
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.log')) continue
+      if (seen.has(entry.name)) continue
+      seen.add(entry.name)
+      const filePath = path.join(dir, entry.name)
       const stats = fs.statSync(filePath)
-      return {
-        fileName: entry.name,
-        sizeBytes: stats.size,
-        modifiedAt: stats.mtime.toISOString()
-      }
-    })
-    .sort((left, right) => String(right.modifiedAt).localeCompare(String(left.modifiedAt)))
+      results.push({ fileName: entry.name, sizeBytes: stats.size, modifiedAt: stats.mtime.toISOString(), _dir: dir })
+    }
+  }
+  return results.sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))
 }
 
 function resolveLogFilePath(fileName) {
   const safeName = path.basename(String(fileName || '').trim())
   if (!safeName || !safeName.toLowerCase().endsWith('.log')) return null
-  const filePath = path.join(LOGS_DIR, safeName)
-  if (!ensureWithinDir(filePath, LOGS_DIR)) return null
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return null
-  return filePath
+  const dirs = [LOGS_DIR]
+  const cwdLogs = path.resolve(process.cwd(), 'logs')
+  if (cwdLogs !== LOGS_DIR) dirs.push(cwdLogs)
+  for (const dir of dirs) {
+    const filePath = path.join(dir, safeName)
+    if (!ensureWithinDir(filePath, dir)) continue
+    if (fs.existsSync(filePath) && !fs.statSync(filePath).isDirectory()) return filePath
+  }
+  return null
 }
 
 function projectOperatorAccount(existing, input) {
@@ -335,7 +348,10 @@ function summarizeBot(bot) {
     verificationCode: bot.verificationCode || null,
     tokenWaiting: bot.tokenWaiting === true,
     botIp: bot.botIp || null,
-    currentNbtStartedAt: bot.currentNbtStartedAt || null
+    currentNbtStartedAt: bot.currentNbtStartedAt || null,
+    latencyMs: typeof bot.latencyMs === 'number' ? bot.latencyMs : null,
+    tpaTarget: bot.tpaTarget || null,
+    recentChat: Array.isArray(bot.recentChat) ? bot.recentChat : []
   }
 }
 
@@ -347,8 +363,19 @@ function summarizeNode(node) {
     botNames: node.botNames,
     lastStatusAt: node.lastStatusAt,
     nodeFiles: Array.isArray(node.nodeFiles) ? node.nodeFiles : [],
+    nodeLogs: Array.isArray(node.nodeLogs) ? node.nodeLogs : [],
     timing: node.timing || null
   }
+}
+
+async function waitForNodeLogDownload(store, commandId, timeoutMs = 15000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const ready = store.getNodeLogDownload(commandId)
+    if (ready) return ready
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  return null
 }
 
 async function route(req, res) {
@@ -464,6 +491,107 @@ async function route(req, res) {
     })
     fs.createReadStream(filePath).pipe(res)
     return
+  }
+
+  const logDeleteParams = matchPath(pathname, '/api/dashboard/logs/:fileName/delete')
+  if (logDeleteParams) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const filePath = resolveLogFilePath(logDeleteParams.fileName)
+    if (!filePath) return notFound(res)
+    fs.unlinkSync(filePath)
+    auditOperatorAction(actor, 'delete-log', `Deleted log file ${logDeleteParams.fileName}.`, { fileName: logDeleteParams.fileName }, 'warn')
+    return sendJson(res, 200, { ok: true })
+  }
+
+  if (req.method === 'POST' && pathname === '/api/dashboard/data/clear') {
+    if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
+    const PROTECTED = new Set(['operators.json'])
+    const deleted = []
+    const errors = []
+    try {
+      for (const entry of fs.readdirSync(DATA_DIR, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue
+        if (PROTECTED.has(entry.name.toLowerCase())) continue
+        const filePath = path.join(DATA_DIR, entry.name)
+        try {
+          fs.unlinkSync(filePath)
+          deleted.push(entry.name)
+        } catch (err) {
+          errors.push({ name: entry.name, error: err?.message || String(err) })
+        }
+      }
+    } catch (err) {
+      return sendJson(res, 500, { ok: false, error: err?.message || String(err) })
+    }
+    auditOperatorAction(actor, 'clear-data', `Cleared data folder: deleted ${deleted.length} file(s).`, { deleted }, 'warn')
+    return sendJson(res, 200, { ok: true, deleted, errors })
+  }
+
+  if (pathname === '/api/dashboard/config') {
+    if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
+    if (req.method !== 'GET') return methodNotAllowed(res)
+    const files = []
+    try {
+      if (fs.existsSync(CONFIG_DIR)) {
+        for (const entry of fs.readdirSync(CONFIG_DIR, { withFileTypes: true })) {
+          if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue
+          const filePath = path.join(CONFIG_DIR, entry.name)
+          const stats = fs.statSync(filePath)
+          files.push({ name: entry.name, sizeBytes: stats.size, modifiedAt: stats.mtime.toISOString() })
+        }
+      }
+    } catch {}
+    return sendJson(res, 200, { files, configDir: CONFIG_DIR })
+  }
+
+  const configFileParams = matchPath(pathname, '/api/dashboard/config/:fileName')
+  if (configFileParams) {
+    if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
+    const safeName = String(configFileParams.fileName || '')
+    if (!safeName || !safeName.toLowerCase().endsWith('.json')) return notFound(res)
+    const filePath = path.join(CONFIG_DIR, safeName)
+    if (!ensureWithinDir(filePath, CONFIG_DIR)) return notFound(res)
+    if (req.method === 'GET') {
+      if (!fs.existsSync(filePath)) return notFound(res)
+      const content = fs.readFileSync(filePath, 'utf8')
+      return sendJson(res, 200, { name: safeName, content })
+    }
+    if (req.method === 'PUT') {
+      const body = await readBody(req)
+      const content = String(body?.content || '')
+      try { JSON.parse(content) } catch { return badRequest(res, 'invalid JSON') }
+      if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true })
+      fs.writeFileSync(filePath, content, 'utf8')
+      auditOperatorAction(actor, 'edit-config', `Updated config file ${safeName}.`, { fileName: safeName })
+      return sendJson(res, 200, { ok: true })
+    }
+    return methodNotAllowed(res)
+  }
+
+  const nbtUploadParams = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload')
+  if (nbtUploadParams) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    if (!store.listBotsForHost(nbtUploadParams.hostLabel).length) return notFound(res)
+    const fileName = path.basename(String(body?.fileName || '').trim())
+    if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) {
+      return badRequest(res, 'fileName must end in .nbt')
+    }
+    const contentBase64 = String(body?.contentBase64 || '')
+    if (!contentBase64) return badRequest(res, 'contentBase64 is required')
+    let buffer
+    try { buffer = Buffer.from(contentBase64, 'base64') } catch { return badRequest(res, 'invalid base64 content') }
+    const command = store.createCommand({
+      targetHostLabel: nbtUploadParams.hostLabel,
+      commandType: 'upload-node-file',
+      fileName,
+      contentBase64,
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'upload-nbt', `Queued direct node upload for ${fileName} to ${nbtUploadParams.hostLabel}.`, {
+      hostLabel: nbtUploadParams.hostLabel, fileName, sizeBytes: buffer.length, commandId: command.commandId
+    })
+    return sendJson(res, 201, { ok: true, queued: true, command, fileName, sizeBytes: buffer.length })
   }
 
   if (req.method === 'POST' && pathname === '/api/bots/status') {
@@ -586,6 +714,26 @@ async function route(req, res) {
     return sendJson(res, 200, { ok: true, command })
   }
 
+  params = matchPath(pathname, '/api/nodes/:hostLabel/logs/:commandId/result')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const fileName = path.basename(String(body?.fileName || '').trim())
+    const contentBase64 = String(body?.contentBase64 || '')
+    if (!fileName || !fileName.toLowerCase().endsWith('.log')) return badRequest(res, 'fileName must end in .log')
+    if (!contentBase64) return badRequest(res, 'contentBase64 is required')
+    const command = store.getCommand(params.commandId)
+    if (!command || command.targetHostLabel !== params.hostLabel || command.commandType !== 'download-node-log') return notFound(res)
+    store.saveNodeLogDownload({
+      commandId: params.commandId,
+      hostLabel: params.hostLabel,
+      botName: body?.botName || null,
+      fileName,
+      contentBase64
+    })
+    return sendJson(res, 200, { ok: true })
+  }
+
   if (req.method === 'GET' && pathname === '/api/dashboard/bots') {
     return sendJson(res, 200, { items: store.listBots().map(summarizeBot) })
   }
@@ -604,6 +752,32 @@ async function route(req, res) {
     const node = store.listNodes().find((item) => item.hostLabel === params.hostLabel)
     if (!node) return notFound(res)
     return sendJson(res, 200, { items: Array.isArray(node.nodeFiles) ? node.nodeFiles : [] })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/logs/:fileName/download')
+  if (params) {
+    if (req.method !== 'GET') return methodNotAllowed(res)
+    const node = store.listNodes().find((item) => item.hostLabel === params.hostLabel)
+    if (!node) return notFound(res)
+    const fileName = path.basename(String(params.fileName || '').trim())
+    if (!fileName || !fileName.toLowerCase().endsWith('.log')) return notFound(res)
+    const command = store.createCommand({
+      targetHostLabel: params.hostLabel,
+      commandType: 'download-node-log',
+      fileName,
+      requestedBy: actor?.username || 'unknown'
+    })
+    const downloaded = await waitForNodeLogDownload(store, command.commandId, 15000)
+    if (!downloaded?.filePath || !fs.existsSync(downloaded.filePath)) {
+      return sendJson(res, 504, { error: `Timed out waiting for node log ${fileName} from ${params.hostLabel}` })
+    }
+    res.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'content-disposition': `attachment; filename="${downloaded.fileName}"`,
+      'cache-control': 'no-store'
+    })
+    fs.createReadStream(downloaded.filePath).pipe(res)
+    return
   }
 
   params = matchPath(pathname, '/api/dashboard/bots/:botName')
@@ -699,24 +873,73 @@ async function route(req, res) {
     return sendJson(res, 201, { command })
   }
 
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/chat')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const message = String(body?.message || '').trim()
+    if (!message) return badRequest(res, 'message is required')
+    const command = store.createCommand({
+      targetBotName: params.botName,
+      commandType: 'chat',
+      message,
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'chat-bot', `Sent chat to ${params.botName}: ${message}`, { botName: params.botName, message })
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/disconnect')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const command = store.createCommand({ targetBotName: params.botName, commandType: 'disconnect', requestedBy: actor.username })
+    auditOperatorAction(actor, 'disconnect-bot', `Queued disconnect for ${params.botName}.`, { botName: params.botName }, 'warn')
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/reconnect')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const command = store.createCommand({ targetBotName: params.botName, commandType: 'reconnect', requestedBy: actor.username })
+    auditOperatorAction(actor, 'reconnect-bot', `Queued force-reconnect for ${params.botName}.`, { botName: params.botName })
+    return sendJson(res, 201, { command })
+  }
+
   if (req.method === 'POST' && pathname === '/api/dashboard/files') {
     const body = await readBody(req)
     if (!body?.originalName || !body?.contentBase64) {
       return badRequest(res, 'originalName and contentBase64 are required')
     }
+    const targetBotName = String(body?.targetBotName || '').trim()
     const targetHostLabel = String(body?.targetHostLabel || '').trim()
-    if (targetHostLabel && !store.listNodes().some((item) => item.hostLabel === targetHostLabel)) {
+    if (targetBotName && !store.listBots().some((b) => b.botName === targetBotName)) {
+      return badRequest(res, `unknown targetBotName: ${targetBotName}`)
+    }
+    if (targetHostLabel && !store.listBotsForHost(targetHostLabel).length) {
       return badRequest(res, `unknown targetHostLabel: ${targetHostLabel}`)
     }
-    const item = store.createFileUpload({ ...body, uploadedBy: body?.uploadedBy || actor.username })
-    auditOperatorAction(actor, targetHostLabel ? 'upload-file-direct-node' : 'upload-file', targetHostLabel ? `Uploaded ${item.originalName} directly to node ${targetHostLabel}.` : `Uploaded ${item.originalName}.`, {
+    const item = store.createFileUpload({ ...body, uploadedBy: body?.uploadedBy || actor.username, targetHostLabel })
+    let finalItem = item
+    if (targetBotName) {
+      finalItem = store.assignFile(item.fileId, targetBotName) || item
+    } else if (targetHostLabel) {
+      finalItem = store.assignFileToNode(item.fileId, targetHostLabel) || item
+    }
+    auditOperatorAction(
+      actor,
+      targetBotName ? 'upload-file-assign-bot' : (targetHostLabel ? 'upload-file-assign-node' : 'upload-file'),
+      targetBotName
+        ? `Uploaded ${item.originalName} and assigned to bot ${targetBotName}.`
+        : (targetHostLabel ? `Uploaded ${item.originalName} and assigned to node ${targetHostLabel}.` : `Uploaded ${item.originalName}.`),
+      {
       fileId: item.fileId,
       originalName: item.originalName,
       sizeBytes: item.sizeBytes,
       nameConflictCount: item.nameConflictCount,
-      targetHostLabel: item.assignedHostLabel
+      targetBotName: targetBotName || null,
+      targetHostLabel: targetHostLabel || null
     })
-    return sendJson(res, 201, { item })
+    return sendJson(res, 201, { item: finalItem })
   }
 
   params = matchPath(pathname, '/api/dashboard/files/:fileId/assign')
@@ -769,5 +992,6 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[dashboard-service] listening on http://${HOST}:${PORT}`)
   console.log(`[dashboard-service] loaded ${store.listOperators().length} operator account(s) from ${path.join(DATA_DIR, 'operators.json')}`)
-  console.log(`[dashboard-service] log downloads served from ${LOGS_DIR}`)
+  console.log(`[dashboard-service] log downloads served from ${LOGS_DIR} (also checks ${path.resolve(process.cwd(), 'logs')})`)
+  console.log(`[dashboard-service] direct NBT uploads go to ${NBT_DIR}`)
 })

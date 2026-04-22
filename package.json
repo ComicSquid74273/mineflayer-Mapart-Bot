@@ -9,6 +9,7 @@
     "start": "node index.js",
     "start:nerv": "node nerv-printer.js",
     "start:nerv:wait": "node nerv-printer.js --wait-for-command",
+    "start:nerv:premium-1": "node nerv-printer.js --config=nerv-printer-config/_configs/nerv-printer-config-premium-1.json",
     "start:nerv:local": "node nerv-printer.js --connection=local",
     "start:nerv:local:wait": "node nerv-printer.js --connection=local --wait-for-command",
     "start:nerv:6b6t": "node nerv-printer.js --connection=6b6t",

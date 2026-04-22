@@ -600,6 +600,8 @@ After that, the selected `connection` profile is applied. This means:
 2. `npm run start:nerv:local` forces localhost.
 3. `npm run start:nerv:6b6t` forces 6b6t and overrides `config.test.json` connection values.
 4. You can also run `node nerv-printer.js --connection=6b6t`.
+5. Use `--config` to load a separate config file without changing the default `nerv-printer-config.json`.
+   Example: `node nerv-printer.js --config=nerv-printer-config/_configs/nerv-printer-config-premium-1.json`
 
 ## 6. JSON Plan Format (`files.inputMode = json`)
 

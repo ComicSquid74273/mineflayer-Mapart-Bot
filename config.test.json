@@ -1,0 +1,12 @@
+{
+  "bots": [
+    {
+      "host": "premium-1.nytrixhost.fun",
+      "port": 19150,
+      "auth": "offline",
+      "profilesFolder": "./auth-cache",
+      "viewDistance": "normal",
+      "checkTimeoutInterval": 60000
+    }
+  ]
+}

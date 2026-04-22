@@ -341,6 +341,74 @@ h1 {
   flex-wrap: wrap;
 }
 
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.chat-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 140px;
+  overflow-y: auto;
+  font-size: 0.82rem;
+  scrollbar-width: thin;
+}
+
+.chat-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  line-height: 1.4;
+}
+
+.chat-ts {
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+}
+
+.chat-text {
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.chat-empty {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0;
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(151, 177, 190, 0.06);
+  color: var(--ink);
+  font-size: 0.88rem;
+  outline: none;
+}
+
+.chat-input:focus {
+  border-color: var(--accent);
+}
+
+.chat-input:disabled {
+  opacity: 0.4;
+}
+
 .stack-form {
   display: flex;
   flex-direction: column;
@@ -528,6 +596,31 @@ button:disabled {
   }
 }
 
+/* Health status dot */
+.health-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.health-green {
+  background: #28b08e;
+  color: #28b08e;
+}
+
+.health-yellow {
+  background: #d19a2a;
+  color: #d19a2a;
+}
+
+.health-red {
+  background: #b54938;
+  color: #b54938;
+}
+
 /* Verification banner */
 .verify-banner {
   display: flex;
@@ -580,4 +673,13 @@ button:disabled {
 .bot-card-verify {
   border-color: rgba(209, 154, 42, 0.28);
   box-shadow: 0 0 0 1px rgba(209, 154, 42, 0.14);
+}
+
+.config-editor-textarea {
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 200px;
+  width: 100%;
 }

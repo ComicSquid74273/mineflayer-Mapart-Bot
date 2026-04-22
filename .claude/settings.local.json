@@ -3,7 +3,22 @@
     "allow": [
       "WebFetch(domain:github.com)",
       "WebFetch(domain:api.github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(xargs grep *)",
+      "Bash(node -e \"const mineflayer = require\\('./node_modules/mineflayer'\\); const bot = mineflayer.createBot\\({host:'127.0.0.1',port:25565,username:'test',version:'1.20',skipValidation:true}\\); setTimeout\\(\\(\\)=>{ console.log\\('stateIdUsed:', bot.supportFeature\\('stateIdUsed'\\)\\); console.log\\('transactionPacketExists:', bot.supportFeature\\('transactionPacketExists'\\)\\); console.log\\('blockPlaceHasInsideBlock:', bot.supportFeature\\('blockPlaceHasInsideBlock'\\)\\); bot.end\\(\\); },200\\);\")",
+      "Bash(exit 0)",
+      "Bash(awk -F: '$2 >= 5900 && $2 <= 5970')",
+      "Bash(node -e ' *)",
+      "Bash(grep -E \"\\\\.\\(js|html|css|json\\)$\")",
+      "Bash(node dashboard-service/src/server.js --dry-run)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(timeout 3 node dashboard-service/src/server.js)",
+      "Bash(curl -s http://localhost:4080/health)",
+      "Bash(curl -s http://localhost:4080/api/dashboard/bots)",
+      "Bash(curl -s --connect-timeout 5 http://54.83.185.104:4080/health)",
+      "Bash(curl -s http://54.83.185.104:4080/api/dashboard/nodes)",
+      "Bash(curl -s -u admin-demo:admin-demo http://54.83.185.104:4080/api/dashboard/logs)",
+      "Bash(node --check dashboard-service/src/server.js)"
     ]
   }
 }

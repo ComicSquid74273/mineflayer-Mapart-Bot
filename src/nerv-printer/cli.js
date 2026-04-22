@@ -1,5 +1,17 @@
+// Safety net: GoalChanged rejections from mineflayer-pathfinder can become unhandled
+// when the watchdog fires setGoal(null) after a goto already resolved (race condition).
+// These are always safe to swallow — navigation will retry at the call site.
+process.on('unhandledRejection', (reason) => {
+  const msg = String(reason?.message || reason || '').toLowerCase()
+  if (msg.includes('goal was changed') || msg.includes('goalchanged')) return
+  throw reason
+})
+
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
+// Persists across session reconnects within one process run.
+// Set true by any 'start' command; false by any 'stop' or dashboard-disconnect.
+let printingIntentActive = false
 const fs = require('fs')
 const http = require('http')
 const https = require('https')
@@ -26,6 +38,7 @@ const CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs
 const LEGACY_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config.json')
 const DEFAULT_IMPORTED_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'carpet-printer-config.json')
 const TEST_BOT_CONFIG_FILE = path.resolve(process.cwd(), 'config.test.json')
+const EXPLICIT_CONFIG_FILE = getCliValue('--config') || getCliValue('--config-file') || process.env.NERV_CONFIG_FILE || null
 const LOG_FILE = path.resolve(process.cwd(), 'logs', 'nerv-printer.log')
 const logContext = new AsyncLocalStorage()
 const botLogStreams = new Map()
@@ -256,6 +269,7 @@ function readJson(filePath) {
 }
 
 function getUserConfigPath() {
+  if (EXPLICIT_CONFIG_FILE) return path.resolve(process.cwd(), EXPLICIT_CONFIG_FILE)
   if (fs.existsSync(CONFIG_FILE)) return CONFIG_FILE
   if (fs.existsSync(LEGACY_CONFIG_FILE)) return LEGACY_CONFIG_FILE
   return CONFIG_FILE
@@ -519,11 +533,22 @@ function downloadDashboardFile(urlValue, filePath) {
   })
 }
 
+function getTpaTarget(config) {
+  const activeProfile = config?.connection?.active
+  const profileBot = activeProfile ? config?.connection?.profiles?.[activeProfile]?.bot : null
+  const tpa = profileBot?.platformRecoveryTpa || config?.bot?.platformRecoveryTpa
+  if (!tpa?.enabled || !tpa?.command) return null
+  const match = String(tpa.command || '').match(/\/tpa\s+(.+)/i)
+  return match ? String(match[1]).trim() : null
+}
+
 function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   const dashboard = getDashboardConfig(config)
   if (!dashboard.enabled || !dashboard.serviceUrl) return null
 
   const botName = String(config?.bot?.username || bot?.username || 'MapartBot').trim() || 'MapartBot'
+  const chatBuffer = []
+  const maxChatBuffer = 50
   const state = {
     phase: 'starting',
     recoveryState: 'none',
@@ -539,6 +564,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     commandTimer: null,
     stopped: false
   }
+
+  // Buffer incoming in-game chat for the dashboard to read
+  bot.on('message', (jsonMsg) => {
+    const text = jsonMsg?.toString?.() || String(jsonMsg || '')
+    if (!text) return
+    chatBuffer.push({ ts: new Date().toISOString(), text })
+    if (chatBuffer.length > maxChatBuffer) chatBuffer.shift()
+  })
 
   function noteActivity() {
     state.lastActivityAt = Date.now()
@@ -591,6 +624,31 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     }
   }
 
+  function listNodeLogFiles() {
+    const folder = path.dirname(LOG_FILE)
+    if (!fs.existsSync(folder)) return []
+    try {
+      return fs.readdirSync(folder, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.log'))
+        .map((entry) => {
+          const filePath = path.join(folder, entry.name)
+          const stats = fs.statSync(filePath)
+          return {
+            fileName: entry.name,
+            sizeBytes: stats.size,
+            modifiedAt: stats.mtime.toISOString()
+          }
+        })
+        .sort((left, right) => String(left.fileName).localeCompare(String(right.fileName), undefined, { numeric: true, sensitivity: 'base' }))
+    } catch (error) {
+      logThrottled(`dashboard-node-logs-${botName}`, `[DASHBOARD-WARN] node log listing failed for ${botName}: ${error?.message || error}`, {
+        intervalMs: 30000,
+        level: 'warn'
+      })
+      return []
+    }
+  }
+
   function buildStatusPayload(onlineOverride = null) {
     const now = Date.now()
     const progress = currentProgress()
@@ -635,13 +693,23 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       currentNbt: currentSourceName(),
       lastStatusAt: new Date().toISOString(),
       nodeFiles: listNodeNbtFiles(),
+      nodeLogs: listNodeLogFiles(),
       progress: progressPayload,
       lastError: state.lastError || null,
       assignedInterval,
       staleReason: activeState === 'stale' ? (progress ? 'progress-frozen' : 'heartbeat-missed') : undefined,
       verificationCode: stdinCommandState.status?.verificationCode || null,
       tokenWaiting: stdinCommandState.status?.tokenWaiting === true,
-      currentNbtStartedAt: state.currentNbtStartedAt || null
+      currentNbtStartedAt: state.currentNbtStartedAt || null,
+      recentChat: chatBuffer.slice(),
+      latencyMs: (() => {
+        const playerPing = bot.players?.[botName]?.ping ?? bot.players?.[bot.username]?.ping
+        if (typeof playerPing === 'number' && playerPing > 0) return Math.round(playerPing)
+        const clientLatency = bot._client?.latency
+        if (typeof clientLatency === 'number' && clientLatency > 0) return Math.round(clientLatency)
+        return null
+      })(),
+      tpaTarget: getTpaTarget(config)
     }
   }
 
@@ -719,6 +787,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     })
   }
 
+  async function reportNodeLogDownload(commandId, fileName, contentBase64) {
+    await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/logs/${encodeURIComponent(commandId)}/result`, 'POST', {
+      botName,
+      fileName,
+      contentBase64
+    })
+  }
+
   function resolveNodeNbtPath(fileName) {
     const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
     const safeName = path.basename(String(fileName || '').trim())
@@ -729,6 +805,49 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   async function executeNodeCommand(command) {
     if (!command) return false
     switch (command.commandType) {
+      case 'upload-node-file': {
+        const fileName = path.basename(String(command.fileName || '').trim())
+        if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) {
+          await reportNodeCommandResult(command.commandId, 'failed', `invalid file name: ${command.fileName || 'unknown'}`)
+          return true
+        }
+        const targetPath = resolveNodeNbtPath(fileName)
+        const contentBase64 = String(command.contentBase64 || '')
+        if (!contentBase64) {
+          await reportNodeCommandResult(command.commandId, 'failed', `missing file content for ${fileName}`)
+          return true
+        }
+        try {
+          const buffer = Buffer.from(contentBase64, 'base64')
+          fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+          fs.writeFileSync(targetPath, buffer)
+          noteActivity()
+          await reportNodeCommandResult(command.commandId, 'succeeded', `uploaded ${fileName}`)
+        } catch (error) {
+          await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
+        }
+        return true
+      }
+      case 'download-node-log': {
+        const fileName = path.basename(String(command.fileName || '').trim())
+        if (!fileName || !fileName.toLowerCase().endsWith('.log')) {
+          await reportNodeCommandResult(command.commandId, 'failed', `invalid log file name: ${command.fileName || 'unknown'}`)
+          return true
+        }
+        const logPath = path.join(path.dirname(LOG_FILE), fileName)
+        if (!fs.existsSync(logPath)) {
+          await reportNodeCommandResult(command.commandId, 'failed', `log file not found: ${fileName}`)
+          return true
+        }
+        try {
+          const contentBase64 = fs.readFileSync(logPath).toString('base64')
+          await reportNodeLogDownload(command.commandId, fileName, contentBase64)
+          await reportNodeCommandResult(command.commandId, 'succeeded', `downloaded ${fileName}`)
+        } catch (error) {
+          await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
+        }
+        return true
+      }
       case 'delete-node-file': {
         const targetPath = resolveNodeNbtPath(command.fileName)
         if (!fs.existsSync(targetPath)) {
@@ -796,6 +915,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
     switch (claimed.commandType) {
       case 'start': {
+        printingIntentActive = true
         runtimeControl?.requestStart('dashboard')
         state.startRequested = true
         state.stopRequested = false
@@ -804,6 +924,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         break
       }
       case 'stop': {
+        printingIntentActive = false
         runtimeControl?.requestStop('dashboard')
         state.stopRequested = true
         state.startRequested = false
@@ -827,6 +948,33 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         } else {
           await reportCommandResult(claimed.commandId, 'failed', 'no active verification prompt')
         }
+        break
+      }
+      case 'chat': {
+        const msg = String(claimed.message || '').trim()
+        if (!msg) {
+          await reportCommandResult(claimed.commandId, 'failed', 'chat message is empty')
+          break
+        }
+        try {
+          bot.chat(msg)
+          noteActivity()
+          await reportCommandResult(claimed.commandId, 'succeeded', `sent: ${msg}`)
+        } catch (err) {
+          await reportCommandResult(claimed.commandId, 'failed', `chat failed: ${err?.message || err}`)
+        }
+        break
+      }
+      case 'disconnect': {
+        await reportCommandResult(claimed.commandId, 'succeeded', 'disconnecting bot; auto-reconnect suppressed')
+        noteActivity()
+        try { bot.quit('dashboard-disconnect') } catch { }
+        break
+      }
+      case 'reconnect': {
+        await reportCommandResult(claimed.commandId, 'succeeded', 'force-reconnecting bot')
+        noteActivity()
+        try { bot.quit('dashboard-reconnect') } catch { }
         break
       }
       case 'restart': {
@@ -2852,7 +3000,9 @@ async function equipMaterial(bot, config, blockName, options = {}) {
       ? toNumber(advanced.scannerPostSwapDelayMs, 0)
       : toNumber(advanced.postSwapDelayMs, 100)
     if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
+    if (fastSwap) bot.setControlState('sprint', false)
     await bot.equip(inventoryItem, 'hand')
+    if (fastSwap) bot.setControlState('sprint', true)
     if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
     unavailableMaterialCache.delete(blockName)
     return true
@@ -2951,12 +3101,14 @@ function getMaterialChestGroupsForRefill(bot, config, blockName) {
 async function openContainerAt(bot, position, accessPosition) {
   const Vec3 = bot.entity.position.constructor
   const blockPos = new Vec3(position.x, position.y, position.z)
-  const goalPos = accessPosition && bot.entity.position.distanceTo(new Vec3(accessPosition.x, accessPosition.y, accessPosition.z)) <= 6
-    ? accessPosition
-    : position
+  // Always navigate to accessPosition if provided — it is the configured standing spot for the chest.
+  // Falling back to the chest block position when far away caused the bot to pathfind into walls/inaccessible spots.
+  const goalPos = accessPosition || position
   const goal = new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2)
 
-  await bot.pathfinder.goto(goal)
+  const gotoPromise = bot.pathfinder.goto(goal)
+  gotoPromise.catch(() => {})
+  await gotoPromise
 
   const block = bot.blockAt(blockPos)
   if (!block) {
@@ -2993,11 +3145,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const requestedStackCount = Math.max(1, toNumber(requestedPulls, 1))
   const haveBeforeRestock = countInventoryItems(bot, blockName)
   const desiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
-    ? Math.max(
-      stackSize,
-      haveBeforeRestock + (requestedStackCount * stackSize),
-      toNumber(neededByBlock.get(blockName), requestedStackCount * stackSize)
-    )
+    ? Math.max(haveBeforeRestock + 1, toNumber(neededByBlock.get(blockName), haveBeforeRestock + requestedStackCount * stackSize))
     : Math.max(stackSize, haveBeforeRestock + (requestedStackCount * stackSize))
   const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
 
@@ -3022,14 +3170,30 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         if (config.errorHandling?.logErrors !== false) {
           console.log(`[RESTOCK-CHEST] ${blockName}: chest=${spot.x},${spot.y},${spot.z} open=${travel?.x ?? spot.x},${travel?.y ?? spot.y},${travel?.z ?? spot.z} dist=${Math.round(Math.sqrt(horizontalDist2(bot, spot)))}`)
         }
-        container = await openContainerAt(bot, spot, spot.accessPosition)
+        try {
+          container = await openContainerAt(bot, spot, spot.accessPosition)
+        } catch (navErr) {
+          const navMsg = String(navErr?.message || navErr || '').toLowerCase()
+          if (navMsg.includes('goal was changed') || navMsg.includes('goalchanged')) {
+            console.log(`[RESTOCK-WARN] Navigation interrupted (GoalChanged) going to chest for ${blockName}; skipping this chest.`)
+            continue
+          }
+          throw navErr
+        }
         await delay(toNumber(advanced.preRestockDelayMs, 200))
 
         // Count ALL of the target item in this chest — including partial stacks.
         // BUG FIX: old code used Math.floor(total/64) which silently skipped chests
         // with partial stacks (e.g. 30 carpets -> 30/64=0 -> skipped entirely).
-        const chestSlots = container.containerItems().filter((entry) => entry.type === itemId)
-        const totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+        let chestSlots = container.containerItems().filter((entry) => entry.type === itemId)
+        let totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+
+        // On laggy servers the chest window may not have synced yet — retry once after a short wait
+        if (totalInChest <= 0) {
+          await delay(Math.max(200, toNumber(advanced.preRestockDelayMs, 200)))
+          chestSlots = container.containerItems().filter((entry) => entry.type === itemId)
+          totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+        }
 
         if (totalInChest <= 0) {
           if (config.advanced?.debugPrints) {
@@ -3043,14 +3207,36 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         // How much do we need vs what the chest has?
         const haveAtStart = countInventoryItems(bot, blockName)
         const stillNeedTotal = Math.max(0, desiredItemCount - haveAtStart)
-        const willPullTotal = Math.min(totalInChest, stillNeedTotal)
+        // Use empty-slots-only capacity for the chest interaction budget.
+        // mineflayer's container.withdraw() can fail with "inventory full" when
+        // there are no empty slots even if a partial same-item stack exists —
+        // the server may not merge partial stacks during shift-click withdrawal.
+        // Count both empty slots AND partial same-item slots as capacity.
+        const emptySlotCapacity = countEmptyInventorySlots(bot) * stackSize
+        const partialCapacity = inventoryCapacityForItem(bot, blockName) - emptySlotCapacity
+        const capacityBeforePull = emptySlotCapacity + Math.max(0, partialCapacity)
+        const willPullTotal = Math.min(totalInChest, stillNeedTotal, capacityBeforePull)
 
-        if (config.errorHandling?.logErrors !== false) {
-          console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} need=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal}`)
+        if (willPullTotal <= 0) {
+          try { container.close() } catch { }
+          container = null
+          if (haveAtStart >= desiredItemCount) {
+            // Already have enough from a previous chest pull in this call
+            restockFailureCache.delete(blockName)
+            unavailableMaterialCache.delete(blockName)
+            const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
+            if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
+            return true
+          }
+          // No capacity; skip remaining spots in this group and fall through to return false
+          break
         }
 
-        // Pull in increments until we get what we need from this chest.
-        // Handles fragmented chests (many small stacks) correctly.
+        if (config.errorHandling?.logErrors !== false) {
+          console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} need=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal} empty=${Math.floor(emptySlotCapacity / stackSize)}slots`)
+        }
+
+        // Pull in stack-sized increments until we get what we need from this chest.
         let plannedHaveAfterPulls = haveAtStart
         const targetCount = haveAtStart + willPullTotal
         let attempts = 0
@@ -3060,14 +3246,27 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           attempts++
           const haveBeforePull = countInventoryItems(bot, blockName)
           const amountStillNeeded = targetCount - plannedHaveAfterPulls
-          const pullAmount = Math.min(stackSize, amountStillNeeded)
+          const currentCapacity = inventoryCapacityForItem(bot, blockName)
+          if (currentCapacity <= 0) {
+            if (config.errorHandling?.logErrors !== false) {
+              console.log(`[RESTOCK-WARN] ${blockName} needs ${amountStillNeeded} more but capacity is ${currentCapacity}; stopping pull.`)
+            }
+            stoppedForInventoryFull = true
+            break
+          }
+          const pullAmount = Math.min(stackSize, amountStillNeeded, currentCapacity)
           try {
             await container.withdraw(itemId, null, pullAmount)
             plannedHaveAfterPulls += pullAmount
             await delay(toNumber(advanced.inventoryActionDelayMs, 80))
             const haveAfterPull = countInventoryItems(bot, blockName)
-            if (haveAfterPull <= haveBeforePull && config.errorHandling?.logErrors !== false) {
-              console.log(`[RESTOCK-WARN] ${blockName} inventory update pending: before=${haveBeforePull} after=${haveAfterPull} requested=${pullAmount} planned=${plannedHaveAfterPulls}/${targetCount}`)
+            if (haveAfterPull <= haveBeforePull) {
+              // Items not yet reflected in inventory — wait longer for server sync
+              await delay(250)
+              const haveAfterWait = countInventoryItems(bot, blockName)
+              if (config.errorHandling?.logErrors !== false && haveAfterWait <= haveBeforePull) {
+                console.log(`[RESTOCK-WARN] ${blockName} inventory update pending: before=${haveBeforePull} after=${haveAfterWait} requested=${pullAmount} planned=${plannedHaveAfterPulls}/${targetCount}`)
+              }
             }
           } catch (err) {
             const message = String(err?.message || err).toLowerCase()
@@ -3078,7 +3277,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               message.includes('no space')
 
             if (inventoryFull) {
-              if (config.errorHandling?.logErrors !== false) {
+              // Check if we actually got some items despite the error
+              const haveNowCheck = countInventoryItems(bot, blockName)
+              if (haveNowCheck > haveAtStart) {
+                plannedHaveAfterPulls = haveNowCheck
+              } else if (config.errorHandling?.logErrors !== false) {
                 console.log(`[RESTOCK-WARN] Inventory full while pulling ${blockName}; stopping this chest.`)
               }
               stoppedForInventoryFull = true
@@ -3094,13 +3297,23 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         await delay(toNumber(advanced.postRestockDelayMs, 300))
 
         if (stoppedForInventoryFull) {
-          restockFailureCache.set(blockName, Date.now())
           const haveNow = countInventoryItems(bot, blockName)
+          // Inventory is full but check if we actually have enough for what was planned.
+          // desiredItemCount may exceed capacity (e.g. need=66 but max fits=64), so
+          // success = got everything we could actually pull (haveAtStart + willPullTotal).
+          if (haveNow >= haveAtStart + willPullTotal || haveNow >= desiredItemCount) {
+            restockFailureCache.delete(blockName)
+            unavailableMaterialCache.delete(blockName)
+            const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
+            if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
+            return true
+          }
+          restockFailureCache.set(blockName, Date.now())
           console.log(`[RESTOCK-WARN] Stopping ${blockName} restock because inventory is full: have=${haveNow} target=${desiredItemCount}.`)
           return false
         }
 
-        if (countInventoryItems(bot, blockName) >= desiredItemCount) {
+        if (countInventoryItems(bot, blockName) >= haveAtStart + willPullTotal || countInventoryItems(bot, blockName) >= desiredItemCount) {
           const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
           await bot.equip(inventoryItem, 'hand')
           restockFailureCache.delete(blockName)
@@ -3410,7 +3623,9 @@ async function openBlockWindowAt(bot, position, accessPosition) {
   const goalPos = accessPosition && bot.entity.position.distanceTo(new Vec3(accessPosition.x, accessPosition.y, accessPosition.z)) <= 6
     ? accessPosition
     : position
-  await bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
+  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
+  gotoPromise.catch(() => {})
+  await gotoPromise
   const block = bot.blockAt(blockPos)
   if (!block) throw new Error(`No block at ${position.x} ${position.y} ${position.z}`)
   return await bot.openBlock(block)
@@ -3422,7 +3637,9 @@ async function openAnvilAt(bot, position, accessPosition) {
   const goalPos = accessPosition && bot.entity.position.distanceTo(new Vec3(accessPosition.x, accessPosition.y, accessPosition.z)) <= 6
     ? accessPosition
     : position
-  await bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
+  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
+  gotoPromise.catch(() => {})
+  await gotoPromise
   const block = bot.blockAt(blockPos)
   if (!block) throw new Error(`No anvil at ${position.x} ${position.y} ${position.z}`)
   return await bot.openAnvil(block)
@@ -4057,54 +4274,43 @@ function getInventoryManagedLinesPerRun(config, linesPerRun) {
 }
 
 function getNervRequiredItems(bot, config, targets) {
-  const printer = config.printer || {}
-  const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const maxMaterialTypes = Math.max(1, Math.min(16, toNumber(config.advanced?.inventoryMaxMaterialTypes, 16)))
   const useWorldState = config.advanced?.inventoryPlanUseWorldState === true
   const availableSlots = getNervAvailableSlots(bot, config, targets)
   const requiredItems = new Map()
-  const { byColRow, cols, rows } = buildNervTargetGrid(targets)
   const Vec3 = bot.entity.position.constructor
-  let isStartSide = true
   let inspected = 0
   let counted = 0
   let unloaded = 0
 
-  for (let i = 0; i < cols.length; i += linesPerRun) {
-    const colBatch = cols.slice(i, i + linesPerRun)
-    const rowOrder = isStartSide ? rows : [...rows].reverse()
+  // Process all targets in a single pass — traversal direction does not affect material counts,
+  // so batching by linesPerRun is unnecessary and causes the capacity check to fire prematurely
+  // at exactly the linesPerRun boundary instead of at the full window boundary.
+  for (const target of targets) {
+    if (!target) continue
+    inspected += 1
 
-    for (const row of rowOrder) {
-      for (const col of colBatch) {
-        const target = byColRow.get(`${col}:${row}`)
-        if (!target) continue
-        inspected += 1
-
-        const targetPos = new Vec3(target.position.x, target.position.y, target.position.z)
-        if (useWorldState) {
-          const blockState = bot.blockAt(targetPos)
-          if (!blockState) unloaded += 1
-          if (blockState && blockState.name !== 'air') continue
-        }
-
-        const blockName = target.blockName
-        if (!requiredItems.has(blockName) && requiredItems.size >= maxMaterialTypes) {
-          return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
-        }
-        requiredItems.set(blockName, (requiredItems.get(blockName) || 0) + 1)
-        counted += 1
-
-        if (stacksRequiredFromAmounts([], bot, requiredItems) > availableSlots.length) {
-          const reverted = Math.max(0, (requiredItems.get(blockName) || 1) - 1)
-          if (reverted > 0) requiredItems.set(blockName, reverted)
-          else requiredItems.delete(blockName)
-          counted -= 1
-          return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
-        }
-      }
+    const targetPos = new Vec3(target.position.x, target.position.y, target.position.z)
+    if (useWorldState) {
+      const blockState = bot.blockAt(targetPos)
+      if (!blockState) unloaded += 1
+      if (blockState && blockState.name !== 'air') continue
     }
 
-    isStartSide = !isStartSide
+    const blockName = target.blockName
+    if (!requiredItems.has(blockName) && requiredItems.size >= maxMaterialTypes) {
+      return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
+    }
+    requiredItems.set(blockName, (requiredItems.get(blockName) || 0) + 1)
+    counted += 1
+
+    if (stacksRequiredFromAmounts([], bot, requiredItems) > availableSlots.length) {
+      const reverted = Math.max(0, (requiredItems.get(blockName) || 1) - 1)
+      if (reverted > 0) requiredItems.set(blockName, reverted)
+      else requiredItems.delete(blockName)
+      counted -= 1
+      return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
+    }
   }
 
   return { requiredItems, availableSlots, inspected, counted, unloaded, capacitySlots: availableSlots.length }
@@ -4529,6 +4735,12 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   const maxIterations = Math.max(20, toNumber(advanced.nervInventoryMaxPlanIterations, 80))
   const stableRequired = getNervRequiredItems(bot, config, planningTargets)
   const stableNeededByBlock = new Map(stableRequired.requiredItems)
+  const restockBuffer = Math.max(0, toNumber(advanced.restockBufferItems, 10))
+  if (restockBuffer > 0) {
+    for (const [blockName, count] of stableNeededByBlock.entries()) {
+      stableNeededByBlock.set(blockName, count + restockBuffer)
+    }
+  }
   if (config.advanced?.debugPrints) {
     const windowLabel = planning.cols?.length
       ? `cols=${planning.cols.join(',')}`
@@ -4626,10 +4838,22 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       const remainingCapacity = inventoryCapacityForItem(bot, closestItem.blockName)
       const retryPlan = buildNervInventoryPlanFromRequired(bot, config, planningTargets, stableNeededByBlock, stableRequired)
 
-      if (advanced.dumpUnneededBeforeRefill !== false && retryPlan.dumpSlots.length > 0) {
+      if (advanced.dumpUnneededBeforeRefill !== false && retryPlan.dumpSlots.length > 0 && stillNeed > 0) {
         restockFailureCache.delete(closestItem.blockName)
         unavailableMaterialCache.delete(closestItem.blockName)
-        console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} needs ${stillNeed} more but capacity is ${remainingCapacity}; dumping from fresh plan before retry.`)
+        const dumpsNeeded = Math.max(1, estimateDumpSlotsNeededForRestock(bot, [closestItem]))
+        const dumpSlots = retryPlan.dumpSlots.slice(0, dumpsNeeded)
+        console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} needs ${stillNeed} more but capacity is ${remainingCapacity}; dumping ${dumpSlots.length} slot(s) before retry.`)
+        const dumped = await dumpNervInventorySlots(bot, config, dumpSlots, 'nervCapacityRetryDump')
+        if (dumped > 0) {
+          didRestockThisWindow = false
+          await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+          continue
+        }
+        if (stillNeed > remainingCapacity) {
+          console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} still needs ${stillNeed} but dump failed and capacity is only ${remainingCapacity}. Stopping refill.`)
+          return false
+        }
         continue
       }
 
@@ -4937,11 +5161,12 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     try {
       if (shouldSneak) {
         bot.setControlState('sneak', true)
+        await new Promise(r => setTimeout(r, 60))
       }
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
         await bot._genericPlace(attempt.block, attempt.face, {
           swingArm: 'right',
-          forceLook: printer.rotate !== false ? true : 'ignore'
+          forceLook: true
         })
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
@@ -5306,8 +5531,10 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
       if (!target) break
 
       try {
+        const repairMovePromise = bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
+        repairMovePromise.catch(() => {})
         await Promise.race([
-          bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange)),
+          repairMovePromise,
           delay(moveTimeoutMs).then(() => {
             throw new Error(`repair move timeout after ${moveTimeoutMs}ms`)
           })
@@ -6629,13 +6856,7 @@ async function runPrint(bot, config) {
       dumpAllUnneededBeforeRestock: true
     })
     if (!materialsReady) {
-      console.log('[NERV-INVENTORY-BLOCKED] Could not clean/refill inventory for this window. Stopping before placement to avoid skips with residue items.')
-      return {
-        sourceType: input.sourceType,
-        sourcePath: input.sourcePath,
-        sourceName: input.sourceName,
-        didWork: true
-      }
+      console.log('[NERV-INVENTORY-WARN] Could not fully clean/refill inventory for this window; continuing with current inventory. Emergency restocks will handle any shortfalls.')
     }
 
     let batchStartOnNorthSide = startOnNorthSide
@@ -7009,8 +7230,34 @@ function createBot(config) {
 
   applyAntiHunger(bot, config)
   installChatLogin(bot, config)
+  bot.once('login', () => applyInventoryStateSync(bot))
 
   return bot
+}
+
+function waitForInventoryStateUpdate(bot, timeoutMs) {
+  return new Promise(resolve => {
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      bot._client.removeListener('set_slot', finish)
+      bot._client.removeListener('window_items', finish)
+      resolve()
+    }
+    bot._client.once('set_slot', finish)
+    bot._client.once('window_items', finish)
+    setTimeout(finish, timeoutMs)
+  })
+}
+
+function applyInventoryStateSync(bot) {
+  if (!bot.supportFeature('stateIdUsed')) return
+  const original = bot.clickWindow.bind(bot)
+  bot.clickWindow = async function (slot, mouseButton, mode) {
+    await original(slot, mouseButton, mode)
+    await waitForInventoryStateUpdate(bot, 150)
+  }
 }
 
 function getChatLoginPassword(config) {
@@ -9088,6 +9335,53 @@ function getReconnectDelayForSession(session, reconnect) {
   return reconnect.delayMs
 }
 
+async function standbyWaitForReconnect(config) {
+  const dashCfg = config?.dashboard || {}
+  const serviceUrl = String(dashCfg.serviceUrl || '').replace(/\/$/, '')
+  const botName = config?.bot?.username || ''
+  const pollMs = toNumber(dashCfg.commandPollMs, 3000)
+  if (!serviceUrl || !botName) return false
+
+  console.log(`[STANDBY] Bot disconnected by dashboard. Polling every ${pollMs}ms for reconnect command...`)
+
+  const postStandbyStatus = () => createDashboardRequest(`${serviceUrl}/api/bots/status`, 'POST', {
+    botName,
+    hostLabel: dashCfg.hostLabel || '',
+    runtime: 'nerv-printer',
+    online: false,
+    phase: 'standby',
+    heartbeatAt: new Date().toISOString(),
+    lastStatusAt: new Date().toISOString()
+  }).catch(() => {})
+
+  await postStandbyStatus()
+
+  while (true) {
+    await delay(pollMs)
+    await postStandbyStatus()
+    try {
+      const response = await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands`, 'GET')
+      const items = Array.isArray(response.body?.items) ? response.body.items : []
+      for (const cmd of items) {
+        if (cmd.commandType === 'reconnect') {
+          try {
+            await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(cmd.commandId)}/claim`, 'POST', {})
+            await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(cmd.commandId)}/result`, 'POST', { status: 'succeeded', resultMessage: 'reconnect accepted; restarting session' })
+          } catch {}
+          console.log('[STANDBY] Reconnect command received. Restarting session...')
+          return true
+        }
+        if (cmd.commandType === 'disconnect') {
+          try {
+            await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(cmd.commandId)}/claim`, 'POST', {})
+            await createDashboardRequest(`${serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(cmd.commandId)}/result`, 'POST', { status: 'succeeded', resultMessage: 'already disconnected; still in standby' })
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+}
+
 function shouldRetryReconnect(session, config) {
   const endReason = String(session?.endReason || '').toLowerCase()
   const lastError = String(session?.lastError || '').toLowerCase()
@@ -9105,7 +9399,8 @@ function shouldRetryReconnect(session, config) {
     'disconnect.quitting',
     'manual disconnect',
     'logged out',
-    'already connected'
+    'already connected',
+    'dashboard-disconnect'
   ]
   if (nonRetryHints.some((hint) => text.includes(hint))) {
     return false
@@ -9271,6 +9566,7 @@ function ensureStdinCommandInterface() {
         console.log('[COMMAND] No managed runtime is active. Use --wait-for-command or enable dashboard control first.')
         return
       }
+      printingIntentActive = true
       console.log(`[COMMAND] ${stdinCommandState.runtimeControl.requestStart('terminal')}`)
       return
     }
@@ -9280,6 +9576,7 @@ function ensureStdinCommandInterface() {
         console.log('[COMMAND] No managed runtime is active. Use --wait-for-command or enable dashboard control first.')
         return
       }
+      printingIntentActive = false
       console.log(`[COMMAND] ${stdinCommandState.runtimeControl.requestStop('terminal')}`)
       return
     }
@@ -9831,6 +10128,94 @@ function buildSpawnWaypointBackoffPoint(spawn, fallbackY = null) {
     z: waypoint.z + (stepZ * backoffBlocks),
     range: Math.max(1, toNumber(spawn?.backoffGoalRange, 1.5))
   }
+}
+
+function getForcedStraightSpawnRoute(spawn) {
+  const route = spawn?.forcedStraightRoute
+  if (!route || route.enabled === false) return null
+  const trigger = route.trigger || {}
+  const hasTriggerPoint = Number.isFinite(Number(trigger.x)) && Number.isFinite(Number(trigger.z))
+  if (!hasTriggerPoint) return null
+  return {
+    ...route,
+    trigger: {
+      x: Number(trigger.x),
+      y: Number.isFinite(Number(trigger.y)) ? Number(trigger.y) : null,
+      z: Number(trigger.z),
+      radius: Math.max(1, toNumber(trigger.radius, 10))
+    }
+  }
+}
+
+function isInsideForcedStraightSpawnRouteTrigger(pos, spawn) {
+  const route = getForcedStraightSpawnRoute(spawn)
+  if (!route || !pos) return false
+  const trigger = route.trigger
+  if (!Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.z))) return false
+  const withinHorizontal = distance2d(pos, trigger.x, trigger.z) <= trigger.radius
+  if (!withinHorizontal) return false
+  if (!Number.isFinite(trigger.y) || !Number.isFinite(Number(pos.y))) return true
+  return Math.abs(Number(pos.y) - trigger.y) <= trigger.radius
+}
+
+function buildForcedStraightSpawnBackoffPoint(pos, spawn) {
+  const route = getForcedStraightSpawnRoute(spawn)
+  if (!route || !pos) return null
+  const waypoint = getSpawnWaypointPoint(spawn, pos?.y)
+  if (!waypoint) return null
+  const backoffBlocks = Math.max(1, toNumber(route.backoffBlocks, 5))
+  let dx = Number(pos.x) - Number(waypoint.x)
+  let dz = Number(pos.z) - Number(waypoint.z)
+  let length = Math.sqrt((dx * dx) + (dz * dz))
+
+  if (!(length > 0.001)) {
+    const portal = blockPosFromConfig(spawn?.portal)
+    dx = Number(waypoint.x) - Number(portal?.x || 0)
+    dz = Number(waypoint.z) - Number(portal?.z || 1)
+    length = Math.sqrt((dx * dx) + (dz * dz))
+  }
+
+  if (!(length > 0.001)) return null
+
+  return {
+    x: Number(pos.x) + ((dx / length) * backoffBlocks),
+    y: Number.isFinite(Number(pos.y)) ? Number(pos.y) : Number(waypoint.y),
+    z: Number(pos.z) + ((dz / length) * backoffBlocks),
+    range: Math.max(0.5, toNumber(route.backoffGoalRange, 1.5))
+  }
+}
+
+async function backoffFromLobbyPortalPoint(bot, config, point, label, backoffBlocks, options = {}) {
+  if (!point || !isBotSessionLive(bot)) return false
+  const tickMs = Math.max(50, toNumber(options.tickMs, 100))
+  const msPerBlock = Math.max(100, toNumber(options.msPerBlock, 350))
+  const duration = Math.max(250, Math.round(Math.max(1, toNumber(backoffBlocks, 5)) * msPerBlock))
+  const sprint = options.sprint !== false && getPrinterSprintMode(config) !== 'off'
+  const jump = options.jump !== false
+  const Vec3 = bot?.entity?.position?.constructor
+  stopBotMovement(bot)
+  console.log(`[LOBBY-PORTAL] Backing off from ${label} for ${duration}ms (~${Math.max(1, toNumber(backoffBlocks, 5))} blocks).`)
+
+  try {
+    if (Vec3) {
+      try {
+        await bot.lookAt(new Vec3(Number(point.x) + 0.5, Number(point.y) + 0.5, Number(point.z) + 0.5), true)
+      } catch { }
+    }
+    bot.setControlState('sprint', sprint)
+    bot.setControlState('back', true)
+    bot.setControlState('jump', jump)
+    let elapsed = 0
+    while (isBotSessionLive(bot) && elapsed < duration) {
+      await delay(tickMs)
+      elapsed += tickMs
+    }
+  } finally {
+    stopBotMovement(bot)
+  }
+
+  console.log(`[LOBBY-PORTAL] Backoff from ${label} finished at ${formatBotPosition(bot)}.`)
+  return true
 }
 
 function isInsideLoginPortalZone(pos, portalConfig) {
@@ -10618,6 +11003,107 @@ async function holdForwardIntoPortal(bot, config, ms) {
   console.log(`[LOBBY-PORTAL] Forward hold finished. insidePortal=${insidePortal}`)
 }
 
+async function walkStraightToLobbyPortalPoint(bot, config, point, label, timeoutMs, defaultRange = 2, options = {}) {
+  if (!point || !isBotSessionLive(bot)) return false
+  const range = Math.max(0.5, toNumber(point.range, defaultRange))
+  const timeout = Math.max(1000, toNumber(timeoutMs, 15000))
+  const tickMs = Math.max(50, toNumber(options.tickMs, 100))
+  const sprint = options.sprint !== false && getPrinterSprintMode(config) !== 'off'
+  const jump = options.jump !== false
+  const Vec3 = bot?.entity?.position?.constructor
+  const startedAt = Date.now()
+  let lastProgressAt = startedAt
+  let bestDistance = Number.POSITIVE_INFINITY
+  let lastPos = bot?.entity?.position?.clone?.() || (bot?.entity?.position ? { ...bot.entity.position } : null)
+  stopBotMovement(bot)
+  console.log(`[LOBBY-PORTAL] Walking straight to ${label}: ${Math.round(point.x)} ${Math.round(point.y)} ${Math.round(point.z)} range=${range}`)
+
+  try {
+    while (isBotSessionLive(bot)) {
+      const pos = bot?.entity?.position
+      const distance = distanceToPoint(pos, point)
+      if (distance <= range) break
+
+      if (distance + 0.05 < bestDistance) {
+        bestDistance = distance
+        lastProgressAt = Date.now()
+      } else if (lastPos && pos) {
+        const movedDistance = distanceToPoint(pos, lastPos)
+        if (movedDistance >= Math.max(0.35, toNumber(options.progressStep, 0.5))) {
+          lastProgressAt = Date.now()
+          lastPos = pos.clone?.() || { ...pos }
+        }
+      }
+
+      if ((Date.now() - lastProgressAt) >= Math.min(timeout, Math.max(12000, tickMs * 60))) {
+        throw new Error(`Straight walk to ${label} stalled at ${formatBotPosition(bot)}`)
+      }
+
+      if ((Date.now() - startedAt) > timeout) {
+        throw new Error(`Straight walk to ${label} timed out at ${formatBotPosition(bot)}`)
+      }
+
+      try {
+        await bot.lookAt(new Vec3(Number(point.x) + 0.5, Number(point.y) + 0.5, Number(point.z) + 0.5), true)
+      } catch { }
+      bot.setControlState('sprint', sprint)
+      bot.setControlState('forward', true)
+      bot.setControlState('jump', jump)
+      await delay(tickMs)
+    }
+  } finally {
+    stopBotMovement(bot)
+  }
+
+  console.log(`[LOBBY-PORTAL] Reached ${label} using straight walk.`)
+  return true
+}
+
+async function runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs, options = {}) {
+  const route = getForcedStraightSpawnRoute(spawn)
+  if (!route) return false
+  const matchedTrigger = isInsideForcedStraightSpawnRouteTrigger(bot?.entity?.position, spawn)
+  const alwaysUse = options.alwaysUse === true
+  if (!matchedTrigger && !alwaysUse) return false
+  console.log(`[LOBBY-PORTAL] Forced straight spawn route ${matchedTrigger ? 'matched' : 'continued'} near ${Math.round(route.trigger.x)} ${Math.round(route.trigger.y ?? bot?.entity?.position?.y ?? 0)} ${Math.round(route.trigger.z)} radius=${route.trigger.radius}.`)
+
+  const waypoint = getSpawnWaypointPoint(spawn, bot?.entity?.position?.y)
+  if (waypoint && matchedTrigger) {
+    await backoffFromLobbyPortalPoint(
+      bot,
+      config,
+      waypoint,
+      'forced spawn waypoint',
+      Math.max(1, toNumber(route.backoffBlocks, 5)),
+      {
+        jump: true,
+        msPerBlock: Math.max(150, toNumber(route.backoffMsPerBlock, 350))
+      }
+    )
+  }
+
+  if (waypoint) {
+    await walkStraightToLobbyPortalPoint(bot, config, {
+      ...waypoint,
+      range: Math.max(0.5, toNumber(route.waypointGoalRange, 2))
+    }, 'forced spawn waypoint', timeoutMs, Math.max(0.5, toNumber(route.waypointGoalRange, 2)), { jump: true })
+  }
+
+  const portalTarget = blockPosFromConfig(spawn?.portal)
+  if (!portalTarget) {
+    console.log('[LOBBY-PORTAL-WARN] Forced straight spawn route is enabled but spawnDisk.portal is missing.')
+    return false
+  }
+
+  await walkStraightToLobbyPortalPoint(bot, config, {
+    ...portalTarget,
+    range: Math.max(0.5, toNumber(route.portalGoalRange, toNumber(spawn?.goalRange, 2)))
+  }, 'forced spawn portal', timeoutMs, Math.max(0.5, toNumber(route.portalGoalRange, toNumber(spawn?.goalRange, 2))), { jump: true })
+  await holdForwardIntoPortal(bot, config, entryMs)
+  await delay(waitAfterMs)
+  return true
+}
+
 async function replayMeteorSceneMovement(bot, config, match, fallbackMs = 3000, context = 'scene-replay') {
   const hint = match?.best?.movementHint
   const portalPoint = match?.best?.portalPoint
@@ -10717,6 +11203,7 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
   const runtime = classifyRuntimePosition(bot, config, `lobby-portal-leg-${legIndex}`)
   const matchedRegion = getMatchedLobbyRegion(pos, portalConfig)
   const matchedSpawnRegion = matchedRegion?.action === 'spawn-portal' ? matchedRegion : null
+  const forcedSpawnRouteMatched = isInsideForcedStraightSpawnRouteTrigger(pos, portalConfig?.spawnDisk || {})
   const sceneAction = String(runtime?.meteor?.best?.action || '')
   const scenePortalPoint = runtime?.meteor?.best?.portalPoint || buildMeteorScenePortalPoint(runtime?.meteor?.best?.scene)
   const savedSpatialEntry = chooseSavedSpatialPortalStep(
@@ -10755,17 +11242,23 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     return true
   }
 
-  if (matchedSpawnRegion || isInsideLobbySpawnDisk(pos, portalConfig) || sceneAction === 'spawn-portal') {
+  if (matchedSpawnRegion || isInsideLobbySpawnDisk(pos, portalConfig) || forcedSpawnRouteMatched || sceneAction === 'spawn-portal') {
     const spawn = portalConfig.spawnDisk || {}
     const regionLabel = matchedSpawnRegion ? ` region=${matchedSpawnRegion.name}` : ''
-    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: matched spawn portal route${regionLabel}; running spawn portal route.`)
+    const forcedLabel = forcedSpawnRouteMatched ? ' forcedStraightRoute' : ''
+    console.log(`[LOBBY-PORTAL] Leg ${legIndex}: matched spawn portal route${regionLabel}${forcedLabel}; running spawn portal route.`)
     await delay(Math.max(0, toNumber(spawn.waitBeforeMoveMs, 2500)))
     if (!isBotSessionLive(bot)) return false
     const currentSpawnRegion = getMatchedLobbyRegion(bot?.entity?.position, portalConfig)
     const stillInsideSpawnRegion = currentSpawnRegion?.action === 'spawn-portal'
-    if (!stillInsideSpawnRegion && !isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && sceneAction !== 'spawn-portal') {
+    const stillInsideForcedRoute = isInsideForcedStraightSpawnRouteTrigger(bot?.entity?.position, spawn)
+    if (!stillInsideSpawnRegion && !isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && !stillInsideForcedRoute && sceneAction !== 'spawn-portal') {
       console.log(`[LOBBY-PORTAL] Leg ${legIndex}: left configured spawn disk before search; skipping portal movement.`)
       return false
+    }
+
+    if (await runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs, { alwaysUse: true })) {
+      return true
     }
 
     if (spawn.backoffWhenNearWaypoint !== false && isNearSpawnWaypoint(bot?.entity?.position, spawn)) {
@@ -10776,17 +11269,7 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
       }
     }
 
-    const portalBlock = findNearestNetherPortal(bot, searchRadius)
-    if (portalBlock?.position) {
-      await gotoLobbyPortalPoint(bot, config, {
-        x: portalBlock.position.x,
-        y: portalBlock.position.y,
-        z: portalBlock.position.z,
-        range: toNumber(spawn.goalRange, 2)
-      }, 'spawn nether portal block', timeoutMs, toNumber(spawn.goalRange, 2))
-    } else if (scenePortalPoint) {
-      await gotoLobbyPortalPoint(bot, config, { ...scenePortalPoint, range: toNumber(spawn.goalRange, 2) }, 'scene-matched spawn portal', timeoutMs, toNumber(spawn.goalRange, 2))
-    } else if (spawn.useConfiguredPortalTarget === true) {
+    if (spawn.useConfiguredPortalTarget === true) {
       if (spawn.twoStepRoute === true) {
         await gotoLobbyPortalPoint(bot, config, blockPosFromConfig(spawn.waypoint), 'spawn portal waypoint', timeoutMs, 2)
       }
@@ -10797,8 +11280,20 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
       }
       await gotoLobbyPortalPoint(bot, config, { ...target, range: toNumber(spawn.goalRange, 2) }, 'configured spawn portal', timeoutMs, toNumber(spawn.goalRange, 2))
     } else {
-      console.log(`[LOBBY-PORTAL-WARN] Leg ${legIndex}: no loaded nether_portal block found within ${searchRadius} blocks. Set spawnDisk.useConfiguredPortalTarget=true and spawnDisk.portal coords if Mineflayer cannot see it.`)
-      return false
+      const portalBlock = findNearestNetherPortal(bot, searchRadius)
+      if (portalBlock?.position) {
+        await gotoLobbyPortalPoint(bot, config, {
+          x: portalBlock.position.x,
+          y: portalBlock.position.y,
+          z: portalBlock.position.z,
+          range: toNumber(spawn.goalRange, 2)
+        }, 'spawn nether portal block', timeoutMs, toNumber(spawn.goalRange, 2))
+      } else if (scenePortalPoint) {
+        await gotoLobbyPortalPoint(bot, config, { ...scenePortalPoint, range: toNumber(spawn.goalRange, 2) }, 'scene-matched spawn portal', timeoutMs, toNumber(spawn.goalRange, 2))
+      } else {
+        console.log(`[LOBBY-PORTAL-WARN] Leg ${legIndex}: no loaded nether_portal block found within ${searchRadius} blocks. Set spawnDisk.useConfiguredPortalTarget=true and spawnDisk.portal coords if Mineflayer cannot see it.`)
+        return false
+      }
     }
 
     await holdForwardIntoPortal(bot, config, entryMs)
@@ -10825,6 +11320,7 @@ async function runLobbyPortalAutomation(bot, config) {
   if (!isPositionUsable(currentPos)) return false
   if (isPositionInsidePlatformBounds(currentPos, config)) return false
   const region = getMatchedLobbyRegion(currentPos, portalConfig)
+  const forcedSpawnRouteMatched = isInsideForcedStraightSpawnRouteTrigger(currentPos, portalConfig?.spawnDisk || {})
   const runtime = classifyRuntimePosition(bot, config, 'lobby-portal-preflight')
   const sceneAction = String(runtime?.meteor?.best?.action || '')
   const savedLoginStep = chooseSavedSpatialPortalStep(bot, config, ['login-portal'])
@@ -10838,6 +11334,7 @@ async function runLobbyPortalAutomation(bot, config) {
     !region &&
     !isInsideLoginPortalZone(currentPos, portalConfig) &&
     !isInsideLobbySpawnDisk(currentPos, portalConfig) &&
+    !forcedSpawnRouteMatched &&
     sceneAction !== 'login-portal' &&
     sceneAction !== 'spawn-portal' &&
     !savedLoginStep &&
@@ -10849,8 +11346,15 @@ async function runLobbyPortalAutomation(bot, config) {
 
   const totalLegs = getPortalCount(portalConfig, config)
   const maxAttempts = Math.max(1, toNumber(portalConfig.maxAttempts, 3))
+  const overallTimeoutMs = Math.max(60000, toNumber(portalConfig.overallTimeoutMs, 180000))
   bot.__nervAllowOffPlatformNavigation = true
   bot.__nervPlatformWatchdogActive = false
+
+  const stuckTimer = setTimeout(() => {
+    console.log(`[LOBBY-PORTAL] Stuck in portal automation for ${Math.round(overallTimeoutMs / 1000)}s; disconnecting to reconnect.`)
+    stopBotMovement(bot)
+    try { bot.quit('lobby-portal-stuck') } catch {}
+  }, overallTimeoutMs)
 
   try {
     for (let leg = 1; leg <= totalLegs; leg += 1) {
@@ -10881,6 +11385,7 @@ async function runLobbyPortalAutomation(bot, config) {
     }
     return true
   } finally {
+    clearTimeout(stuckTimer)
     stopBotMovement(bot)
     bot.__nervAllowOffPlatformNavigation = false
   }
@@ -10952,10 +11457,17 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
   bot.__nervPlatformHoldPromise = (async () => {
     const pollMs = Math.max(250, toNumber(config.advanced?.platformWatchdogPollMs, 1000))
     const logMs = Math.max(1000, toNumber(config.advanced?.platformHoldLogMs, 5000))
+    const stuckTimeoutMs = Math.max(60000, toNumber(config.advanced?.platformHoldStuckTimeoutMs, 180000))
     let lastLog = 0
     let announced = false
+    const stuckAt = Date.now()
 
     while (bot?._client && bot._client.state !== 'disconnected' && bot.__nervSessionActive !== false) {
+      if (Date.now() - stuckAt > stuckTimeoutMs) {
+        console.log(`[PLATFORM-HOLD] Stuck in platform hold for ${Math.round(stuckTimeoutMs / 1000)}s; disconnecting to reconnect.`)
+        try { bot.quit('platform-hold-stuck') } catch {}
+        return
+      }
       if (bot.__nervAllowOffPlatformNavigation) return
       if (rescueBotPositionFromLatestPacket(bot, config, reason, { log: false })) return
       if (rescueBotPositionFromPlatformCache(bot, config, reason)) return
@@ -11003,8 +11515,12 @@ function installPlatformSafety(bot, config) {
     if (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)) return
     if (rescueBotPositionFromLatestPacket(bot, config, 'runtime-watchdog', { log: false })) return
     if (rescueBotPositionFromPlatformCache(bot, config, 'runtime-watchdog')) return
+    if (bot.__nervPlatformRecoveryInProgress) return
     stopBotMovement(bot)
-    void waitForPlatformReady(bot, config, 'runtime-watchdog')
+    bot.__nervPlatformRecoveryInProgress = true
+    void waitForPlatformReady(bot, config, 'runtime-watchdog').finally(() => {
+      bot.__nervPlatformRecoveryInProgress = false
+    })
   }, pollMs)
   timer.unref?.()
   bot.once('end', () => clearInterval(timer))
@@ -11015,21 +11531,29 @@ function installPlatformSafety(bot, config) {
       if (!bot.__nervAllowOffPlatformNavigation) {
         await waitForPlatformReady(bot, config, 'before-path')
       }
-      try {
-        return await originalGoto(goal)
-      } catch (err) {
-        const message = String(err?.message || err || '')
-        const goalChanged = message.toLowerCase().includes('goal was changed')
-        if (!bot.__nervAllowOffPlatformNavigation && goalChanged) {
-          console.log('[PATH-RECOVER] Pathfinder goal changed during platform/transfer hold; waiting for platform and retrying.')
-          await waitForPlatformReady(bot, config, 'path-goal-changed')
+      while (true) {
+        try {
           return await originalGoto(goal)
+        } catch (err) {
+          const message = String(err?.message || err || '')
+          const goalChanged = message.toLowerCase().includes('goal was changed')
+          const offPlatform = !bot.__nervAllowOffPlatformNavigation &&
+            (!isPositionUsable(bot?.entity?.position) || !isPositionInsidePlatformBounds(bot.entity.position, config))
+          if (goalChanged) {
+            if (!bot.__nervAllowOffPlatformNavigation) {
+              console.log('[PATH-RECOVER] Pathfinder goal changed during platform/transfer hold; waiting for platform and retrying.')
+              await waitForPlatformReady(bot, config, 'path-goal-changed')
+            } else {
+              console.log('[PATH-RECOVER] Pathfinder goal changed; retrying navigation.')
+            }
+            continue
+          }
+          if (offPlatform) {
+            await waitForPlatformReady(bot, config, 'path-interrupted')
+            continue
+          }
+          throw err
         }
-        if (!bot.__nervAllowOffPlatformNavigation && (!isPositionUsable(bot?.entity?.position) || !isPositionInsidePlatformBounds(bot.entity.position, config))) {
-          await waitForPlatformReady(bot, config, 'path-interrupted')
-          return await originalGoto(goal)
-        }
-        throw err
       }
     }
     bot.pathfinder.__nervPlatformGotoWrapped = true
@@ -11375,9 +11899,13 @@ function runSingleSession(config, sessionNumber) {
       }
 
       if (printer.startOnSpawn === false) {
-        console.log('[STATE] startOnSpawn is false. Waiting idle.')
+        if (printingIntentActive) {
+          console.log('[STATE] startOnSpawn is false but printing intent is active — resuming printing after reconnect.')
+        } else {
+          console.log('[STATE] startOnSpawn is false. Waiting idle for start command.')
+        }
         dashboardRuntime?.setPhase('idle')
-        await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, false)
+        await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, printingIntentActive)
         return
       }
 
@@ -13222,56 +13750,71 @@ async function start() {
     console.log(`[6B6T-HOSTS] Rotation enabled: ${runtimeHosts.join(', ')}. starting=${runtimeHosts[runtimeHostIndex]}`)
   }
 
-  let attempt = 1
-  while (true) {
-    if (attempt > 1) {
-      console.log(`[RECONNECT] Starting attempt ${attempt}/${reconnect.maxAttempts}.`)
+  let continueOuter = true
+  while (continueOuter) {
+    continueOuter = false
+    let attempt = 1
+    let lastEndReason = null
+
+    while (true) {
+      if (attempt > 1) {
+        console.log(`[RECONNECT] Starting attempt ${attempt}/${reconnect.maxAttempts}.`)
+      }
+
+      const activeHost = runtimeHosts.length ? runtimeHosts[runtimeHostIndex] : config.bot?.host
+      const sessionConfig = activeHost ? makeHostConfig(config, activeHost) : config
+      let session = await runSingleSession(sessionConfig, attempt)
+      session = await resolveTokenVerificationSession({
+        session,
+        account: sessionConfig.bot?.username || 'MapartBot',
+        host: activeHost || sessionConfig.bot?.host || 'unknown-host',
+        version: sessionConfig.bot?.version || 'unknown-version',
+        sessionNumber: attempt,
+        retryDelayMs: Math.max(1000, Math.min(5000, toNumber(reconnect.delayMs, 3000))),
+        rerun: async () => await runSingleSession(sessionConfig, attempt),
+        config: sessionConfig
+      })
+      const retryable = shouldRetryReconnect(session, sessionConfig)
+      lastEndReason = session.endReason
+      console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
+
+      if (!reconnect.enabled) {
+        break
+      }
+
+      if (!retryable) {
+        console.log(`[RECONNECT] Not retrying due to non-retryable reason: ${session.endReason}`)
+        break
+      }
+
+      if (attempt >= reconnect.maxAttempts) {
+        console.log(`[RECONNECT] Stopping after ${attempt} attempts. Last reason: ${session.endReason}`)
+        break
+      }
+
+      const retryDelayMs = getReconnectDelayForSession(session, reconnect)
+      if (runtimeHosts.length > 1 && session.successfulStartup !== true) {
+        const previousHost = runtimeHosts[runtimeHostIndex]
+        runtimeHostIndex = (runtimeHostIndex + 1) % runtimeHosts.length
+        console.log(`[6B6T-HOSTS] Switching host after failed startup: ${previousHost} -> ${runtimeHosts[runtimeHostIndex]}`)
+      }
+
+      console.log(`[RECONNECT] Retrying in ${retryDelayMs}ms. reason=${session.endReason}`)
+      await delay(retryDelayMs)
+      if (session.successfulStartup === true) {
+        if (attempt > 1) console.log('[RECONNECT] Previous session reached startup; resetting reconnect attempt counter.')
+        attempt = 1
+      } else {
+        attempt += 1
+      }
     }
 
-    const activeHost = runtimeHosts.length ? runtimeHosts[runtimeHostIndex] : config.bot?.host
-    const sessionConfig = activeHost ? makeHostConfig(config, activeHost) : config
-    let session = await runSingleSession(sessionConfig, attempt)
-    session = await resolveTokenVerificationSession({
-      session,
-      account: sessionConfig.bot?.username || 'MapartBot',
-      host: activeHost || sessionConfig.bot?.host || 'unknown-host',
-      version: sessionConfig.bot?.version || 'unknown-version',
-      sessionNumber: attempt,
-      retryDelayMs: Math.max(1000, Math.min(5000, toNumber(reconnect.delayMs, 3000))),
-      rerun: async () => await runSingleSession(sessionConfig, attempt),
-      config: sessionConfig
-    })
-    const retryable = shouldRetryReconnect(session, sessionConfig)
-    console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
-
-    if (!reconnect.enabled) {
-      break
-    }
-
-    if (!retryable) {
-      console.log(`[RECONNECT] Not retrying due to non-retryable reason: ${session.endReason}`)
-      break
-    }
-
-    if (attempt >= reconnect.maxAttempts) {
-      console.log(`[RECONNECT] Stopping after ${attempt} attempts. Last reason: ${session.endReason}`)
-      break
-    }
-
-    const retryDelayMs = getReconnectDelayForSession(session, reconnect)
-    if (runtimeHosts.length > 1 && session.successfulStartup !== true) {
-      const previousHost = runtimeHosts[runtimeHostIndex]
-      runtimeHostIndex = (runtimeHostIndex + 1) % runtimeHosts.length
-      console.log(`[6B6T-HOSTS] Switching host after failed startup: ${previousHost} -> ${runtimeHosts[runtimeHostIndex]}`)
-    }
-
-    console.log(`[RECONNECT] Retrying in ${retryDelayMs}ms. reason=${session.endReason}`)
-    await delay(retryDelayMs)
-    if (session.successfulStartup === true) {
-      if (attempt > 1) console.log('[RECONNECT] Previous session reached startup; resetting reconnect attempt counter.')
-      attempt = 1
-    } else {
-      attempt += 1
+    if (String(lastEndReason || '').includes('dashboard-disconnect') && config?.dashboard?.enabled !== false) {
+      printingIntentActive = false
+      const shouldRestart = await standbyWaitForReconnect(config)
+      if (shouldRestart) {
+        continueOuter = true
+      }
     }
   }
 }
