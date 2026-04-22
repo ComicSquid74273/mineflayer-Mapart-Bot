@@ -775,10 +775,18 @@ function renderNodes() {
 }
 
 function renderLogs() {
+  const nodeLogGroups = state.nodes
+    .map((node) => ({
+      hostLabel: node.hostLabel,
+      items: Array.isArray(node.nodeLogs) ? node.nodeLogs : []
+    }))
+    .filter((group) => group.items.length > 0)
+
   const logsSignature = JSON.stringify({
     verified: state.auth.verified,
     canViewLogs: hasPermission('canViewLogs'),
-    logs: state.logs
+    logs: state.logs,
+    nodeLogGroups
   })
   if (state.renderCache.logs === logsSignature) return
   state.renderCache.logs = logsSignature
@@ -790,33 +798,80 @@ function renderLogs() {
         <p>Authenticate as a viewer, operator, or admin to list and download log files.</p>
       </article>
     `
+
     return
   }
 
-  if (!state.logs.length) {
+  if (!state.logs.length && !nodeLogGroups.length) {
     elements.logsList.innerHTML = `
       <article class="empty-card">
         <h3>No logs found</h3>
-        <p>No downloadable .log files are currently available on the dashboard host.</p>
+        <p>No downloadable .log files are currently available on the dashboard host or any reporting node.</p>
       </article>
     `
+
     return
   }
 
-  elements.logsList.innerHTML = state.logs.map((item) => `
-    <article class="file-item">
-      <div class="file-row">
-        <div>
-          <strong>${escapeHtml(item.fileName)}</strong>
-          <p class="file-meta">${escapeHtml(formatFileSize(item.sizeBytes))} · ${escapeHtml(formatTime(item.modifiedAt))}</p>
+  const hostLogsMarkup = state.logs.length
+    ? `
+      <section>
+        <div class="file-row" style="margin-bottom:10px;">
+          <div>
+            <strong>Dashboard host</strong>
+            <p class="file-meta">${escapeHtml(state.logs.length)} log file(s)</p>
+          </div>
         </div>
-        <div style="display:flex;gap:8px;flex-shrink:0;">
-          <button class="ghost-button small-button" type="button" data-action="download-log" data-permission-needed="canViewLogs" data-file-name="${escapeHtml(item.fileName)}">Download</button>
-          <button class="danger-button small-button" type="button" data-action="delete-log" data-permission-needed="canOperate" data-file-name="${escapeHtml(item.fileName)}">Delete</button>
+        ${state.logs.map((item) => `
+          <article class="file-item">
+            <div class="file-row">
+              <div>
+                <strong>${escapeHtml(item.fileName)}</strong>
+                <p class="file-meta">${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}</p>
+              </div>
+              <div style="display:flex;gap:8px;flex-shrink:0;">
+                <button class="ghost-button small-button" type="button" data-action="download-log" data-permission-needed="canViewLogs" data-file-name="${escapeHtml(item.fileName)}">Download</button>
+                <button class="danger-button small-button" type="button" data-action="delete-log" data-permission-needed="canOperate" data-file-name="${escapeHtml(item.fileName)}">Delete</button>
+              </div>
+            </div>
+          </article>
+        `).join('')}
+      </section>
+    `
+    : `
+      <article class="file-item">
+        <div>
+          <strong>Dashboard host</strong>
+          <p class="file-meta">No local .log files found on the dashboard machine.</p>
+        </div>
+      </article>
+    `
+
+  const nodeLogsMarkup = nodeLogGroups.map((group) => `
+    <section style="margin-top:14px;">
+      <div class="file-row" style="margin-bottom:10px;">
+        <div>
+          <strong>Node: ${escapeHtml(group.hostLabel)}</strong>
+          <p class="file-meta">${escapeHtml(group.items.length)} log file(s)</p>
         </div>
       </div>
-    </article>
+      ${group.items.map((item) => `
+        <article class="file-item">
+          <div class="file-row">
+            <div>
+              <strong>${escapeHtml(item.fileName)}</strong>
+              <p class="file-meta">${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}</p>
+            </div>
+            <div style="display:flex;gap:8px;flex-shrink:0;">
+              <button class="ghost-button small-button" type="button" data-action="download-node-log" data-permission-needed="canViewLogs" data-host-label="${escapeHtml(group.hostLabel)}" data-file-name="${escapeHtml(item.fileName)}">Download</button>
+            </div>
+          </div>
+        </article>
+      `).join('')}
+    </section>
   `).join('')
+
+  elements.logsList.innerHTML = `${hostLogsMarkup}${nodeLogsMarkup}`
 }
 
 function renderOperators() {
