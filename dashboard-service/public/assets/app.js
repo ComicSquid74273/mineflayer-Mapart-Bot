@@ -72,7 +72,9 @@ const elements = {
   serviceStatus: document.getElementById('serviceStatus'),
   startAllButton: document.getElementById('startAllButton'),
   stopAllButton: document.getElementById('stopAllButton'),
+  distributeCheckbox: document.getElementById('distributeCheckbox'),
   uploadNodeSelect: document.getElementById('uploadNodeSelect'),
+  uploadNodeSelectLabel: document.getElementById('uploadNodeSelectLabel'),
   uploadForm: document.getElementById('uploadForm'),
   uploadStatus: document.getElementById('uploadStatus'),
   clearDataButton: document.getElementById('clearDataButton'),
@@ -455,13 +457,18 @@ function activeElementInsideForm() {
 }
 
 function captureFormState() {
-  return { uploadNode: elements.uploadNodeSelect.value }
+  return { uploadNode: elements.uploadNodeSelect.value, distribute: elements.distributeCheckbox.checked }
 }
 
 function restoreFormState(snapshot) {
   if (!snapshot) return
   if (snapshot.uploadNode && Array.from(elements.uploadNodeSelect.options).some((option) => option.value === snapshot.uploadNode)) {
     elements.uploadNodeSelect.value = snapshot.uploadNode
+  }
+  if (snapshot.distribute) {
+    elements.distributeCheckbox.checked = true
+    elements.uploadNodeSelectLabel.style.display = 'none'
+    elements.uploadNodeSelect.required = false
   }
 }
 
@@ -1155,11 +1162,28 @@ async function onUpload(event) {
     return
   }
   const files = Array.from(elements.fileInput.files || [])
-  const targetHostLabel = elements.uploadNodeSelect.value
   if (!files.length) return
-  if (!targetHostLabel) {
-    pushEvent('warn', 'Select a target node before uploading.')
-    return
+
+  const distribute = elements.distributeCheckbox.checked
+
+  // Build the per-file node assignment list
+  let fileAssignments // Array of { file, hostLabel }
+  if (distribute) {
+    const nodeLabels = [...new Map(
+      state.bots.map((b) => [String(b.hostLabel || 'unknown').trim() || 'unknown', true])
+    ).keys()]
+    if (!nodeLabels.length) {
+      pushEvent('warn', 'No nodes are available to distribute to.')
+      return
+    }
+    fileAssignments = files.map((file, i) => ({ file, hostLabel: nodeLabels[i % nodeLabels.length] }))
+  } else {
+    const targetHostLabel = elements.uploadNodeSelect.value
+    if (!targetHostLabel) {
+      pushEvent('warn', 'Select a target node before uploading.')
+      return
+    }
+    fileAssignments = files.map((file) => ({ file, hostLabel: targetHostLabel }))
   }
 
   state.uploadBusy = true
@@ -1167,26 +1191,38 @@ async function onUpload(event) {
   let failed = 0
 
   try {
-    for (const file of files) {
-      elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name}`
+    for (const { file, hostLabel } of fileAssignments) {
+      elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name} -> ${hostLabel}`
       try {
         const base64 = await fileToBase64(file)
-        await submitJson(`/api/dashboard/nodes/${encodeURIComponent(targetHostLabel)}/nbt/upload`, {
+        await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/nbt/upload`, {
           fileName: file.name,
           contentBase64: base64,
         })
         completed += 1
       } catch (error) {
         failed += 1
-        pushEvent('error', `Upload failed for ${file.name}: ${error.message}`)
+        pushEvent('error', `Upload failed for ${file.name} -> ${hostLabel}: ${error.message}`)
       }
     }
 
-    elements.uploadStatus.textContent = failed > 0
-      ? `Upload finished: ${completed} succeeded, ${failed} failed.`
-      : `${completed} file(s) uploaded and assigned to node ${targetHostLabel}.`
-    pushEvent('info', `Uploaded -> ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
+    if (distribute) {
+      const nodeLabels = [...new Set(fileAssignments.map((a) => a.hostLabel))]
+      elements.uploadStatus.textContent = failed > 0
+        ? `Upload finished: ${completed} succeeded, ${failed} failed across ${nodeLabels.length} node(s).`
+        : `${completed} file(s) distributed across ${nodeLabels.length} node(s).`
+      pushEvent('info', `Distributed ${completed}/${files.length} files across nodes: ${nodeLabels.join(', ')}${failed ? ` (${failed} failed)` : ''}`)
+    } else {
+      const targetHostLabel = fileAssignments[0]?.hostLabel || ''
+      elements.uploadStatus.textContent = failed > 0
+        ? `Upload finished: ${completed} succeeded, ${failed} failed.`
+        : `${completed} file(s) uploaded and assigned to node ${targetHostLabel}.`
+      pushEvent('info', `Uploaded -> ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
+    }
+
     elements.uploadForm.reset()
+    elements.uploadNodeSelectLabel.style.display = ''
+    elements.uploadNodeSelect.required = true
     await refreshData()
   } finally {
     state.uploadBusy = false
@@ -1453,6 +1489,12 @@ elements.stopAllButton.addEventListener('click', async () => {
 
 elements.uploadForm.addEventListener('submit', (event) => {
   void onUpload(event).catch((error) => pushEvent('error', error.message))
+})
+
+elements.distributeCheckbox.addEventListener('change', () => {
+  const distribute = elements.distributeCheckbox.checked
+  elements.uploadNodeSelectLabel.style.display = distribute ? 'none' : ''
+  elements.uploadNodeSelect.required = !distribute
 })
 
 elements.operatorForm.addEventListener('submit', (event) => {
