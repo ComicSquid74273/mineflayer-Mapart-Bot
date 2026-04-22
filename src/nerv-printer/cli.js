@@ -934,8 +934,12 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         break
       }
       case 'assign-nbt': {
-        const message = await handleAssignNbt(claimed)
-        await reportCommandResult(claimed.commandId, 'succeeded', message)
+        try {
+          const message = await handleAssignNbt(claimed)
+          await reportCommandResult(claimed.commandId, 'succeeded', message)
+        } catch (err) {
+          await reportCommandResult(claimed.commandId, 'failed', err?.message || String(err))
+        }
         break
       }
       case 'verify': {
