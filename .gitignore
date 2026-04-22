@@ -10,6 +10,9 @@ reference/
 # Node-generated dependencies
 node_modules/
 
+# Graphify generated artifacts
+graphify-out/
+
 # Dashboard service runtime data
 
 # Generated finished map outputs

@@ -706,6 +706,14 @@ function createStore(baseDir) {
       failedReason: null
     }
     saveFiles(items)
+    // Cancel any stale assign-nbt commands for this file before creating a new one.
+    const commands = listCommands()
+    const updated = commands.map((cmd) =>
+      cmd.nbtFileId === fileId && cmd.commandType === 'assign-nbt' && (cmd.status === 'pending' || cmd.status === 'claimed')
+        ? { ...cmd, status: 'failed', resultMessage: 'cancelled: file reassigned', completedAt: nowIso() }
+        : cmd
+    )
+    saveCommands(updated)
     createCommand({ targetBotName: botName, commandType: 'assign-nbt', nbtFileId: fileId })
     return items[index]
   }
@@ -727,6 +735,15 @@ function createStore(baseDir) {
       deliveredAt: null
     }
     saveFiles(items)
+    // Cancel any pending/claimed assign-nbt commands for this file so bots don't
+    // keep retrying a bot-level command that no longer matches the assignment.
+    const commands = listCommands()
+    const updated = commands.map((cmd) =>
+      cmd.nbtFileId === fileId && cmd.commandType === 'assign-nbt' && (cmd.status === 'pending' || cmd.status === 'claimed')
+        ? { ...cmd, status: 'failed', resultMessage: 'cancelled: file reassigned to node', completedAt: nowIso() }
+        : cmd
+    )
+    saveCommands(updated)
     return items[index]
   }
 

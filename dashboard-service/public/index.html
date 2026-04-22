@@ -69,10 +69,14 @@
             <span>NBT file</span>
             <input id="fileInput" name="file" type="file" accept=".nbt" multiple required>
           </label>
-          <label>
-            <span>Target bot</span>
+          <label class="checkbox-row">
+            <input id="distributeCheckbox" type="checkbox">
+            <span>Distribute equally across all nodes</span>
+          </label>
+          <label id="uploadNodeSelectLabel">
+            <span>Target node</span>
             <select id="uploadNodeSelect" required>
-              <option value="">Select bot</option>
+              <option value="">Select node</option>
             </select>
           </label>
           <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload To Node</button>

@@ -29,6 +29,11 @@
     "test:spatial": "node nerv-printer.js --connection=6b6t --test-spatial",
     "test:move5": "node src/nerv-printer/diagnostics/move-test.js",
     "start:broadcast": "set ENABLE_QUOTE_BROADCAST=true&& node index.js",
+    "graphify:build": "graphify .",
+    "graphify:update": "graphify . --update",
+    "graphify:watch": "graphify . --watch",
+    "graphify:report": "powershell -NoProfile -Command \"Get-Content graphify-out/GRAPH_REPORT.md\"",
+    "graphify:codex-install": "graphify codex install",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
