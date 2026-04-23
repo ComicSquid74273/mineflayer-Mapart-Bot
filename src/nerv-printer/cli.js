@@ -453,6 +453,42 @@ function mapDashboardLocation(runtime) {
   return 'unknown'
 }
 
+function mapDashboardLocationDetail(runtime) {
+  const classification = runtime?.classification || {}
+  const state = String(classification.state || '').toLowerCase()
+  const regionName = String(classification.region?.name || '').trim().toLowerCase()
+  if (classification.platform === true || state === 'platform') return 'platform'
+  if (regionName) return regionName
+  if (state) return state
+  if (isPositionUsable(runtime?.position)) return 'printer-area'
+  return 'unknown'
+}
+
+function mapPostPrintStatusDetail(step) {
+  const value = String(step || '').trim().toLowerCase()
+  if (value.startsWith('blocked-')) return `blocked-${mapPostPrintStatusDetail(value.slice('blocked-'.length))}`
+  switch (value) {
+    case 'withdraw':
+      return 'preparing-map'
+    case 'fill_map':
+    case 'fill-map':
+      return 'filling-map'
+    case 'cartography':
+      return 'locking-map'
+    case 'rename_store':
+    case 'rename-store':
+      return 'naming'
+    case 'reset':
+      return 'resetting'
+    case 'center':
+      return 'centering'
+    case 'done':
+      return 'post-print-done'
+    default:
+      return 'post-print'
+  }
+}
+
 function createDashboardRequest(urlValue, method, body = null) {
   const target = new URL(urlValue)
   const transport = target.protocol === 'https:' ? https : http
@@ -551,6 +587,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   const maxChatBuffer = 50
   const state = {
     phase: 'starting',
+    statusDetail: 'starting',
     recoveryState: 'none',
     reconnectState: sessionNumber > 1 ? 'reconnecting' : 'idle',
     currentNbt: null,
@@ -594,9 +631,17 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return String(state.currentNbt || currentProgress()?.sourceName || currentAssignment()?.sourceName || '').trim() || null
   }
 
-  function currentLocation() {
+  function currentRuntimeLocation() {
     const runtime = classifyRuntimePosition(bot, config, 'dashboard-status')
-    return mapDashboardLocation({ ...runtime, position: bot?.entity?.position })
+    return { ...runtime, position: bot?.entity?.position }
+  }
+
+  function currentLocation() {
+    return mapDashboardLocation(currentRuntimeLocation())
+  }
+
+  function currentLocationDetail() {
+    return mapDashboardLocationDetail(currentRuntimeLocation())
   }
 
   function listNodeNbtFiles() {
@@ -667,6 +712,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const isOnline = onlineOverride == null
       ? (bot.__nervSessionActive !== false && clientState === 'play')
       : onlineOverride
+    const runtimeLocation = currentRuntimeLocation()
+    const location = mapDashboardLocation(runtimeLocation)
+    const locationDetail = mapDashboardLocationDetail(runtimeLocation)
+    const statusDetail = state.statusDetail || (phase === 'idle' ? 'idle' : phase)
     const progressPayload = progress && Number.isFinite(Number(progress.totalTargets)) && ['printing', 'repair', 'rescan', 'post-print', 'cleanup'].includes(phase)
       ? {
           processed: toNumber(progress.processedTargets, 0),
@@ -684,7 +733,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       health,
       hunger,
       activeState,
-      location: currentLocation(),
+      statusDetail,
+      location,
+      locationDetail,
       idle,
       heartbeatAt: new Date().toISOString(),
       role,
@@ -1027,11 +1078,17 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       if (state.heartbeatTimer) clearTimeout(state.heartbeatTimer)
       if (state.commandTimer) clearTimeout(state.commandTimer)
       state.phase = normalizeDashboardPhase(finalPhase)
+      state.statusDetail = state.phase
       void postStatus(online)
     },
     noteActivity,
-    setPhase(nextPhase) {
+    setPhase(nextPhase, detail = null) {
       state.phase = normalizeDashboardPhase(nextPhase)
+      state.statusDetail = detail ? String(detail).trim() : state.phase
+      noteActivity()
+    },
+    setStatusDetail(detail) {
+      state.statusDetail = String(detail || state.phase || 'idle').trim() || state.phase || 'idle'
       noteActivity()
     },
     setCurrentNbt(sourceName) {
@@ -1088,7 +1145,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
     dashboardRuntime?.setCurrentNbt(nextNbt ? path.basename(nextNbt) : null)
     dashboardRuntime?.setPhase('printing')
     try {
-      const runInfo = await runPrint(bot, config)
+      const runInfo = await runPrint(bot, config, dashboardRuntime)
       dashboardRuntime?.setCurrentNbt(runInfo?.sourceName || null)
 
       if (runInfo?.sourceType !== 'nbt') {
@@ -4077,8 +4134,14 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       context.savePostPrintState(nextStep, action)
     }
   }
+  const setPostPrintStatus = (step) => {
+    if (typeof context.setStatusDetail === 'function') {
+      context.setStatusDetail(mapPostPrintStatusDetail(step))
+    }
+  }
   const failPostPrint = (step, message) => {
     if (message) console.log(`[POSTPRINT-WARN] ${message}`)
+    setPostPrintStatus(`blocked-${step}`)
     savePostPrintStep(step, `blocked-${step}`)
     return { completed: false, failedStep: step, message: message || '' }
   }
@@ -4102,6 +4165,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   savePostPrintStep(resumeStep, 'post-print-active')
 
   if (shouldRunStep('withdraw')) {
+    setPostPrintStatus('withdraw')
     if (finishedChestPos) {
       const leftoverMaps = findInventoryItemsByType(bot, 'filled_map')
       for (const stack of leftoverMaps) {
@@ -4122,6 +4186,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   }
 
   if (shouldRunStep('fill_map') && advanced.postPrintFillMapEnabled !== false) {
+    setPostPrintStatus('fill_map')
     const mapItem = findInventoryItemByType(bot, 'map')
     if (!mapItem) {
       return failPostPrint('fill_map', 'No empty map in inventory to fill.')
@@ -4190,6 +4255,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   const hasFilledMap = countInventoryByType(bot, 'filled_map') > 0
 
   if (shouldRunStep('cartography') && advanced.postPrintUseCartographyEnabled !== false && cartographyConfig?.position && hasFilledMap) {
+    setPostPrintStatus('cartography')
     let window = null
     try {
       await waitForPlatformReady(bot, config, 'postprint-cartography')
@@ -4252,6 +4318,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   }
 
   if (shouldRunStep('rename_store') && cartographySucceeded) {
+    setPostPrintStatus('rename_store')
     await waitForPlatformReady(bot, config, 'postprint-rename-store')
     await refillXpForPostPrint(bot, config)
     const renamedTarget = await renameFinishedMap(bot, config, anvilConfig, context.sourceName)
@@ -4306,6 +4373,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     && advanced.postPrintSkipResetInteraction !== true
 
   if (shouldRunStep('reset') && shouldInteractReset) {
+    setPostPrintStatus('reset')
     try {
       await interactWithConfiguredBlock(bot, config, resetConfig, 'reset-block')
     } catch (err) {
@@ -4320,6 +4388,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   }
 
   if (shouldRunStep('center') && advanced.postPrintWalkToCenter !== false) {
+    setPostPrintStatus('center')
     const center = getMapCenterPosition(config)
 
     try {
@@ -6763,7 +6832,7 @@ async function waitForStartupSupport(bot, config, targets) {
   return probeStartupSupport(bot, targets)
 }
 
-async function runPrint(bot, config) {
+async function runPrint(bot, config, dashboardRuntime = null) {
   ensureUsableEntityState(bot, config, 'run-print-start', { allowPlatformSeed: true, log: false })
   const files = config.files || {}
   const printer = config.printer || {}
@@ -6845,7 +6914,14 @@ async function runPrint(bot, config) {
     sourcePath: input.sourcePath,
     sourceType: input.sourceType,
     resumePostPrintStep,
+    setStatusDetail: (detail) => {
+      dashboardRuntime?.setPhase('post-print', detail)
+    },
     savePostPrintState: (postPrintStep, action = 'post-print-active') => {
+      const detail = String(action || '').startsWith('blocked-')
+        ? mapPostPrintStatusDetail(action)
+        : mapPostPrintStatusDetail(postPrintStep)
+      dashboardRuntime?.setPhase('post-print', detail)
       if (!progressEnabled) return
       writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
         state: 'post_print_workflow',
@@ -12132,7 +12208,7 @@ function runSingleSession(config, sessionNumber) {
             ? `Auto-triggered from lobby portal zone at ${spawnedCount}/${reqSpawn} spawn event(s).`
             : `Threshold reached (${spawnedCount}/${reqSpawn}).`)
       console.log(`[SPAWN] ${triggerLabel} Delaying startup...`)
-      dashboardRuntime?.setPhase('waiting-spawn')
+      dashboardRuntime?.setPhase('waiting-spawn', `spawn-${spawnedCount}`)
 
       const printer = config.printer || {}
       await delay(toNumber(printer.startDelayMs, 1500))
@@ -12223,6 +12299,7 @@ function runSingleSession(config, sessionNumber) {
             continue
           }
           lobbyPortalAttempts += 1
+          dashboardRuntime?.setPhase('waiting-spawn', `lobby-portal-${lobbyPortalAttempts}`)
           console.log(`[LOBBY-PORTAL] Position is outside platform during startup; trying lobby portal automation (${lobbyPortalAttempts}/${maxLobbyPortalRuns}). state=${runtimeClassification.state}${action ? ` scene=${action}` : ''}`)
           const attempted = await runLobbyPortalAutomation(bot, config)
           if (attempted) {
@@ -12337,7 +12414,7 @@ function runSingleSession(config, sessionNumber) {
     bot.on('spawn', async () => {
       spawnedCount += 1
       dashboardRuntime?.noteActivity()
-      dashboardRuntime?.setPhase('waiting-spawn')
+      dashboardRuntime?.setPhase('waiting-spawn', `spawn-${spawnedCount}`)
       if (printerStarted || startupPending) return
 
       const reqSpawn = getRequiredSpawnCount(config)

@@ -41,7 +41,7 @@ const state = {
 
 const AUTH_STORAGE_KEY = 'mapart-dashboard-operator-auth'
 const REFRESH_STORAGE_KEY = 'mapart-dashboard-refresh-ms'
-const ALLOWED_REFRESH_INTERVALS = [60000, 300000, 600000]
+const ALLOWED_REFRESH_INTERVALS = [10000, 20000, 30000, 60000, 300000, 600000]
 const UI_ACTIVITY_HOLD_MS = 15000
 
 const elements = {
@@ -165,6 +165,13 @@ function formatFileSize(bytes) {
 function normalizeRefreshInterval(value) {
   const next = Number(value)
   return ALLOWED_REFRESH_INTERVALS.includes(next) ? next : 300000
+}
+
+function formatRefreshInterval(ms) {
+  const seconds = Math.round(Number(ms) / 1000)
+  if (!Number.isFinite(seconds) || seconds <= 0) return 'unknown'
+  if (seconds < 60) return `${seconds} second(s)`
+  return `${Math.round(seconds / 60)} minute(s)`
 }
 
 function phaseClass(phase) {
@@ -527,6 +534,8 @@ function renderNodeTimingMetrics(node) {
 }
 
 function renderBotCard(bot) {
+  const statusDetail = bot.statusDetail || bot.phase || 'unknown'
+  const locationText = bot.locationDetail || bot.location || 'unknown'
   const progress = bot.progress && Number.isFinite(Number(bot.progress.percent))
     ? `${bot.progress.percent}%`
     : 'n/a'
@@ -562,15 +571,16 @@ function renderBotCard(bot) {
           <span class="health-dot ${escapeHtml(healthClass)}" title="${escapeHtml(healthClass === 'health-green' ? 'Healthy' : healthClass === 'health-yellow' ? 'Warning' : 'Issue')}"></span>
           <div>
             <h3 class="bot-name">${escapeHtml(bot.botName)}</h3>
-            <p class="bot-meta">${escapeHtml(bot.role || 'single')} · ${escapeHtml(bot.location || 'unknown')}${bot.botIp && !showVerify ? ` · ${escapeHtml(bot.botIp)}` : ''}</p>
+            <p class="bot-meta">${escapeHtml(bot.role || 'single')} · ${escapeHtml(locationText)}${bot.botIp && !showVerify ? ` · ${escapeHtml(bot.botIp)}` : ''}</p>
           </div>
         </div>
         <div class="status-inline">
           <span class="status-pill ${bot.online ? 'status-online' : 'status-offline'}">${bot.online ? 'Online' : 'Offline'}</span>
-          <span class="phase-pill ${phaseClass(bot.phase)}">${escapeHtml(bot.phase || 'unknown')}</span>
+          <span class="phase-pill ${phaseClass(statusDetail)}">${escapeHtml(statusDetail)}</span>
         </div>
       </div>
       <div class="bot-metrics">
+        <div class="metric">Status<strong>${escapeHtml(statusDetail)}</strong></div>
         <div class="metric">Health<strong>${escapeHtml(bot.health ?? 'n/a')}</strong></div>
         <div class="metric">Hunger<strong>${escapeHtml(bot.hunger ?? 'n/a')}</strong></div>
         <div class="metric">Activity<strong>${escapeHtml(bot.activeState || 'n/a')}</strong></div>
@@ -1550,5 +1560,5 @@ elements.refreshInterval.addEventListener('change', () => {
   state.refreshIntervalMs = normalizeRefreshInterval(elements.refreshInterval.value)
   persistRefreshInterval()
   applyRefreshInterval()
-  pushEvent('info', `Auto refresh set to ${Math.round(state.refreshIntervalMs / 60000)} minute(s)`)
+  pushEvent('info', `Auto refresh set to ${formatRefreshInterval(state.refreshIntervalMs)}`)
 })
