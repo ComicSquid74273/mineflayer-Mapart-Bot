@@ -3910,6 +3910,26 @@ async function moveWindowItem(bot, fromSlot, toSlot) {
   await bot.clickWindow(toSlot, 0, 0)
 }
 
+async function moveWindowItemConfirmed(bot, window, fromSlot, toSlot, predicate, timeoutMs = 3000, pollMs = 100) {
+  await bot.clickWindow(fromSlot, 0, 0)
+  await delay(pollMs)
+  await bot.clickWindow(toSlot, 0, 0)
+  return await waitForWindowSlot(window, toSlot, predicate, timeoutMs, pollMs)
+}
+
+async function reclaimWindowSlotToInventory(bot, window, slot, timeoutMs = 2000, pollMs = 100) {
+  const stack = window?.slots?.[slot]
+  if (!stack || toNumber(stack.count, 0) <= 0) return true
+  await bot.clickWindow(slot, 0, 1)
+  return await waitForWindowSlotEmpty(window, slot, timeoutMs, pollMs)
+}
+
+async function reclaimCartographyInputs(bot, window, timeoutMs = 2000, pollMs = 100) {
+  const paneReclaimed = await reclaimWindowSlotToInventory(bot, window, 1, timeoutMs, pollMs)
+  const mapReclaimed = await reclaimWindowSlotToInventory(bot, window, 0, timeoutMs, pollMs)
+  return paneReclaimed && mapReclaimed
+}
+
 function getChestWindowSlots(window) {
   const inventoryStart = Number.isFinite(window?.inventoryStart) ? window.inventoryStart : 0
   const slots = []
@@ -3957,6 +3977,19 @@ async function waitForWindowSlot(window, slot, predicate, timeoutMs = 3000, poll
     elapsed += poll
   }
   return null
+}
+
+async function waitForWindowSlotEmpty(window, slot, timeoutMs = 3000, pollMs = 100) {
+  const timeout = Math.max(100, toNumber(timeoutMs, 3000))
+  const poll = Math.max(25, toNumber(pollMs, 100))
+  let elapsed = 0
+  while (elapsed <= timeout) {
+    const stack = window?.slots?.[slot]
+    if (!stack || toNumber(stack.count, 0) <= 0) return true
+    await delay(poll)
+    elapsed += poll
+  }
+  return false
 }
 
 async function interactWithConfiguredBlock(bot, config, node, label = 'configured block') {
@@ -4305,42 +4338,70 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
 
   if (shouldRunStep('cartography') && advanced.postPrintUseCartographyEnabled !== false && cartographyConfig?.position && hasFilledMap) {
     setPostPrintStatus('cartography')
-    let window = null
     try {
       await waitForPlatformReady(bot, config, 'postprint-cartography')
-      const filledMapForTable = findInventoryItemByType(bot, 'filled_map')
-      if (!filledMapForTable) {
-        return failPostPrint('cartography', 'No filled map available for cartography step.')
-      }
-      if (bot.heldItem?.type !== filledMapForTable.type) {
-        await bot.equip(filledMapForTable, 'hand')
-      }
-
-      window = await openBlockWindowAt(bot, cartographyConfig.position, cartographyConfig.accessPosition)
-      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
-
-      const filledMapSlot = findWindowInventorySlot(window, bot, 'filled_map')
-      const paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
-      if (filledMapSlot < 0 || paneSlot < 0) {
-        throw new Error('Missing filled map or glass pane in inventory for cartography step.')
-      }
-
-      await moveWindowItem(bot, filledMapSlot, 0)
-      await delay(toNumber(advanced.inventoryActionDelayMs, 100))
-      await moveWindowItem(bot, paneSlot, 1)
-
       const outputWaitMs = Math.max(1000, toNumber(advanced.postPrintCartographyOutputWaitMs, 4000))
-      const inputMapReady = await waitForWindowSlot(window, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, 100)
-      const inputPaneReady = await waitForWindowSlot(window, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, 100)
-      const outputStack = await waitForWindowSlot(window, 2, (stack) => stack && toNumber(stack.count, 0) > 0, outputWaitMs, 100)
+      const actionDelayMs = Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
+      const pollMs = Math.max(50, toNumber(advanced.postPrintCartographyPollMs, 100))
+      const maxAttempts = Math.max(1, toNumber(advanced.postPrintCartographyAttempts, 2))
+      let lastWindowState = ''
+      let lockedMapTaken = false
 
-      if (!inputMapReady || !inputPaneReady || !outputStack) {
-        throw new Error(`Cartography output not ready: in0=${formatWindowStack(window?.slots?.[0])} in1=${formatWindowStack(window?.slots?.[1])} out=${formatWindowStack(window?.slots?.[2])}`)
+      for (let attempt = 1; attempt <= maxAttempts && !lockedMapTaken; attempt += 1) {
+        let window = null
+        try {
+          const filledMapForTable = findInventoryItemByType(bot, 'filled_map')
+          if (!filledMapForTable) {
+            throw new Error('No filled map available for cartography step.')
+          }
+          if (bot.heldItem?.type !== filledMapForTable.type) {
+            await bot.equip(filledMapForTable, 'hand')
+          }
+
+          window = await openBlockWindowAt(bot, cartographyConfig.position, cartographyConfig.accessPosition)
+          await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+
+          const filledMapSlot = findWindowInventorySlot(window, bot, 'filled_map')
+          const paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
+          if (filledMapSlot < 0 || paneSlot < 0) {
+            throw new Error('Missing filled map or glass pane in inventory for cartography step.')
+          }
+
+          const inputMapReady = await moveWindowItemConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs)
+          await delay(actionDelayMs)
+          const inputPaneReady = await moveWindowItemConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs)
+          await delay(actionDelayMs)
+          const outputStack = await waitForWindowSlot(window, 2, (stack) => stack && toNumber(stack.count, 0) > 0, outputWaitMs, pollMs)
+          lastWindowState = `in0=${formatWindowStack(window?.slots?.[0])} in1=${formatWindowStack(window?.slots?.[1])} out=${formatWindowStack(window?.slots?.[2])}`
+
+          if (!inputMapReady || !inputPaneReady || !outputStack) {
+            await reclaimCartographyInputs(bot, window, outputWaitMs, pollMs)
+            if (attempt < maxAttempts) {
+              console.log(`[POSTPRINT-WARN] Cartography output not ready on attempt ${attempt}/${maxAttempts}: ${lastWindowState}. Reopening table and retrying.`)
+              try { window.close() } catch { }
+              window = null
+              await delay(Math.max(250, toNumber(advanced.postPrintInteractionDelayMs, 200)))
+              continue
+            }
+            throw new Error(`Cartography output not ready after ${maxAttempts} attempt(s): ${lastWindowState}`)
+          }
+
+          const mapsBeforeOutput = countInventoryByType(bot, 'filled_map')
+          await bot.clickWindow(2, 0, 1)
+          await delay(actionDelayMs)
+          await waitForWindowSlotEmpty(window, 2, outputWaitMs, pollMs)
+          await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+
+          if (countInventoryByType(bot, 'filled_map') <= mapsBeforeOutput) {
+            throw new Error(`Cartography output click did not return filled_map to inventory: ${lastWindowState}`)
+          }
+          lockedMapTaken = true
+        } finally {
+          if (window && typeof window.close === 'function') {
+            try { window.close() } catch { }
+          }
+        }
       }
-
-      await bot.clickWindow(2, 0, 1)
-      await delay(toNumber(advanced.inventoryActionDelayMs, 100))
-      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
 
       if (countInventoryByType(bot, 'filled_map') <= 0) {
         throw new Error('No filled map found in inventory after taking cartography output.')
@@ -4349,14 +4410,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       cartographySucceeded = true
       savePostPrintStep('rename_store', 'cartography-complete')
     } catch (err) {
-      if (window && typeof window.close === 'function') {
-        try { window.close() } catch { }
-      }
       return failPostPrint('cartography', `Cartography step failed: ${err?.message || err}`)
-    } finally {
-      if (window && typeof window.close === 'function') {
-        try { window.close() } catch { }
-      }
     }
   } else if (shouldRunStep('cartography')) {
     if (advanced.postPrintUseCartographyEnabled === false) cartographySucceeded = true
