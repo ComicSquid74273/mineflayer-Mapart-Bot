@@ -3150,6 +3150,8 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const itemInfo = bot.registry.itemsByName[blockName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
   const requestedStackCount = Math.max(1, toNumber(requestedPulls, 1))
+  const sameChestSyncRetries = Math.max(0, toNumber(advanced.restockSameChestSyncRetries, 2))
+  const sameChestRetryDelayMs = Math.max(200, toNumber(advanced.restockSameChestRetryDelayMs, Math.max(syncWaitMs, 1200)))
   const haveBeforeRestock = countInventoryItems(bot, blockName)
   const desiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
     ? Math.max(haveBeforeRestock + 1, toNumber(neededByBlock.get(blockName), haveBeforeRestock + requestedStackCount * stackSize))
@@ -3170,24 +3172,32 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   for (let groupIndex = 0; groupIndex < spotGroups.length; groupIndex += 1) {
     const group = spotGroups[groupIndex]
 
-    for (const spot of group) {
-      let container = null
-      try {
-        const travel = chestTravelPoint(spot)
-        if (config.errorHandling?.logErrors !== false) {
-          console.log(`[RESTOCK-CHEST] ${blockName}: chest=${spot.x},${spot.y},${spot.z} open=${travel?.x ?? spot.x},${travel?.y ?? spot.y},${travel?.z ?? spot.z} dist=${Math.round(Math.sqrt(horizontalDist2(bot, spot)))}`)
-        }
+    for (let spotIndex = 0; spotIndex < group.length; spotIndex += 1) {
+      const spot = group[spotIndex]
+      let sameChestAttempt = 0
+
+      while (sameChestAttempt <= sameChestSyncRetries) {
+        let container = null
+        let retrySameChest = false
+        let retryStartHave = 0
+        let retryTargetCount = 0
         try {
-          container = await openContainerAt(bot, spot, spot.accessPosition)
-        } catch (navErr) {
-          const navMsg = String(navErr?.message || navErr || '').toLowerCase()
-          if (navMsg.includes('goal was changed') || navMsg.includes('goalchanged')) {
-            console.log(`[RESTOCK-WARN] Navigation interrupted (GoalChanged) going to chest for ${blockName}; skipping this chest.`)
-            continue
+          const travel = chestTravelPoint(spot)
+          if (config.errorHandling?.logErrors !== false) {
+            const retryLabel = sameChestAttempt > 0 ? ` retry=${sameChestAttempt}/${sameChestSyncRetries}` : ''
+            console.log(`[RESTOCK-CHEST] ${blockName}: chest=${spot.x},${spot.y},${spot.z} open=${travel?.x ?? spot.x},${travel?.y ?? spot.y},${travel?.z ?? spot.z} dist=${Math.round(Math.sqrt(horizontalDist2(bot, spot)))}${retryLabel}`)
           }
-          throw navErr
-        }
-        await delay(toNumber(advanced.preRestockDelayMs, 200))
+          try {
+            container = await openContainerAt(bot, spot, spot.accessPosition)
+          } catch (navErr) {
+            const navMsg = String(navErr?.message || navErr || '').toLowerCase()
+            if (navMsg.includes('goal was changed') || navMsg.includes('goalchanged')) {
+              console.log(`[RESTOCK-WARN] Navigation interrupted (GoalChanged) going to chest for ${blockName}; skipping this chest.`)
+              break
+            }
+            throw navErr
+          }
+          await delay(toNumber(advanced.preRestockDelayMs, 200))
 
         // Count ALL of the target item in this chest — including partial stacks.
         // BUG FIX: old code used Math.floor(total/64) which silently skipped chests
@@ -3213,6 +3223,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
         // How much do we need vs what the chest has?
         const haveAtStart = countInventoryItems(bot, blockName)
+        retryStartHave = haveAtStart
         const stillNeedTotal = Math.max(0, desiredItemCount - haveAtStart)
         // Use empty-slots-only capacity for the chest interaction budget.
         // mineflayer's container.withdraw() can fail with "inventory full" when
@@ -3223,6 +3234,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         const partialCapacity = inventoryCapacityForItem(bot, blockName) - emptySlotCapacity
         const capacityBeforePull = emptySlotCapacity + Math.max(0, partialCapacity)
         const willPullTotal = Math.min(totalInChest, stillNeedTotal, capacityBeforePull)
+        retryTargetCount = haveAtStart + willPullTotal
 
         if (willPullTotal <= 0) {
           try { container.close() } catch { }
@@ -3363,18 +3375,43 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           return true
         }
 
-        if (stoppedForInventorySync && config.errorHandling?.logErrors !== false) {
-          const haveNow = countInventoryItems(bot, blockName)
-          console.log(`[RESTOCK-WARN] ${blockName} withdraws did not reach inventory after sync wait; have=${haveNow} target=${targetCount}. Trying next chest/replan.`)
+          if (stoppedForInventorySync) {
+            retrySameChest = sameChestAttempt < sameChestSyncRetries
+            if (config.errorHandling?.logErrors !== false) {
+              const haveNow = countInventoryItems(bot, blockName)
+              const nextAction = retrySameChest
+                ? `Retrying same chest after ${sameChestRetryDelayMs}ms.`
+                : 'Trying next chest/replan.'
+              console.log(`[RESTOCK-WARN] ${blockName} withdraws did not reach inventory after sync wait; have=${haveNow} target=${targetCount}. ${nextAction}`)
+            }
+          }
+        } catch (err) {
+          if (config.advanced?.debugPrints) {
+            console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.z}: ${err?.message || err}`)
+          }
+        } finally {
+          if (container) {
+            try { container.close() } catch { }
+          }
         }
-      } catch (err) {
-        if (config.advanced?.debugPrints) {
-          console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.z}: ${err?.message || err}`)
+
+        if (!retrySameChest) {
+          break
         }
-      } finally {
-        if (container) {
-          try { container.close() } catch { }
+
+        await delay(sameChestRetryDelayMs)
+        const haveAfterRetryWait = countInventoryItems(bot, blockName)
+        if (haveAfterRetryWait >= desiredItemCount || haveAfterRetryWait >= retryTargetCount) {
+          const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
+          if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
+          restockFailureCache.delete(blockName)
+          unavailableMaterialCache.delete(blockName)
+          return true
         }
+        if (haveAfterRetryWait > retryStartHave && config.errorHandling?.logErrors !== false) {
+          console.log(`[RESTOCK-WARN] ${blockName} inventory caught up after chest retry wait: have=${haveAfterRetryWait} target=${desiredItemCount}. Reopening same chest to finish remaining deficit.`)
+        }
+        sameChestAttempt += 1
       }
     }
   }
@@ -3665,15 +3702,19 @@ async function depositToChest(bot, config, chestPos, itemName, amount, accessPos
   }
 }
 
+async function gotoConfiguredAccess(bot, position, accessPosition, range = 2) {
+  const goalPos = accessPosition || position
+  if (!goalPos) throw new Error('Missing configured access position')
+  if (distanceToPoint(bot?.entity?.position, goalPos) <= Math.max(2.25, Number(range))) return
+  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, range))
+  gotoPromise.catch(() => {})
+  await gotoPromise
+}
+
 async function openBlockWindowAt(bot, position, accessPosition) {
   const Vec3 = bot.entity.position.constructor
   const blockPos = new Vec3(position.x, position.y, position.z)
-  const goalPos = accessPosition && bot.entity.position.distanceTo(new Vec3(accessPosition.x, accessPosition.y, accessPosition.z)) <= 6
-    ? accessPosition
-    : position
-  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
-  gotoPromise.catch(() => {})
-  await gotoPromise
+  await gotoConfiguredAccess(bot, position, accessPosition, 2)
   const block = bot.blockAt(blockPos)
   if (!block) throw new Error(`No block at ${position.x} ${position.y} ${position.z}`)
   return await bot.openBlock(block)
@@ -3682,12 +3723,7 @@ async function openBlockWindowAt(bot, position, accessPosition) {
 async function openAnvilAt(bot, position, accessPosition) {
   const Vec3 = bot.entity.position.constructor
   const blockPos = new Vec3(position.x, position.y, position.z)
-  const goalPos = accessPosition && bot.entity.position.distanceTo(new Vec3(accessPosition.x, accessPosition.y, accessPosition.z)) <= 6
-    ? accessPosition
-    : position
-  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2))
-  gotoPromise.catch(() => {})
-  await gotoPromise
+  await gotoConfiguredAccess(bot, position, accessPosition, 2)
   const block = bot.blockAt(blockPos)
   if (!block) throw new Error(`No anvil at ${position.x} ${position.y} ${position.z}`)
   return await bot.openAnvil(block)
@@ -3709,6 +3745,55 @@ function findWindowInventorySlot(window, bot, itemName) {
 async function moveWindowItem(bot, fromSlot, toSlot) {
   await bot.clickWindow(fromSlot, 0, 0)
   await bot.clickWindow(toSlot, 0, 0)
+}
+
+function formatWindowStack(stack) {
+  if (!stack) return 'empty'
+  return `${stack.name || stack.displayName || stack.type || 'unknown'}x${toNumber(stack.count, 0)}`
+}
+
+async function waitForWindowSlot(window, slot, predicate, timeoutMs = 3000, pollMs = 100) {
+  const timeout = Math.max(100, toNumber(timeoutMs, 3000))
+  const poll = Math.max(25, toNumber(pollMs, 100))
+  let elapsed = 0
+  while (elapsed <= timeout) {
+    const stack = window?.slots?.[slot]
+    if (predicate(stack, window)) return stack
+    await delay(poll)
+    elapsed += poll
+  }
+  return null
+}
+
+async function interactWithConfiguredBlock(bot, config, node, label = 'configured block') {
+  const pos = node?.position
+  if (!pos) throw new Error(`Missing ${label} position`)
+  await waitForPlatformReady(bot, config, `postprint-${label}`)
+  await gotoConfiguredAccess(bot, pos, node?.accessPosition, 2)
+  const Vec3 = bot.entity.position.constructor
+  const block = bot.blockAt(new Vec3(pos.x, pos.y, pos.z))
+  if (!block) throw new Error(`No block found at ${pos.x} ${pos.y} ${pos.z}`)
+
+  const name = String(block.name || '')
+  const isContainer = name === 'chest' ||
+    name === 'trapped_chest' ||
+    name === 'barrel' ||
+    name === 'hopper' ||
+    name === 'dispenser' ||
+    name === 'dropper' ||
+    name.endsWith('shulker_box')
+
+  if (isContainer) {
+    const container = await bot.openContainer(block)
+    await delay(toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+    try { container.close() } catch { }
+    return name
+  }
+
+  await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
+  await bot.activateBlock(block)
+  await delay(toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+  return name
 }
 
 function getMapCenterPosition(config) {
@@ -3891,7 +3976,9 @@ function isMapNamed(item, expectedName) {
 async function runPostPrintWorkflow(bot, config, context = {}) {
   const advanced = config.advanced || {}
   const machine = config.machine || {}
-  if (advanced.postPrintWorkflowEnabled === false) return
+  if (advanced.postPrintWorkflowEnabled === false) {
+    return { completed: true, finalStep: 'done' }
+  }
 
   const postPrintSteps = ['withdraw', 'fill_map', 'cartography', 'rename_store', 'reset', 'center', 'done']
   const resumeStep = postPrintSteps.includes(context.resumePostPrintStep) ? context.resumePostPrintStep : 'withdraw'
@@ -3902,28 +3989,31 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       context.savePostPrintState(nextStep, action)
     }
   }
+  const failPostPrint = (step, message) => {
+    if (message) console.log(`[POSTPRINT-WARN] ${message}`)
+    savePostPrintStep(step, `blocked-${step}`)
+    return { completed: false, failedStep: step, message: message || '' }
+  }
 
   if (resumeStep !== 'withdraw') {
     console.log(`[POSTPRINT-RESUME] Resuming post-print at step=${resumeStep}.`)
   }
-  if (resumeStep === 'done') return
+  if (resumeStep === 'done') return { completed: true, finalStep: 'done' }
 
   const mapChestPos = nearestPosition(bot, machine.mapMaterialChests || [])
-  const cartographyPos = machine.cartographyTable?.enabled ? machine.cartographyTable.position : null
+  const cartographyConfig = machine.cartographyTable?.enabled ? machine.cartographyTable : null
   const finishedChestPos = machine.finishedMapChest?.enabled ? machine.finishedMapChest.position : null
   const anvilConfig = machine.anvil?.enabled ? machine.anvil : null
-  const resetPos = machine.resetBlock?.enabled ? machine.resetBlock.position : null
+  const resetConfig = machine.resetBlock?.enabled ? machine.resetBlock : null
   let cartographySucceeded = resumeStepIndex > postPrintSteps.indexOf('cartography')
 
   if (shouldRunStep('withdraw') && !mapChestPos) {
-    console.log('[POSTPRINT-WARN] Missing map material chest position. Skipping post-print workflow.')
-    return
+    return failPostPrint('withdraw', 'Missing map material chest position. Post-print workflow cannot continue.')
   }
 
   savePostPrintStep(resumeStep, 'post-print-active')
 
   if (shouldRunStep('withdraw')) {
-    // Dump any leftover filled maps from previous runs before taking new empty map
     if (finishedChestPos) {
       const leftoverMaps = findInventoryItemsByType(bot, 'filled_map')
       for (const stack of leftoverMaps) {
@@ -3934,73 +4024,76 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       }
     }
 
+    await waitForPlatformReady(bot, config, 'postprint-withdraw')
     const gotMap = countInventoryByType(bot, 'map') > 0 || await withdrawFromChest(bot, config, mapChestPos, 'map', 1)
     const gotPane = countInventoryItems(bot, 'glass_pane') > 0 || await withdrawFromChest(bot, config, mapChestPos, 'glass_pane', 1)
     if (!gotMap || !gotPane) {
-      console.log('[POSTPRINT-WARN] Could not withdraw map/glass pane for post-print flow.')
+      return failPostPrint('withdraw', 'Could not withdraw map/glass pane for post-print flow.')
     }
     savePostPrintStep('fill_map', 'materials-withdrawn')
   }
 
   if (shouldRunStep('fill_map') && advanced.postPrintFillMapEnabled !== false) {
     const mapItem = findInventoryItemByType(bot, 'map')
-    if (mapItem) {
-      const center = getMapCenterPosition(config)
-      try {
-        await bot.pathfinder.goto(new GoalNear(center.x, center.y, center.z, 1))
-      } catch (err) {
-        console.log(`[POSTPRINT-WARN] Could not reach map center before map activation: ${err?.message || err}`)
-      }
+    if (!mapItem) {
+      return failPostPrint('fill_map', 'No empty map in inventory to fill.')
+    }
 
-      // Use the empty map to create filled_map, then immediately equip it.
-      // The bot must hold the filled map throughout the fill walk so the server
-      // sends map data packets back (otherwise the map stays blank).
-      await bot.equip(mapItem, 'hand')
-      await bot.activateItem()
-      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
-      if (typeof bot.deactivateItem === 'function') bot.deactivateItem()
+    const center = getMapCenterPosition(config)
+    await waitForPlatformReady(bot, config, 'postprint-fill-map')
+    try {
+      await bot.pathfinder.goto(new GoalNear(center.x, center.y, center.z, 1))
+    } catch (err) {
+      return failPostPrint('fill_map', `Could not reach map center before map activation: ${err?.message || err}`)
+    }
 
-      const filledMapItem = findInventoryItemByType(bot, 'filled_map')
-      if (filledMapItem) {
+    await bot.equip(mapItem, 'hand')
+    await bot.activateItem()
+    await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+    if (typeof bot.deactivateItem === 'function') bot.deactivateItem()
+
+    const filledMapItem = findInventoryItemByType(bot, 'filled_map')
+    if (!filledMapItem) {
+      return failPostPrint('fill_map', 'Map activation did not produce a filled map.')
+    }
+
+    try {
+      await bot.equip(filledMapItem, 'hand')
+      console.log('[POSTPRINT] Equipped filled map in hand for terrain data capture.')
+    } catch (err) {
+      return failPostPrint('fill_map', `Could not equip filled map: ${err?.message || err}`)
+    }
+
+    const fillSquare = Math.max(0, toNumber(config.printer?.mapFillSquareSize, 1))
+    if (fillSquare > 0) {
+      const walkPoints = [
+        { x: center.x - fillSquare, y: center.y, z: center.z + fillSquare },
+        { x: center.x + fillSquare, y: center.y, z: center.z + fillSquare },
+        { x: center.x + fillSquare, y: center.y, z: center.z - fillSquare },
+        { x: center.x - fillSquare, y: center.y, z: center.z - fillSquare }
+      ]
+
+      for (const p of walkPoints) {
+        const currentMap = findInventoryItemByType(bot, 'filled_map')
+        if (currentMap && bot.heldItem?.type !== currentMap.type) {
+          await bot.equip(currentMap, 'hand')
+        }
         try {
-          await bot.equip(filledMapItem, 'hand')
-          console.log('[POSTPRINT] Equipped filled map in hand for terrain data capture.')
+          await bot.pathfinder.goto(new GoalNear(p.x, p.y, p.z, 1))
         } catch (err) {
-          console.log(`[POSTPRINT-WARN] Could not equip filled map: ${err?.message || err}`)
+          return failPostPrint('fill_map', `Map fill walk failed: ${err?.message || err}`)
+        }
+        const stillHolding = findInventoryItemByType(bot, 'filled_map')
+        if (stillHolding && bot.heldItem?.type !== stillHolding.type) {
+          await bot.equip(stillHolding, 'hand')
         }
       }
-
-      const fillSquare = Math.max(0, toNumber(config.printer?.mapFillSquareSize, 1))
-      if (fillSquare > 0) {
-        const walkPoints = [
-          { x: center.x - fillSquare, y: center.y, z: center.z + fillSquare },
-          { x: center.x + fillSquare, y: center.y, z: center.z + fillSquare },
-          { x: center.x + fillSquare, y: center.y, z: center.z - fillSquare },
-          { x: center.x - fillSquare, y: center.y, z: center.z - fillSquare }
-        ]
-
-        for (const p of walkPoints) {
-          const currentMap = findInventoryItemByType(bot, 'filled_map')
-          if (currentMap && bot.heldItem?.type !== currentMap.type) {
-            await bot.equip(currentMap, 'hand')
-          }
-          try {
-            await bot.pathfinder.goto(new GoalNear(p.x, p.y, p.z, 1))
-          } catch {
-            break
-          }
-          // Re-equip after each pathfinder call in case hotbar slot was swapped
-          const stillHolding = findInventoryItemByType(bot, 'filled_map')
-          if (stillHolding && bot.heldItem?.type !== stillHolding.type) {
-            await bot.equip(stillHolding, 'hand')
-          }
-        }
-      }
-    } else {
-      console.log('[POSTPRINT-WARN] No empty map in inventory to fill.')
     }
 
     await delay(toNumber(advanced.postPrintMapSettleDelayMs, 1500))
+    if (countInventoryByType(bot, 'filled_map') <= 0) {
+      return failPostPrint('fill_map', 'Filled map disappeared before cartography step.')
+    }
     savePostPrintStep('cartography', 'map-filled')
   } else if (shouldRunStep('fill_map')) {
     savePostPrintStep('cartography', 'fill-map-skipped')
@@ -4008,60 +4101,83 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
 
   const hasFilledMap = countInventoryByType(bot, 'filled_map') > 0
 
-  if (shouldRunStep('cartography') && advanced.postPrintUseCartographyEnabled !== false && cartographyPos && hasFilledMap) {
+  if (shouldRunStep('cartography') && advanced.postPrintUseCartographyEnabled !== false && cartographyConfig?.position && hasFilledMap) {
+    let window = null
     try {
+      await waitForPlatformReady(bot, config, 'postprint-cartography')
       const filledMapForTable = findInventoryItemByType(bot, 'filled_map')
-      if (filledMapForTable && bot.heldItem?.type !== filledMapForTable.type) {
+      if (!filledMapForTable) {
+        return failPostPrint('cartography', 'No filled map available for cartography step.')
+      }
+      if (bot.heldItem?.type !== filledMapForTable.type) {
         await bot.equip(filledMapForTable, 'hand')
       }
 
-      const window = await openBlockWindowAt(bot, cartographyPos)
+      window = await openBlockWindowAt(bot, cartographyConfig.position, cartographyConfig.accessPosition)
       await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
 
       const filledMapSlot = findWindowInventorySlot(window, bot, 'filled_map')
       const paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
-
-      if (filledMapSlot >= 0 && paneSlot >= 0) {
-        await moveWindowItem(bot, filledMapSlot, 0)
-        await delay(toNumber(advanced.inventoryActionDelayMs, 100))
-        await moveWindowItem(bot, paneSlot, 1)
-        await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
-
-        const outputStack = window.slots[2]
-        if (outputStack && outputStack.count > 0) {
-          await bot.clickWindow(2, 0, 1)
-          await delay(toNumber(advanced.inventoryActionDelayMs, 100))
-          cartographySucceeded = true
-        }
-      } else {
-        console.log('[POSTPRINT-WARN] Missing filled map or glass pane in inventory for cartography step.')
+      if (filledMapSlot < 0 || paneSlot < 0) {
+        throw new Error('Missing filled map or glass pane in inventory for cartography step.')
       }
 
-      if (typeof window.close === 'function') window.close()
+      await moveWindowItem(bot, filledMapSlot, 0)
+      await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+      await moveWindowItem(bot, paneSlot, 1)
+
+      const outputWaitMs = Math.max(1000, toNumber(advanced.postPrintCartographyOutputWaitMs, 4000))
+      const inputMapReady = await waitForWindowSlot(window, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, 100)
+      const inputPaneReady = await waitForWindowSlot(window, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, 100)
+      const outputStack = await waitForWindowSlot(window, 2, (stack) => stack && toNumber(stack.count, 0) > 0, outputWaitMs, 100)
+
+      if (!inputMapReady || !inputPaneReady || !outputStack) {
+        throw new Error(`Cartography output not ready: in0=${formatWindowStack(window?.slots?.[0])} in1=${formatWindowStack(window?.slots?.[1])} out=${formatWindowStack(window?.slots?.[2])}`)
+      }
+
+      await bot.clickWindow(2, 0, 1)
+      await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+
+      if (countInventoryByType(bot, 'filled_map') <= 0) {
+        throw new Error('No filled map found in inventory after taking cartography output.')
+      }
+
+      cartographySucceeded = true
+      savePostPrintStep('rename_store', 'cartography-complete')
     } catch (err) {
-      console.log(`[POSTPRINT-WARN] Cartography step failed: ${err?.message || err}`)
+      if (window && typeof window.close === 'function') {
+        try { window.close() } catch { }
+      }
+      return failPostPrint('cartography', `Cartography step failed: ${err?.message || err}`)
+    } finally {
+      if (window && typeof window.close === 'function') {
+        try { window.close() } catch { }
+      }
     }
-    savePostPrintStep('rename_store', cartographySucceeded ? 'cartography-complete' : 'cartography-failed')
   } else if (shouldRunStep('cartography')) {
     if (advanced.postPrintUseCartographyEnabled === false) cartographySucceeded = true
+    if (advanced.postPrintUseCartographyEnabled !== false && !cartographyConfig?.position && hasFilledMap) {
+      return failPostPrint('cartography', 'Cartography table is not configured for post-print map locking.')
+    }
     savePostPrintStep('rename_store', 'cartography-skipped')
   }
 
   if (shouldRunStep('rename_store') && cartographySucceeded) {
+    await waitForPlatformReady(bot, config, 'postprint-rename-store')
     await refillXpForPostPrint(bot, config)
     const renamedTarget = await renameFinishedMap(bot, config, anvilConfig, context.sourceName)
 
-    if (advanced.postPrintStoreFinishedMapEnabled !== false && finishedChestPos && (cartographySucceeded || advanced.postPrintUseCartographyEnabled === false)) {
+    if (advanced.postPrintRenameMapEnabled !== false && advanced.postPrintRequireRenameBeforeStore !== false && !renamedTarget) {
+      return failPostPrint('rename_store', 'Rename is required before store, but no verified renamed map exists.')
+    }
+
+    if (advanced.postPrintStoreFinishedMapEnabled !== false && finishedChestPos) {
       const filledMapId = getItemId(bot, 'filled_map')
       const filledMaps = bot.inventory.items().filter((entry) => entry.type === filledMapId)
       let mapsToStore = filledMaps
 
       if (advanced.postPrintRenameMapEnabled !== false && advanced.postPrintRequireRenameBeforeStore !== false) {
-        if (!renamedTarget) {
-          console.log('[POSTPRINT-WARN] Rename is required before store, but no verified renamed map exists. Leaving map in inventory for retry.')
-          return
-        }
-
         mapsToStore = filledMaps.filter((entry) => isMapNamed(entry, renamedTarget))
         const unverifiedCount = filledMaps.length - mapsToStore.length
         if (unverifiedCount > 0) {
@@ -4071,10 +4187,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
 
       if (!mapsToStore.length && filledMaps.length > 0) {
         if (advanced.postPrintRequireRenameBeforeStore !== false) {
-          console.log('[POSTPRINT-WARN] No verified filled map selected for storage. Leaving map in inventory for retry.')
-          return
+          return failPostPrint('rename_store', 'No verified filled map selected for storage.')
         }
-
         console.log('[POSTPRINT-WARN] No verified renamed map selected, but strict rename-store is disabled. Storing all filled maps anyway.')
         mapsToStore = filledMaps
       }
@@ -4085,31 +4199,32 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
         if (hints.length) {
           console.log(`[POSTPRINT-DEBUG] Depositing map with name hints: ${hints.join(' | ')}`)
         }
-        await depositToChest(bot, config, finishedChestPos, 'filled_map', stack.count, machine.finishedMapChest?.accessPosition)
+        const stored = await depositToChest(bot, config, finishedChestPos, 'filled_map', stack.count, machine.finishedMapChest?.accessPosition)
+        if (!stored) {
+          return failPostPrint('rename_store', 'Could not store finished filled map in output chest.')
+        }
       }
     }
+
     savePostPrintStep('reset', 'map-renamed-and-stored')
   } else if (shouldRunStep('rename_store') && advanced.postPrintUseCartographyEnabled !== false) {
-    console.log('[POSTPRINT-WARN] Skipping XP refill and rename because cartography did not complete.')
-    savePostPrintStep('reset', 'rename-store-skipped')
+    return failPostPrint('rename_store', 'Skipping XP refill and rename because cartography did not complete.')
   } else if (shouldRunStep('rename_store')) {
     savePostPrintStep('reset', 'rename-store-disabled')
   }
 
   const shouldInteractReset = advanced.postPrintResetEnabled !== false
-    && resetPos
+    && resetConfig?.position
     && advanced.postPrintSkipResetInteraction !== true
 
   if (shouldRunStep('reset') && shouldInteractReset) {
     try {
-      const resetContainer = await openContainerAt(bot, resetPos, machine.resetBlock?.accessPosition)
-      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
-      resetContainer.close()
+      await interactWithConfiguredBlock(bot, config, resetConfig, 'reset-block')
     } catch (err) {
-      console.log(`[POSTPRINT-WARN] Reset step failed: ${err?.message || err}`)
+      return failPostPrint('reset', `Reset step failed: ${err?.message || err}`)
     }
     savePostPrintStep('center', 'reset-complete')
-  } else if (shouldRunStep('reset') && advanced.postPrintSkipResetInteraction === true && resetPos) {
+  } else if (shouldRunStep('reset') && advanced.postPrintSkipResetInteraction === true && resetConfig?.position) {
     console.log('[POSTPRINT] Reset interaction skipped by config. Walking to center step directly.')
     savePostPrintStep('center', 'reset-skipped-by-config')
   } else if (shouldRunStep('reset')) {
@@ -4120,6 +4235,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     const center = getMapCenterPosition(config)
 
     try {
+      await waitForPlatformReady(bot, config, 'postprint-center')
       await bot.pathfinder.goto(new GoalNear(center.x, center.y, center.z, 1))
       const centerWaitMs = Math.max(0, toNumber(advanced.postPrintCenterWaitMs, 3000))
       if (centerWaitMs > 0) {
@@ -4127,12 +4243,38 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
         await delay(centerWaitMs)
       }
     } catch (err) {
-      console.log(`[POSTPRINT-WARN] Walk-to-center step failed: ${err?.message || err}`)
+      return failPostPrint('center', `Walk-to-center step failed: ${err?.message || err}`)
     }
     savePostPrintStep('done', 'center-complete')
   } else if (shouldRunStep('center')) {
     savePostPrintStep('done', 'center-skipped')
   }
+
+  return { completed: true, finalStep: 'done' }
+}
+
+async function runPostPrintWorkflowWithRecovery(bot, config, makeContext, initialStep = 'withdraw', options = {}) {
+  const advanced = config.advanced || {}
+  const maxRecoveryAttempts = Math.max(0, toNumber(advanced.postPrintWorkflowRecoveryAttempts, 1))
+  const recoveryDelayMs = Math.max(250, toNumber(advanced.postPrintWorkflowRecoveryDelayMs, 1500))
+  const label = options.label || 'post-print'
+  let resumeStep = initialStep
+
+  for (let attempt = 0; attempt <= maxRecoveryAttempts; attempt += 1) {
+    const result = await runPostPrintWorkflow(bot, config, makeContext({ resumePostPrintStep: resumeStep }))
+    if (result?.completed) return result
+
+    const failedStep = result?.failedStep || resumeStep || 'unknown'
+    if (attempt >= maxRecoveryAttempts) return result
+
+    console.log(`[POSTPRINT-RECOVER] ${label} blocked at step=${failedStep}. Retrying that step (${attempt + 1}/${maxRecoveryAttempts}) after ${recoveryDelayMs}ms.`)
+    stopBotMovement(bot)
+    await delay(recoveryDelayMs)
+    await waitForPlatformReady(bot, config, `postprint-recover-${failedStep}`)
+    resumeStep = failedStep
+  }
+
+  return { completed: false, failedStep: resumeStep }
 }
 
 function countInventoryItems(bot, itemName) {
@@ -6725,7 +6867,16 @@ async function runPrint(bot, config) {
     })
   }
 
-  await runPostPrintWorkflow(bot, config, makePostPrintContext())
+  const postPrintResult = await runPostPrintWorkflowWithRecovery(bot, config, makePostPrintContext, resumePostPrintStep, { label: 'main-run' })
+  if (!postPrintResult?.completed) {
+    console.log(`[POSTPRINT-WARN] Post-print workflow stopped at step=${postPrintResult?.failedStep || 'unknown'}. Job will remain pending until post-print completes.`)
+    return {
+      sourceType: input.sourceType,
+      sourcePath: input.sourcePath,
+      sourceName: input.sourceName,
+      didWork: true
+    }
+  }
     await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
 
     if (files.moveToFinishedFolder) {
@@ -6778,7 +6929,16 @@ async function runPrint(bot, config) {
     })
   }
 
-  await runPostPrintWorkflow(bot, config, makePostPrintContext())
+  const postPrintOnlyResult = await runPostPrintWorkflowWithRecovery(bot, config, makePostPrintContext, resumePostPrintStep, { label: 'test-only' })
+  if (!postPrintOnlyResult?.completed) {
+    console.log(`[POSTPRINT-WARN] Post-print test-only workflow stopped at step=${postPrintOnlyResult?.failedStep || 'unknown'}.`)
+    return {
+      sourceType: input.sourceType,
+      sourcePath: input.sourcePath,
+      sourceName: input.sourceName,
+      didWork: true
+    }
+  }
     await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
     return {
       sourceType: input.sourceType,
@@ -7226,7 +7386,16 @@ async function runPrint(bot, config) {
     })
   }
 
-  await runPostPrintWorkflow(bot, config, makePostPrintContext())
+  const postPrintResult = await runPostPrintWorkflowWithRecovery(bot, config, makePostPrintContext, resumePostPrintStep, { label: 'resume-run' })
+  if (!postPrintResult?.completed) {
+    console.log(`[POSTPRINT-WARN] Post-print workflow stopped at step=${postPrintResult?.failedStep || 'unknown'}. Job will remain pending until post-print completes.`)
+    return {
+      sourceType: input.sourceType,
+      sourcePath: input.sourcePath,
+      sourceName: input.sourceName,
+      didWork: true
+    }
+  }
 
   await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
 
