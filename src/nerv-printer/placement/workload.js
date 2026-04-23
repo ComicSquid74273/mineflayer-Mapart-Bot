@@ -48,7 +48,7 @@ function createPlacementWorkload(deps) {
 
   function isTransientPlacementReason(reason) {
     const text = String(reason || '')
-    return text === 'unconfirmed-place'
+    return text === 'unconfirmed-place' || text.startsWith('held-item-desync-')
   }
 
   function shouldEmergencyRestockMissingItem(bot, blockName) {
@@ -184,8 +184,12 @@ function createPlacementWorkload(deps) {
                 }
                 if (allowEmergencyRestock && String(result.reason || '').startsWith('missing-item-')) {
                   const haveNow = countInventoryItems(bot, target.blockName)
-                  if (config.errorHandling?.logErrors !== false && haveNow > 0) {
-                    console.log(`[NERV-SCANNER-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; forcing emergency refill instead of bounded retries.`)
+                  if (haveNow > 0) {
+                    if (config.errorHandling?.logErrors !== false) {
+                      console.log(`[NERV-SCANNER-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; retrying hotbar swap instead of emergency refill.`)
+                    }
+                    pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
+                    break
                   }
                   emergencyRestockBlock = target.blockName
                   active = false
@@ -349,22 +353,18 @@ function createPlacementWorkload(deps) {
 
                 if (String(result.reason || '').startsWith('missing-item-')) {
                   const haveNow = countInventoryItems(bot, target.blockName)
-                  if (allowEmergencyRestock) {
+                  if (allowEmergencyRestock && haveNow <= 0) {
                     hardStops += 1
-                    if (config.errorHandling?.logErrors !== false && haveNow > 0) {
-                      console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; forcing emergency refill instead of bounded retries.`)
-                    }
                     emergencyRestockBlock = target.blockName
                     active = false
                     lastTickTime = Date.now()
                     break
                   }
-                  if (config.errorHandling?.logErrors !== false) {
-                    console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; emergency restock disabled, stopping bounded retry path.`)
+                  if (config.errorHandling?.logErrors !== false && haveNow > 0) {
+                    console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; retrying hotbar swap instead of emergency refill.`)
                   }
+                  pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
                   lastTickTime = Date.now()
-                  hardStops += 1
-                  active = false
                   break
                 }
               }

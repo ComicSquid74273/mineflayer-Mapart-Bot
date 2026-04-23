@@ -3048,26 +3048,127 @@ function calibrateTargetsForWorld(bot, targets, config) {
   }))
 }
 
-async function equipMaterial(bot, config, blockName, options = {}) {
+function getHotbarWindowSlot(index) {
+  return 36 + Math.max(0, Math.min(8, Math.floor(toNumber(index, 0))))
+}
+
+function findHotbarIndexForItem(bot, blockName) {
+  const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
+  for (let index = 0; index < 9; index += 1) {
+    const stack = slots[getHotbarWindowSlot(index)]
+    if (stack?.name === blockName && toNumber(stack.count, 0) > 0) return index
+  }
+  return -1
+}
+
+function findBestInventorySlotForItem(bot, blockName) {
+  return bot.inventory.items()
+    .filter((entry) => entry.name === blockName && Number.isFinite(entry.slot))
+    .sort((a, b) => {
+      const aHotbar = a.slot >= 36 && a.slot <= 44 ? 1 : 0
+      const bHotbar = b.slot >= 36 && b.slot <= 44 ? 1 : 0
+      if (aHotbar !== bHotbar) return aHotbar - bHotbar
+      return toNumber(b.count, 0) - toNumber(a.count, 0)
+    })[0] || null
+}
+
+function chooseMaterialHotbarIndex(bot, blockName) {
+  const existing = findHotbarIndexForItem(bot, blockName)
+  if (existing >= 0) return existing
+
+  const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
+  for (let index = 0; index < 9; index += 1) {
+    if (!slots[getHotbarWindowSlot(index)]) return index
+  }
+
+  const current = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0
+  return Math.max(0, Math.min(8, current))
+}
+
+async function waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs = 900, pollMs = 75) {
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  const windowSlot = getHotbarWindowSlot(hotbarIndex)
+  while (Date.now() <= deadline) {
+    const stack = bot.inventory?.slots?.[windowSlot]
+    if (stack?.name === blockName && toNumber(stack.count, 0) > 0) return true
+    await delay(Math.max(25, pollMs))
+  }
+  const stack = bot.inventory?.slots?.[windowSlot]
+  return stack?.name === blockName && toNumber(stack.count, 0) > 0
+}
+
+async function waitForSelectedMaterialReady(bot, blockName, timeoutMs = 900, pollMs = 75) {
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (Date.now() <= deadline) {
+    const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+    const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
+    if (String(bot.heldItem?.name || '') === blockName || selectedStack?.name === blockName) return true
+    await delay(Math.max(25, pollMs))
+  }
+  const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+  const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
+  return String(bot.heldItem?.name || '') === blockName || selectedStack?.name === blockName
+}
+
+async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   const advanced = config.advanced || {}
   const fastSwap = options.fastSwap === true
+  const timeoutMs = Math.max(100, toNumber(advanced.inventoryDesyncEquipTimeoutMs, 900))
+  const pollMs = Math.max(25, toNumber(advanced.inventoryDesyncEquipPollMs, 75))
+  const hotbarIndex = chooseMaterialHotbarIndex(bot, blockName)
+  const preSwapDelayMs = fastSwap ? toNumber(advanced.scannerPreSwapDelayMs, 0) : toNumber(advanced.preSwapDelayMs, 100)
+  const postSwapDelayMs = fastSwap ? toNumber(advanced.scannerPostSwapDelayMs, 0) : toNumber(advanced.postSwapDelayMs, 100)
+
+  if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
+
+  const wasSprinting = bot.controlState?.sprint === true
+  if (fastSwap || wasSprinting) bot.setControlState('sprint', false)
+
+  try {
+    const existingHotbar = findHotbarIndexForItem(bot, blockName)
+    if (existingHotbar >= 0) {
+      if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(existingHotbar)
+      else bot.quickBarSlot = existingHotbar
+      if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs, pollMs)) return false
+      if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
+      return true
+    }
+
+    const source = findBestInventorySlotForItem(bot, blockName)
+    if (!source) return false
+
+    if (source.slot >= 36 && source.slot <= 44) {
+      const sourceHotbarIndex = source.slot - 36
+      if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(sourceHotbarIndex)
+      else bot.quickBarSlot = sourceHotbarIndex
+      if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs, pollMs)) return false
+      if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
+      return true
+    }
+
+    await bot.clickWindow(source.slot, hotbarIndex, 2)
+    const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
+    if (!swapped) return false
+    if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(hotbarIndex)
+    else bot.quickBarSlot = hotbarIndex
+    if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs, pollMs)) return false
+    if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
+    return true
+  } finally {
+    if (wasSprinting) bot.setControlState('sprint', true)
+  }
+}
+
+async function equipMaterial(bot, config, blockName, options = {}) {
   const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
   const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
 
   if (inventoryItem) {
-    const preSwapDelayMs = fastSwap
-      ? toNumber(advanced.scannerPreSwapDelayMs, 0)
-      : toNumber(advanced.preSwapDelayMs, 100)
-    const postSwapDelayMs = fastSwap
-      ? toNumber(advanced.scannerPostSwapDelayMs, 0)
-      : toNumber(advanced.postSwapDelayMs, 100)
-    if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
-    if (fastSwap) bot.setControlState('sprint', false)
-    await bot.equip(inventoryItem, 'hand')
-    if (fastSwap) bot.setControlState('sprint', true)
-    if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
-    unavailableMaterialCache.delete(blockName)
-    return true
+    const selected = await selectHotbarMaterial(bot, config, blockName, options)
+    if (selected) {
+      unavailableMaterialCache.delete(blockName)
+      return true
+    }
   }
 
   if (unavailableMaterialCache.has(blockName)) {
@@ -3081,35 +3182,29 @@ async function recoverMissingItemInventoryDesync(bot, config, blockName, label =
   const advanced = config.advanced || {}
   const have = countInventoryItems(bot, blockName)
   if (have <= 0) return false
-  if (String(bot.heldItem?.name || '') === blockName) return true
+  if (String(bot.heldItem?.name || '') === blockName || findHotbarIndexForItem(bot, blockName) === bot.quickBarSlot) return true
 
   const attempts = Math.max(1, toNumber(advanced.inventoryDesyncEquipAttempts, 2))
   const timeoutMs = Math.max(100, toNumber(advanced.inventoryDesyncEquipTimeoutMs, 900))
   const pollMs = Math.max(25, toNumber(advanced.inventoryDesyncEquipPollMs, 75))
-  const wasSprinting = bot.controlState?.sprint === true
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const inventoryItem = bot.inventory.items()
-      .filter((entry) => entry.name === blockName)
-      .sort((a, b) => toNumber(b.count, 0) - toNumber(a.count, 0))[0]
-    if (!inventoryItem) break
-
     try {
-      bot.setControlState('sprint', false)
-      await bot.equip(inventoryItem, 'hand')
+      const selected = await selectHotbarMaterial(bot, config, blockName, { fastSwap: true })
+      if (!selected) return false
     } catch (err) {
       if (config.errorHandling?.logErrors !== false) {
-        console.log(`[INVENTORY-DESYNC-WARN] ${label}: equip ${blockName} attempt=${attempt}/${attempts} failed: ${err?.message || err}`)
+        console.log(`[INVENTORY-DESYNC-WARN] ${label}: hotbar swap ${blockName} attempt=${attempt}/${attempts} failed: ${err?.message || err}`)
       }
-    } finally {
-      if (wasSprinting) bot.setControlState('sprint', true)
     }
 
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      if (String(bot.heldItem?.name || '') === blockName) {
+      const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+      const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
+      if (String(bot.heldItem?.name || '') === blockName || selectedStack?.name === blockName) {
         if (config.errorHandling?.logErrors !== false) {
-          console.log(`[INVENTORY-DESYNC-RECOVER] ${label}: equipped ${blockName}; inventory=${countInventoryItems(bot, blockName)}.`)
+          console.log(`[INVENTORY-DESYNC-RECOVER] ${label}: selected ${blockName}; inventory=${countInventoryItems(bot, blockName)}.`)
         }
         return true
       }
@@ -5820,7 +5915,13 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
 
   if (String(bot.heldItem?.name || '') !== target.blockName) {
     const equipped = await equipMaterial(bot, config, target.blockName, { fastSwap: isFastNoWaitPlacement })
-    if (!equipped || String(bot.heldItem?.name || '') !== target.blockName) {
+    const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+    const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
+    const selectedMaterialReady = selectedStack?.name === target.blockName || String(bot.heldItem?.name || '') === target.blockName
+    if (!equipped || !selectedMaterialReady) {
+      if (countInventoryItems(bot, target.blockName) > 0) {
+        return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
+      }
       return { state: 'skip', reason: `missing-item-${target.blockName}` }
     }
   }
@@ -5876,6 +5977,9 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       lastPlaceError = err
       const errMsg = String(err?.message || '').toLowerCase()
       if (errMsg.includes('must be holding an item')) {
+        if (countInventoryItems(bot, target.blockName) > 0) {
+          return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
+        }
         return { state: 'skip', reason: `missing-item-${target.blockName}` }
       }
       if (isFastNoWaitPlacement) {
@@ -6417,7 +6521,10 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
     const actual = bot.blockAt(new Vec3Confirm(target.position.x, target.position.y, target.position.z))
     return actual?.name === target.blockName
   }
-  const isTransientPlacementReason = (reason) => String(reason || '') === 'unconfirmed-place'
+  const isTransientPlacementReason = (reason) => {
+    const text = String(reason || '')
+    return text === 'unconfirmed-place' || text.startsWith('held-item-desync-')
+  }
   const shouldEmergencyRestockMissingItem = (blockName) => countInventoryItems(bot, blockName) <= 0
   const getUnresolvedTargets = (targets) => getUniqueTargets(scanPlacementErrors(bot, targets, {
     config,
@@ -6481,8 +6588,13 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
               }
               if (String(result.reason || '').startsWith('missing-item-')) {
                 const haveNow = countInventoryItems(bot, target.blockName)
-                if (config.errorHandling?.logErrors !== false && haveNow > 0) {
-                  console.log(`[${label}-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; forcing emergency refill instead of bounded retries.`)
+                if (haveNow > 0) {
+                  if (config.errorHandling?.logErrors !== false) {
+                    console.log(`[${label}-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; retrying hotbar swap instead of emergency refill.`)
+                  }
+                  pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
+                  retryPriority.add(key)
+                  continue
                 }
                 emergencyRestockBlock = target.blockName
                 active = false
@@ -6656,8 +6768,13 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
               }
               if (allowEmergencyRestock && String(result.reason || '').startsWith('missing-item-')) {
                 const haveNow = countInventoryItems(bot, target.blockName)
-                if (config.errorHandling?.logErrors !== false && haveNow > 0) {
-                  console.log(`[NERV-SCANNER-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; forcing emergency refill instead of bounded retries.`)
+                if (haveNow > 0) {
+                  if (config.errorHandling?.logErrors !== false) {
+                    console.log(`[NERV-SCANNER-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; retrying hotbar swap instead of emergency refill.`)
+                  }
+                  retryPriority.add(key)
+                  await delay(inventoryDesyncCooldownMs)
+                  break
                 }
                 emergencyRestockBlock = target.blockName
                 active = false
@@ -6896,22 +7013,19 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else {
                 const haveNow = countInventoryItems(bot, target.blockName)
-                if (allowEmergencyRestock) {
+                if (allowEmergencyRestock && haveNow <= 0) {
                   hardStops += 1
-                  if (config.errorHandling?.logErrors !== false && haveNow > 0) {
-                    console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; forcing emergency refill instead of bounded retries.`)
-                  }
                   emergencyRestockBlock = target.blockName
                   active = false
                   lastTickTime = Date.now()
                   break
                 }
-                if (config.errorHandling?.logErrors !== false) {
-                  console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; emergency restock disabled, stopping bounded retry path.`)
+                if (config.errorHandling?.logErrors !== false && haveNow > 0) {
+                  console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; retrying hotbar swap instead of emergency refill.`)
                 }
+                pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
+                retryPriority.add(key)
                 lastTickTime = Date.now()
-                hardStops += 1
-                active = false
                 break
               }
             }
