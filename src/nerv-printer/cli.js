@@ -3085,6 +3085,48 @@ function chooseMaterialHotbarIndex(bot, blockName) {
   return Math.max(0, Math.min(8, current))
 }
 
+function findNeutralHotbarIndex(bot, blockedItemNames = []) {
+  const blocked = new Set(blockedItemNames.map((name) => String(name || '').trim()).filter(Boolean))
+  const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
+  for (let index = 0; index < 9; index += 1) {
+    if (!slots[getHotbarWindowSlot(index)]) return index
+  }
+  for (let index = 0; index < 9; index += 1) {
+    const stack = slots[getHotbarWindowSlot(index)]
+    if (stack && !blocked.has(stack.name)) return index
+  }
+  return -1
+}
+
+async function waitForNeutralHeldItem(bot, blockedItemNames = [], timeoutMs = 1000, pollMs = 50) {
+  const blocked = new Set(blockedItemNames.map((name) => String(name || '').trim()).filter(Boolean))
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (Date.now() <= deadline) {
+    const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+    const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
+    const heldName = String(bot.heldItem?.name || '')
+    const selectedName = String(selectedStack?.name || '')
+    if (!blocked.has(heldName) && !blocked.has(selectedName)) return true
+    await delay(Math.max(25, pollMs))
+  }
+  const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+  const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
+  const heldName = String(bot.heldItem?.name || '')
+  const selectedName = String(selectedStack?.name || '')
+  return !blocked.has(heldName) && !blocked.has(selectedName)
+}
+
+async function selectNeutralHotbarForWindow(bot, blockedItemNames = [], reason = 'window-interaction') {
+  const index = findNeutralHotbarIndex(bot, blockedItemNames)
+  if (index < 0) return false
+  if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(index)
+  else bot.quickBarSlot = index
+  const ok = await waitForNeutralHeldItem(bot, blockedItemNames, 1200, 50)
+  const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+  console.log(`[WINDOW-HAND] ${reason}: selected hotbar=${index} stack=${formatWindowStack(stack)} held=${formatWindowStack(bot.heldItem)} neutral=${ok}`)
+  return ok
+}
+
 async function waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs = 900, pollMs = 75) {
   const deadline = Date.now() + Math.max(0, timeoutMs)
   const windowSlot = getHotbarWindowSlot(hotbarIndex)
@@ -4942,6 +4984,10 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
         }
       }
       closeCurrentWindowIfOpen(bot, 'postprint-cartography')
+      const neutralHandReady = await selectNeutralHotbarForWindow(bot, ['filled_map', 'glass_pane'], 'postprint-cartography')
+      if (!neutralHandReady) {
+        throw new Error('Could not select a neutral hotbar slot before cartography window interaction.')
+      }
       const outputWaitMs = Math.max(1000, toNumber(advanced.postPrintCartographyOutputWaitMs, 4000))
       const actionDelayMs = Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
       const pollMs = Math.max(50, toNumber(advanced.postPrintCartographyPollMs, 100))
