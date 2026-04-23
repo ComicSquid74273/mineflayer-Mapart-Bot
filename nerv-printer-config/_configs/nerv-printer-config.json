@@ -299,7 +299,7 @@
     "inventoryMaxMaterialTypes": 16,
     "inventoryPlanUseWorldState": false,
     "sneakOnDispenserOnly": true,
-    "resetChestWaitMs": 500,
+    "resetChestWaitMs": 50,
     "rescanEnabled": true,
     "rescanAfterPrinting": true,
     "rescanRepairMissingBlocks": true,
