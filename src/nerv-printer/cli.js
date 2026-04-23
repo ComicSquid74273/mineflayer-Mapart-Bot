@@ -4603,6 +4603,24 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   if (shouldRunStep('rename_store') && cartographySucceeded) {
     setPostPrintStatus('rename_store')
     await waitForPlatformReady(bot, config, 'postprint-rename-store')
+
+    if (countInventoryByType(bot, 'filled_map') <= 0) {
+      const materializeWaitMs = Math.max(500, toNumber(advanced.postPrintInventoryMaterializeWaitMs, 6000))
+      const materializePollMs = Math.max(50, toNumber(advanced.postPrintChestPollMs, 100))
+      await waitForInventoryCountChangeOrTarget(
+        bot,
+        'filled_map',
+        0,
+        1,
+        materializeWaitMs,
+        materializePollMs,
+        Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
+      )
+      if (countInventoryByType(bot, 'filled_map') <= 0) {
+        return failPostPrint('rename_store', 'Cartography output was confirmed in the table window, but the filled map is not visible in bot inventory for rename/store yet.')
+      }
+    }
+
     await refillXpForPostPrint(bot, config)
     const renamedTarget = await renameFinishedMap(bot, config, anvilConfig, context.sourceName)
 
