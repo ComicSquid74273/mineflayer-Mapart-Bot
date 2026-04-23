@@ -3503,30 +3503,9 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
         await delay(toNumber(advanced.postRestockDelayMs, 300))
 
-        // On high-latency servers (e.g. 6b6t), inventory update packets may arrive after the
-        // pull loop exits. If we issued all planned withdrawals but actual inventory hasn't
-        // caught up yet, poll briefly before the final success check rather than returning false.
-        if (!stoppedForInventoryFull && !stoppedForInventorySync && observedHave >= targetCount) {
-          const haveNow = countInventoryItems(bot, blockName)
-          if (haveNow < targetCount) {
-            const pollMs = 200
-            let elapsed = 0
-            while (elapsed < syncWaitMs) {
-              await delay(pollMs)
-              elapsed += pollMs
-              if (countInventoryItems(bot, blockName) >= targetCount) break
-            }
-            if (config.errorHandling?.logErrors !== false) {
-              const haveAfterSync = countInventoryItems(bot, blockName)
-              if (haveAfterSync < targetCount) {
-                console.log(`[RESTOCK-WARN] ${blockName} inventory still lagging after ${syncWaitMs}ms sync wait: have=${haveAfterSync} target=${targetCount}`)
-              }
-            }
-            if (countInventoryItems(bot, blockName) < targetCount) {
-              stoppedForInventorySync = true
-            }
-          }
-        }
+        // If observedHave reached target via the open container window, the quick-move
+        // transaction already succeeded. bot.inventory may remain stale until close, so
+        // do not warn/retry based on that secondary cache.
 
         if (stoppedForInventoryFull) {
           const haveNow = countInventoryItems(bot, blockName)
