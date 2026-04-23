@@ -4123,6 +4123,26 @@ async function moveWindowItemConfirmed(bot, window, fromSlot, toSlot, predicate,
   return await waitForWindowSlot(window, toSlot, predicate, timeoutMs, pollMs)
 }
 
+async function moveOneWindowItemConfirmed(bot, window, fromSlot, toSlot, predicate, timeoutMs = 3000, pollMs = 100) {
+  const sourceStack = window?.slots?.[fromSlot]
+  const sourceCount = toNumber(sourceStack?.count, 0)
+  if (sourceCount <= 0) return false
+
+  if (sourceCount <= 1) {
+    await bot.clickWindow(fromSlot, 0, 0)
+    await delay(pollMs)
+    await bot.clickWindow(toSlot, 0, 0)
+  } else {
+    await bot.clickWindow(fromSlot, 0, 0)
+    await delay(pollMs)
+    await bot.clickWindow(toSlot, 1, 0)
+    await delay(pollMs)
+    await bot.clickWindow(fromSlot, 0, 0)
+  }
+
+  return await waitForWindowSlot(window, toSlot, predicate, timeoutMs, pollMs)
+}
+
 async function quickMoveWindowSlotConfirmed(bot, window, fromSlot, targetSlot, predicate, timeoutMs = 3000, pollMs = 100) {
   await bot.clickWindow(fromSlot, 0, 1)
   return await waitForWindowSlot(window, targetSlot, predicate, timeoutMs, pollMs)
@@ -4488,6 +4508,21 @@ function isMapNamed(item, expectedName) {
   return getItemNameHints(item).some((entry) => String(entry).toLowerCase().includes(needle))
 }
 
+function itemDataContains(item, needle) {
+  if (!item || !needle) return false
+  const lowered = String(needle).toLowerCase()
+  try {
+    return JSON.stringify(item).toLowerCase().includes(lowered)
+  } catch {
+    return false
+  }
+}
+
+function isFilledMapKnownLocked(item) {
+  if (!item || item.name !== 'filled_map') return false
+  return itemDataContains(item, 'locked')
+}
+
 async function runPostPrintWorkflow(bot, config, context = {}) {
   const advanced = config.advanced || {}
   const machine = config.machine || {}
@@ -4671,6 +4706,12 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           if (!filledMapForTable) {
             throw new Error('No filled map available for cartography step.')
           }
+          if (isFilledMapKnownLocked(filledMapForTable)) {
+            console.log('[POSTPRINT] Filled map already appears locked; skipping cartography lock input and continuing to rename/store.')
+            lockedMapTaken = true
+            lockedMapConfirmedInWindow = true
+            break
+          }
           if (bot.heldItem?.type !== filledMapForTable.type) {
             await bot.equip(filledMapForTable, 'hand')
           }
@@ -4699,7 +4740,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           }
 
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-map-input`)
-          const inputMapReady = await quickMoveWindowSlotConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs)
+          const inputMapReady = await moveOneWindowItemConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs)
           await delay(actionDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-map-input`)
           paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
@@ -4707,13 +4748,21 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             throw new Error('Glass pane disappeared before cartography input.')
           }
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-pane-input`)
-          const inputPaneReady = await quickMoveWindowSlotConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs)
+          const inputPaneReady = await moveOneWindowItemConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs)
           await delay(actionDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-pane-input`)
           const outputStack = await waitForWindowSlot(window, 2, (stack) => stack && toNumber(stack.count, 0) > 0, outputWaitMs, pollMs)
           lastWindowState = `in0=${formatWindowStack(window?.slots?.[0])} in1=${formatWindowStack(window?.slots?.[1])} out=${formatWindowStack(window?.slots?.[2])}`
 
           if (!inputMapReady || !inputPaneReady || !outputStack) {
+            const inputsPresent = window?.slots?.[0]?.name === 'filled_map' && window?.slots?.[1]?.name === 'glass_pane'
+            if (inputMapReady && inputPaneReady && !outputStack && inputsPresent) {
+              console.log(`[POSTPRINT-WARN] Cartography table accepted map + glass pane but produced no output: ${lastWindowState}. Treating the map as already locked/unlockable and continuing without retrying the lock.`)
+              await reclaimCartographyInputs(bot, window, outputWaitMs, pollMs)
+              lockedMapTaken = true
+              lockedMapConfirmedInWindow = true
+              break
+            }
             await reclaimCartographyInputs(bot, window, outputWaitMs, pollMs)
             if (attempt < maxAttempts) {
               console.log(`[POSTPRINT-WARN] Cartography output not ready on attempt ${attempt}/${maxAttempts}: ${lastWindowState}. Reopening table and retrying.`)
