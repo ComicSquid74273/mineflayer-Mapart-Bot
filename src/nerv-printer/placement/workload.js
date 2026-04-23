@@ -6,6 +6,7 @@ function createPlacementWorkload(deps) {
     estimateNeededFromLookahead,
     restockMaterial,
     countInventoryItems,
+    recoverMissingItemInventoryDesync,
     findNervScannerCandidate,
     placeNervScannerTarget
   } = deps
@@ -52,6 +53,16 @@ function createPlacementWorkload(deps) {
 
   function shouldEmergencyRestockMissingItem(bot, blockName) {
     return countInventoryItems(bot, blockName) <= 0
+  }
+
+  async function recoverMissingItem(bot, config, blockName, label) {
+    if (typeof recoverMissingItemInventoryDesync === 'function') {
+      return await recoverMissingItemInventoryDesync(bot, config, blockName, label)
+    }
+    const item = bot.inventory.items().find((entry) => entry.name === blockName)
+    if (!item) return false
+    await bot.equip(item, 'hand')
+    return String(bot.heldItem?.name || '') === blockName
   }
 
   function applyAdaptiveSlowdown(config, missingCount, batchSize, label) {
@@ -119,6 +130,9 @@ function createPlacementWorkload(deps) {
     let emergencyRestockBlock = null
     const seen = new Set()
     const pendingUntil = new Map()
+    const inventoryDesyncHits = new Map()
+    const maxInventoryDesyncHits = Math.max(1, toNumber(advanced.scannerInventoryDesyncMaxHits, 3))
+    const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
 
     const placementLoop = (async () => {
       while (active) {
@@ -145,6 +159,7 @@ function createPlacementWorkload(deps) {
               if (confirmed) {
                 seen.add(key)
                 pendingUntil.delete(key)
+                inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else if (result.state === 'placed') {
                 pendingUntil.set(key, Date.now() + retryCooldownMs)
               }
@@ -155,12 +170,14 @@ function createPlacementWorkload(deps) {
                 already += 1
                 seen.add(key)
                 pendingUntil.delete(key)
+                inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else {
                 if (!isTransientPlacementReason(result.reason)) {
                   skipped += 1
                 }
                 if (!String(result.reason || '').startsWith('missing-item-')) {
                   pendingUntil.set(key, Date.now() + retryCooldownMs)
+                  inventoryDesyncHits.delete(`${target.blockName}:${key}`)
                 }
                 if (config.errorHandling?.logErrors !== false && !isTransientPlacementReason(result.reason)) {
                   console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
@@ -171,10 +188,20 @@ function createPlacementWorkload(deps) {
                     active = false
                     break
                   }
-                  pendingUntil.set(key, Date.now() + retryCooldownMs)
-                  if (config.errorHandling?.logErrors !== false) {
-                    console.log(`[NERV-SCANNER-INVENTORY-SYNC] ${target.blockName} reported missing but inventory still has ${countInventoryItems(bot, target.blockName)}; retrying placement without refill.`)
+                  const haveNow = countInventoryItems(bot, target.blockName)
+                  const desyncHitKey = `${target.blockName}:${key}`
+                  const hitCount = (inventoryDesyncHits.get(desyncHitKey) || 0) + 1
+                  inventoryDesyncHits.set(desyncHitKey, hitCount)
+                  const recovered = await recoverMissingItem(bot, config, target.blockName, `NERV-SCANNER ${key}`)
+                  pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
+                  if (config.errorHandling?.logErrors !== false && (recovered || hitCount >= maxInventoryDesyncHits)) {
+                    const status = recovered ? 're-equipped' : 'equip recovery failed'
+                    console.log(`[NERV-SCANNER-INVENTORY-RECOVER] ${target.blockName} reported missing while inventory had ${haveNow}; ${status}; bounded retry ${hitCount}/${maxInventoryDesyncHits}.`)
                   }
+                  if (hitCount >= maxInventoryDesyncHits && !recovered) {
+                    active = false
+                  }
+                  break
                 }
               }
             } catch (err) {
@@ -265,6 +292,9 @@ function createPlacementWorkload(deps) {
     let emergencyRestockBlock = null
     const seen = new Set()
     const pendingUntil = new Map()
+    const inventoryDesyncHits = new Map()
+    const maxInventoryDesyncHits = Math.max(1, toNumber(advanced.scannerInventoryDesyncMaxHits, 3))
+    const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
 
     const placementLoop = (async () => {
       while (active) {
@@ -305,6 +335,7 @@ function createPlacementWorkload(deps) {
               if (confirmed) {
                 seen.add(key)
                 pendingUntil.delete(key)
+                inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else if (result.state === 'placed') {
                 pendingUntil.set(key, Date.now() + retryCooldownMs)
               }
@@ -315,29 +346,46 @@ function createPlacementWorkload(deps) {
                 already += 1
                 seen.add(key)
                 pendingUntil.delete(key)
+                inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else {
                 if (!isTransientPlacementReason(result.reason)) {
                   skipped += 1
                 }
                 if (!String(result.reason || '').startsWith('missing-item-')) {
                   pendingUntil.set(key, Date.now() + retryCooldownMs)
+                  inventoryDesyncHits.delete(`${target.blockName}:${key}`)
                 }
                 if (config.errorHandling?.logErrors !== false && !isTransientPlacementReason(result.reason)) {
                   console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
                 }
 
                 if (String(result.reason || '').startsWith('missing-item-')) {
-                  if (allowEmergencyRestock && shouldEmergencyRestockMissingItem(bot, target.blockName)) {
+                  const haveNow = countInventoryItems(bot, target.blockName)
+                  if (allowEmergencyRestock && haveNow <= 0) {
                     hardStops += 1
                     emergencyRestockBlock = target.blockName
                     active = false
                     lastTickTime = Date.now()
                     break
                   }
-                  pendingUntil.set(key, Date.now() + retryCooldownMs)
-                  if (config.errorHandling?.logErrors !== false) {
-                    console.log(`[NERV-WORKLOAD-INVENTORY-SYNC] ${target.blockName} reported missing but inventory still has ${countInventoryItems(bot, target.blockName)}; retrying placement without refill.`)
+                  const desyncHitKey = `${target.blockName}:${key}`
+                  const hitCount = (inventoryDesyncHits.get(desyncHitKey) || 0) + 1
+                  inventoryDesyncHits.set(desyncHitKey, hitCount)
+                  const recovered = await recoverMissingItem(bot, config, target.blockName, `NERV-WORKLOAD ${key}`)
+                  pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
+                  if (recovered) {
+                    if (config.errorHandling?.logErrors !== false) {
+                      console.log(`[NERV-WORKLOAD-INVENTORY-RECOVER] ${target.blockName} reported missing while inventory had ${haveNow}; re-equipped and queued bounded retry ${hitCount}/${maxInventoryDesyncHits}.`)
+                    }
+                  } else if (config.errorHandling?.logErrors !== false) {
+                    console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; equip recovery failed ${hitCount}/${maxInventoryDesyncHits}.`)
                   }
+                  lastTickTime = Date.now()
+                  if (hitCount >= maxInventoryDesyncHits && !recovered) {
+                    hardStops += 1
+                    active = false
+                  }
+                  break
                 }
               }
             } catch (err) {
