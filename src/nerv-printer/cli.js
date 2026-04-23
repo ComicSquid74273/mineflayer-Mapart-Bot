@@ -3271,12 +3271,21 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
     : exactDesiredItemCount
   const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
 
-  if (!inventoryHasRoomForItem(bot, blockName)) {
+  const needsStackPull = desiredItemCount > haveBeforeRestock
+  const hasStackPullRoom = inventoryCapacityForItem(bot, blockName) >= stackSize
+  if (!inventoryHasRoomForItem(bot, blockName) || (needsStackPull && !hasStackPullRoom)) {
     const dumped = await dumpUnneededCarpets(bot, config, keepPlan)
-    if (!dumped && !inventoryHasRoomForItem(bot, blockName)) {
+    if (!dumped && (!inventoryHasRoomForItem(bot, blockName) || inventoryCapacityForItem(bot, blockName) < stackSize)) {
       restockFailureCache.set(blockName, Date.now())
       if (config.errorHandling?.logErrors !== false) {
-        console.log(`[RESTOCK-WARN] No inventory space for ${blockName} and nothing dumpable.`)
+        console.log(`[RESTOCK-WARN] No full-stack inventory space for ${blockName} and nothing dumpable.`)
+      }
+      return false
+    }
+    if (needsStackPull && inventoryCapacityForItem(bot, blockName) < stackSize) {
+      restockFailureCache.set(blockName, Date.now())
+      if (config.errorHandling?.logErrors !== false) {
+        console.log(`[RESTOCK-WARN] Could not free a full inventory slot for ${blockName}.`)
       }
       return false
     }
@@ -3342,15 +3351,19 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           ? Math.ceil(exactStillNeedTotal / stackSize) * stackSize
           : 0
         const stillNeedTotal = Math.max(0, desiredItemCount - haveAtStart, roundedStillNeedTotal)
-        // Use empty-slots-only capacity for the chest interaction budget.
-        // mineflayer's container.withdraw() can fail with "inventory full" when
+        // Match upstream Nerv behavior: restock by quick-moving complete stacks.
+        // Avoid high-level withdrawal helpers because they can report stale inventory when
         // there are no empty slots even if a partial same-item stack exists —
         // the server may not merge partial stacks during shift-click withdrawal.
-        // Count both empty slots AND partial same-item slots as capacity.
+        // The next traversal gets its own dump/prepare cycle instead of saving leftovers.
         const emptySlotCapacity = countEmptyInventorySlots(bot) * stackSize
         const partialCapacity = inventoryCapacityForItem(bot, blockName) - emptySlotCapacity
         const capacityBeforePull = emptySlotCapacity + Math.max(0, partialCapacity)
-        const willPullTotal = Math.min(totalInChest, stillNeedTotal, capacityBeforePull)
+        const fullStackCapacityBeforePull = Math.floor(capacityBeforePull / stackSize) * stackSize
+        const fullStackChestTotal = chestSlots
+          .filter((entry) => toNumber(entry.count, 0) >= stackSize)
+          .reduce((sum, entry) => sum + stackSize, 0)
+        const willPullTotal = Math.min(fullStackChestTotal, stillNeedTotal, fullStackCapacityBeforePull)
         retryTargetCount = haveAtStart + willPullTotal
 
         if (willPullTotal <= 0) {
@@ -3372,90 +3385,88 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} needExact=${exactDesiredItemCount} needRounded=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal} empty=${Math.floor(emptySlotCapacity / stackSize)}slots`)
         }
 
-        // Pull in stack-sized increments until we get what we need from this chest.
+        // Pull in full stack quick-move transactions, matching the upstream Nerv addon.
+        // Avoid high-level withdraw helpers: on busy servers they can report stale inventory and make
+        // us abandon a chest that already accepted the click.
         let observedHave = haveAtStart
         const targetCount = haveAtStart + willPullTotal
-        let attempts = 0
         let stoppedForInventoryFull = false
         let stoppedForInventorySync = false
-        const maxAttempts = chestSlots.length + 8
-        while (observedHave < targetCount && attempts < maxAttempts) {
-          attempts++
+        while (observedHave < targetCount) {
           const haveBeforePull = countInventoryItems(bot, blockName)
           observedHave = Math.max(observedHave, haveBeforePull)
           const amountStillNeeded = targetCount - observedHave
           const currentCapacity = inventoryCapacityForItem(bot, blockName)
-          if (currentCapacity <= 0) {
+          if (currentCapacity < stackSize) {
             if (config.errorHandling?.logErrors !== false) {
-              console.log(`[RESTOCK-WARN] ${blockName} needs ${amountStillNeeded} more but capacity is ${currentCapacity}; stopping pull.`)
+              console.log(`[RESTOCK-WARN] ${blockName} needs ${amountStillNeeded} more but full-stack capacity is ${currentCapacity}; stopping pull.`)
             }
             stoppedForInventoryFull = true
             break
           }
 
-          const shouldUseFastBurst = amountStillNeeded >= fastBurstMinItems && currentCapacity >= stackSize
-          if (shouldUseFastBurst) {
+          try {
             const burstNeed = Math.min(amountStillNeeded, currentCapacity)
             const burstStacksRequested = Math.max(1, Math.min(fastBurstStacks, Math.floor(burstNeed / stackSize)))
-            try {
-              const burst = await quickMoveChestItemStacks(bot, container, itemId, burstNeed, stackSize, burstStacksRequested)
-              if (burst.stacksMoved > 0) {
-                await delay(fastBurstSettleMs)
-                let haveAfterBurst = countInventoryItems(bot, blockName)
-                if (haveAfterBurst <= haveBeforePull) {
-                  let elapsed = 0
-                  const pollMs = 100
-                  while (elapsed < syncWaitMs && haveAfterBurst <= haveBeforePull) {
-                    await delay(pollMs)
-                    elapsed += pollMs
-                    haveAfterBurst = countInventoryItems(bot, blockName)
-                  }
-                }
-                if (haveAfterBurst > haveBeforePull) {
-                  observedHave = Math.max(observedHave, haveAfterBurst)
-                  if (config.errorHandling?.logErrors !== false) {
-                    console.log(`[RESTOCK-BURST] ${blockName}: moved=${haveAfterBurst - haveBeforePull} requestedStacks=${burstStacksRequested} target=${targetCount}`)
-                  }
-                  continue
-                }
-                if (config.errorHandling?.logErrors !== false) {
-                  console.log(`[RESTOCK-WARN] ${blockName} fast stack burst did not reach inventory after sync wait: before=${haveBeforePull} target=${targetCount}`)
-                }
-                stoppedForInventorySync = true
-                break
-              }
-            } catch (err) {
-              if (config.errorHandling?.logErrors !== false) {
-                console.log(`[RESTOCK-WARN] fast stack burst error for ${blockName}: ${err?.message || err}`)
-              }
-            }
-          }
+            const windowBefore = countWindowInventoryItems(container, itemId, blockName)
+            const burst = await quickMoveChestItemStacks(bot, container, itemId, burstNeed, stackSize, burstStacksRequested, {
+              onlyFullStacks: true,
+              timeoutMs: syncWaitMs,
+              pollMs: sameChestRetryPollMs
+            })
 
-          const pullAmount = Math.min(stackSize, amountStillNeeded, currentCapacity)
-          try {
-            await container.withdraw(itemId, null, pullAmount)
-            if (bot.supportFeature?.('stateIdUsed')) {
-              await waitForInventoryStateUpdate(bot, Math.min(syncWaitMs, 500))
-            }
-            await delay(toNumber(advanced.inventoryActionDelayMs, 80))
-            let haveAfterWait = countInventoryItems(bot, blockName)
-            if (haveAfterWait <= haveBeforePull) {
-              let elapsed = 0
-              const pollMs = 200
-              while (elapsed < syncWaitMs && haveAfterWait <= haveBeforePull) {
-                await delay(pollMs)
-                elapsed += pollMs
-                haveAfterWait = countInventoryItems(bot, blockName)
+            if (burst.stacksMoved <= 0) {
+              if (config.errorHandling?.logErrors !== false) {
+                console.log(`[RESTOCK-WARN] ${blockName} found no full stack to quick-move in this chest; moving to next chest.`)
               }
-              if (config.errorHandling?.logErrors !== false && haveAfterWait <= haveBeforePull) {
-                console.log(`[RESTOCK-WARN] ${blockName} inventory update pending: before=${haveBeforePull} after=${haveAfterWait} requested=${pullAmount} target=${targetCount}`)
-              }
+              break
             }
-            if (haveAfterWait <= haveBeforePull) {
+
+            await delay(fastBurstSettleMs)
+            const expectedWindowTarget = Math.min(targetCount, windowBefore + burst.movedEstimate)
+            const windowHave = await waitForWindowInventoryCount(
+              container,
+              itemId,
+              blockName,
+              expectedWindowTarget,
+              syncWaitMs,
+              sameChestRetryPollMs
+            )
+            let haveAfterWait = await waitForInventoryCountChangeOrTarget(
+              bot,
+              blockName,
+              haveBeforePull,
+              Math.min(targetCount, expectedWindowTarget),
+              syncWaitMs,
+              sameChestRetryPollMs,
+              sameChestRetrySettleMs
+            )
+            observedHave = Math.max(observedHave, haveAfterWait, windowHave)
+
+            if (config.errorHandling?.logErrors !== false) {
+              console.log(`[RESTOCK-BURST] ${blockName}: quickMovedStacks=${burst.stacksMoved} windowHave=${windowHave} invHave=${haveAfterWait} target=${targetCount}`)
+            }
+
+            if (windowHave > haveBeforePull && haveAfterWait < Math.min(targetCount, windowHave)) {
+              haveAfterWait = await waitForInventoryCountChangeOrTarget(
+                bot,
+                blockName,
+                haveBeforePull,
+                Math.min(targetCount, windowHave),
+                sameChestRetryDelayMs,
+                sameChestRetryPollMs,
+                sameChestRetrySettleMs
+              )
+              observedHave = Math.max(observedHave, haveAfterWait)
+            }
+
+            if (observedHave <= haveBeforePull) {
+              if (config.errorHandling?.logErrors !== false) {
+                console.log(`[RESTOCK-WARN] ${blockName} quick-move did not reach inventory/window after sync wait: before=${haveBeforePull} target=${targetCount}`)
+              }
               stoppedForInventorySync = true
               break
             }
-            observedHave = Math.max(observedHave, haveAfterWait)
           } catch (err) {
             const message = String(err?.message || err).toLowerCase()
             const inventoryFull = message.includes('no free') ||
@@ -3476,7 +3487,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               break
             }
             if (config.errorHandling?.logErrors !== false) {
-              console.log(`[RESTOCK-WARN] withdraw error for ${blockName}: ${err?.message || err}`)
+              console.log(`[RESTOCK-WARN] quick-move error for ${blockName}: ${err?.message || err}`)
             }
             break
           }
@@ -3502,6 +3513,9 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               if (haveAfterSync < targetCount) {
                 console.log(`[RESTOCK-WARN] ${blockName} inventory still lagging after ${syncWaitMs}ms sync wait: have=${haveAfterSync} target=${targetCount}`)
               }
+            }
+            if (countInventoryItems(bot, blockName) < targetCount) {
+              stoppedForInventorySync = true
             }
           }
         }
@@ -3829,19 +3843,48 @@ async function withdrawFromChest(bot, config, chestPos, itemName, amount, access
   const itemId = bot.registry.itemsByName[itemName]?.id
   if (!itemId) return false
 
+  const requested = Math.max(1, toNumber(amount, 1))
+  const before = countInventoryByType(bot, itemName)
+  const timeoutMs = Math.max(500, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500))
+  const pollMs = Math.max(50, toNumber(config.advanced?.postPrintChestPollMs, 100))
+  const actionDelayMs = Math.max(50, toNumber(config.advanced?.inventoryActionDelayMs, 100))
+  const interactionDelayMs = Math.max(50, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+  let container = null
+
   try {
-    const container = await openContainerAt(bot, chestPos, accessPosition)
-    await delay(toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
-    await container.withdraw(itemId, null, Math.max(1, toNumber(amount, 1)))
-    await delay(toNumber(config.advanced?.inventoryActionDelayMs, 100))
-    container.close()
-    await delay(toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
-    return true
+    container = await openContainerAt(bot, chestPos, accessPosition)
+    await delay(interactionDelayMs)
+
+    let taken = 0
+    while (taken < requested) {
+      const ok = await takeOneChestItemToInventory(bot, container, itemId, itemName, timeoutMs, pollMs)
+      if (!ok) break
+      taken += 1
+      await delay(actionDelayMs)
+    }
+
+    try { container.close() } catch { }
+    container = null
+    const after = await waitForInventoryCountChangeOrTarget(
+      bot,
+      itemName,
+      before,
+      before + requested,
+      timeoutMs,
+      pollMs,
+      actionDelayMs
+    )
+    await delay(interactionDelayMs)
+    return after >= before + requested
   } catch (err) {
     if (config.advanced?.debugPrints) {
       console.log(`[POSTPRINT-DEBUG] withdraw ${itemName} -> ${err?.message || err}`)
     }
     return false
+  } finally {
+    if (container) {
+      try { container.close() } catch { }
+    }
   }
 }
 
@@ -3849,19 +3892,54 @@ async function depositToChest(bot, config, chestPos, itemName, amount, accessPos
   const itemId = bot.registry.itemsByName[itemName]?.id
   if (!itemId) return false
 
+  const requested = Math.max(1, toNumber(amount, 1))
+  const before = countInventoryByType(bot, itemName)
+  const timeoutMs = Math.max(500, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500))
+  const pollMs = Math.max(50, toNumber(config.advanced?.postPrintChestPollMs, 100))
+  const actionDelayMs = Math.max(50, toNumber(config.advanced?.inventoryActionDelayMs, 100))
+  const interactionDelayMs = Math.max(50, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+  let container = null
+
   try {
-    const container = await openContainerAt(bot, chestPos, accessPosition)
-    await delay(toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
-    await container.deposit(itemId, null, Math.max(1, toNumber(amount, 1)))
-    await delay(toNumber(config.advanced?.inventoryActionDelayMs, 100))
-    container.close()
-    await delay(toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
-    return true
+    container = await openContainerAt(bot, chestPos, accessPosition)
+    await delay(interactionDelayMs)
+
+    let moved = 0
+    while (moved < requested) {
+      const slot = findWindowInventorySlot(container, bot, itemName)
+      if (slot < 0) break
+      const stack = container.slots?.[slot]
+      const count = Math.max(1, toNumber(stack?.count, 1))
+      await bot.clickWindow(slot, 0, 1)
+      await waitForWindowSlot(container, slot, (entry) => (
+        !entry ||
+        toNumber(entry.count, 0) <= 0 ||
+        entry.type !== itemId ||
+        toNumber(entry.count, 0) < count
+      ), timeoutMs, pollMs)
+      moved += count
+      await delay(actionDelayMs)
+    }
+
+    try { container.close() } catch { }
+    container = null
+
+    const targetRemaining = Math.max(0, before - requested)
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline && countInventoryByType(bot, itemName) > targetRemaining) {
+      await delay(pollMs)
+    }
+    await delay(interactionDelayMs)
+    return moved > 0 && countInventoryByType(bot, itemName) <= targetRemaining
   } catch (err) {
     if (config.advanced?.debugPrints) {
       console.log(`[POSTPRINT-DEBUG] deposit ${itemName} -> ${err?.message || err}`)
     }
     return false
+  } finally {
+    if (container) {
+      try { container.close() } catch { }
+    }
   }
 }
 
@@ -3917,6 +3995,11 @@ async function moveWindowItemConfirmed(bot, window, fromSlot, toSlot, predicate,
   return await waitForWindowSlot(window, toSlot, predicate, timeoutMs, pollMs)
 }
 
+async function quickMoveWindowSlotConfirmed(bot, window, fromSlot, targetSlot, predicate, timeoutMs = 3000, pollMs = 100) {
+  await bot.clickWindow(fromSlot, 0, 1)
+  return await waitForWindowSlot(window, targetSlot, predicate, timeoutMs, pollMs)
+}
+
 async function reclaimWindowSlotToInventory(bot, window, slot, timeoutMs = 2000, pollMs = 100) {
   const stack = window?.slots?.[slot]
   if (!stack || toNumber(stack.count, 0) <= 0) return true
@@ -3941,7 +4024,75 @@ function getChestWindowSlots(window) {
   return slots
 }
 
-async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stackSize, maxStacks = 8) {
+function countWindowInventoryItems(window, itemId, itemName = null) {
+  const slots = Array.isArray(window?.slots) ? window.slots : []
+  const start = Number.isFinite(window?.inventoryStart) ? window.inventoryStart : 0
+  const end = Number.isFinite(window?.inventoryEnd) ? window.inventoryEnd : slots.length - 1
+  let count = 0
+  for (let i = start; i <= end && i < slots.length; i += 1) {
+    const stack = slots[i]
+    if (!stack || toNumber(stack.count, 0) <= 0) continue
+    if ((itemId && stack.type === itemId) || (itemName && stack.name === itemName)) {
+      count += toNumber(stack.count, 0)
+    }
+  }
+  return count
+}
+
+async function waitForWindowInventoryCount(window, itemId, itemName, targetCount, timeoutMs = 3000, pollMs = 100) {
+  const timeout = Math.max(100, toNumber(timeoutMs, 3000))
+  const poll = Math.max(25, toNumber(pollMs, 100))
+  let elapsed = 0
+  let latest = countWindowInventoryItems(window, itemId, itemName)
+  while (elapsed <= timeout) {
+    latest = countWindowInventoryItems(window, itemId, itemName)
+    if (latest >= targetCount) return latest
+    await delay(poll)
+    elapsed += poll
+  }
+  return latest
+}
+
+function findEmptyWindowInventorySlot(window) {
+  const slots = Array.isArray(window?.slots) ? window.slots : []
+  const start = Number.isFinite(window?.inventoryStart) ? window.inventoryStart : 0
+  const end = Number.isFinite(window?.inventoryEnd) ? window.inventoryEnd : slots.length - 1
+  for (let i = start; i <= end && i < slots.length; i += 1) {
+    const stack = slots[i]
+    if (!stack || toNumber(stack.count, 0) <= 0) return i
+  }
+  return -1
+}
+
+async function takeOneChestItemToInventory(bot, window, itemId, itemName, timeoutMs = 3000, pollMs = 100) {
+  const source = getChestWindowSlots(window)
+    .filter((entry) => entry.stack?.type === itemId || entry.stack?.name === itemName)
+    .sort((a, b) => toNumber(b.stack?.count, 0) - toNumber(a.stack?.count, 0))[0]
+  if (!source) return false
+
+  const targetSlot = findEmptyWindowInventorySlot(window)
+  if (targetSlot < 0) return false
+
+  const beforeTarget = countWindowInventoryItems(window, itemId, itemName)
+  await bot.clickWindow(source.slot, 0, 0)
+  await delay(pollMs)
+  await bot.clickWindow(targetSlot, 1, 0)
+  await delay(pollMs)
+  await bot.clickWindow(source.slot, 0, 0)
+
+  const targetReady = await waitForWindowSlot(window, targetSlot, (stack) => (
+    stack &&
+    toNumber(stack.count, 0) > 0 &&
+    (stack.type === itemId || stack.name === itemName)
+  ), timeoutMs, pollMs)
+  const invCount = await waitForWindowInventoryCount(window, itemId, itemName, beforeTarget + 1, timeoutMs, pollMs)
+  return Boolean(targetReady) || invCount > beforeTarget
+}
+
+async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stackSize, maxStacks = 8, options = {}) {
+  const onlyFullStacks = options.onlyFullStacks !== false
+  const timeoutMs = Math.max(100, toNumber(options.timeoutMs, 3000))
+  const pollMs = Math.max(25, toNumber(options.pollMs, 100))
   const slots = getChestWindowSlots(window)
     .filter((entry) => entry.stack?.type === itemId)
     .sort((a, b) => toNumber(b.stack?.count, 0) - toNumber(a.stack?.count, 0))
@@ -3952,10 +4103,19 @@ async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stack
     if (stacksMoved >= maxStacks) break
     const count = Math.max(0, toNumber(entry.stack?.count, 0))
     if (count <= 0) continue
-    if (amountNeeded - movedEstimate < Math.max(1, Math.min(stackSize, count))) break
+    if (onlyFullStacks && count < stackSize) continue
+    const plannedCount = onlyFullStacks ? stackSize : count
+    if (amountNeeded - movedEstimate < plannedCount) break
     await bot.clickWindow(entry.slot, 0, 1)
+    await waitForWindowSlot(window, entry.slot, (stack) => (
+      !stack ||
+      toNumber(stack.count, 0) <= 0 ||
+      stack.type !== itemId ||
+      toNumber(stack.count, 0) < count
+    ), timeoutMs, pollMs)
     movedEstimate += count
     stacksMoved += 1
+    await delay(pollMs)
   }
 
   return { movedEstimate, stacksMoved }
@@ -4211,9 +4371,13 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   const resumeStep = postPrintSteps.includes(context.resumePostPrintStep) ? context.resumePostPrintStep : 'withdraw'
   const resumeStepIndex = postPrintSteps.indexOf(resumeStep)
   const shouldRunStep = (step) => postPrintSteps.indexOf(step) >= resumeStepIndex && resumeStep !== 'done'
-  const savePostPrintStep = (nextStep, action = `next-${nextStep}`) => {
+  let cartographySucceeded = context.postPrintCartographyComplete === true || context.cartographyComplete === true
+  const savePostPrintStep = (nextStep, action = `next-${nextStep}`, meta = {}) => {
     if (typeof context.savePostPrintState === 'function') {
-      context.savePostPrintState(nextStep, action)
+      context.savePostPrintState(nextStep, action, {
+        postPrintCartographyComplete: cartographySucceeded,
+        ...meta
+      })
     }
   }
   const setPostPrintStatus = (step) => {
@@ -4238,7 +4402,6 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   const finishedChestPos = machine.finishedMapChest?.enabled ? machine.finishedMapChest.position : null
   const anvilConfig = machine.anvil?.enabled ? machine.anvil : null
   const resetConfig = machine.resetBlock?.enabled ? machine.resetBlock : null
-  let cartographySucceeded = resumeStepIndex > postPrintSteps.indexOf('cartography')
 
   if (shouldRunStep('withdraw') && !mapChestPos) {
     return failPostPrint('withdraw', 'Missing map material chest position. Post-print workflow cannot continue.')
@@ -4362,14 +4525,18 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
 
           const filledMapSlot = findWindowInventorySlot(window, bot, 'filled_map')
-          const paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
+          let paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
           if (filledMapSlot < 0 || paneSlot < 0) {
             throw new Error('Missing filled map or glass pane in inventory for cartography step.')
           }
 
-          const inputMapReady = await moveWindowItemConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs)
+          const inputMapReady = await quickMoveWindowSlotConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs)
           await delay(actionDelayMs)
-          const inputPaneReady = await moveWindowItemConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs)
+          paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
+          if (paneSlot < 0) {
+            throw new Error('Glass pane disappeared before cartography input.')
+          }
+          const inputPaneReady = await quickMoveWindowSlotConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs)
           await delay(actionDelayMs)
           const outputStack = await waitForWindowSlot(window, 2, (stack) => stack && toNumber(stack.count, 0) > 0, outputWaitMs, pollMs)
           lastWindowState = `in0=${formatWindowStack(window?.slots?.[0])} in1=${formatWindowStack(window?.slots?.[1])} out=${formatWindowStack(window?.slots?.[2])}`
@@ -4386,13 +4553,15 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             throw new Error(`Cartography output not ready after ${maxAttempts} attempt(s): ${lastWindowState}`)
           }
 
-          const mapsBeforeOutput = countInventoryByType(bot, 'filled_map')
+          const filledMapId = getItemId(bot, 'filled_map')
+          const mapsBeforeOutput = countWindowInventoryItems(window, filledMapId, 'filled_map')
           await bot.clickWindow(2, 0, 1)
           await delay(actionDelayMs)
-          await waitForWindowSlotEmpty(window, 2, outputWaitMs, pollMs)
+          const outputCleared = await waitForWindowSlotEmpty(window, 2, outputWaitMs, pollMs)
+          const mapsAfterOutput = await waitForWindowInventoryCount(window, filledMapId, 'filled_map', mapsBeforeOutput + 1, outputWaitMs, pollMs)
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
 
-          if (countInventoryByType(bot, 'filled_map') <= mapsBeforeOutput) {
+          if (!outputCleared || mapsAfterOutput <= mapsBeforeOutput) {
             throw new Error(`Cartography output click did not return filled_map to inventory: ${lastWindowState}`)
           }
           lockedMapTaken = true
@@ -4404,11 +4573,22 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       }
 
       if (countInventoryByType(bot, 'filled_map') <= 0) {
+        await waitForInventoryCountChangeOrTarget(
+          bot,
+          'filled_map',
+          0,
+          1,
+          Math.max(500, toNumber(advanced.postPrintChestSyncWaitMs, 2500)),
+          Math.max(50, toNumber(advanced.postPrintChestPollMs, 100)),
+          Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
+        )
+      }
+      if (countInventoryByType(bot, 'filled_map') <= 0) {
         throw new Error('No filled map found in inventory after taking cartography output.')
       }
 
       cartographySucceeded = true
-      savePostPrintStep('rename_store', 'cartography-complete')
+      savePostPrintStep('rename_store', 'cartography-complete', { postPrintCartographyComplete: true })
     } catch (err) {
       return failPostPrint('cartography', `Cartography step failed: ${err?.message || err}`)
     }
@@ -4434,6 +4614,10 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       const filledMapId = getItemId(bot, 'filled_map')
       const filledMaps = bot.inventory.items().filter((entry) => entry.type === filledMapId)
       let mapsToStore = filledMaps
+
+      if (!filledMaps.length) {
+        return failPostPrint('rename_store', 'No filled map found to store after cartography.')
+      }
 
       if (advanced.postPrintRenameMapEnabled !== false && advanced.postPrintRequireRenameBeforeStore !== false) {
         mapsToStore = filledMaps.filter((entry) => isMapNamed(entry, renamedTarget))
@@ -7038,6 +7222,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   let resumeFrom = 0
   let resumePhase = 'printing'  // tracks which bot phase to resume after crash
   let resumePostPrintStep = 'withdraw'
+  let resumePostPrintCartographyComplete = false
 
   if (progressEnabled) {
     const previous = readProgressState(progressFile)
@@ -7057,6 +7242,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       }
       if (previousPhase === 'post_print') {
         resumePostPrintStep = String(previous.postPrintStep || 'withdraw')
+        resumePostPrintCartographyComplete = previous.postPrintCartographyComplete === true ||
+          String(previous.action || '') === 'cartography-complete'
       }
       console.log(`[RESUME] Saved state phase=${previous.phase || 'printing'} state=${previous.state || 'n/a'} action=${previous.action || 'n/a'} processed=${resumeFrom}/${orderedTargets.length}.`)
     }
@@ -7068,10 +7255,11 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     sourcePath: input.sourcePath,
     sourceType: input.sourceType,
     resumePostPrintStep,
+    postPrintCartographyComplete: resumePostPrintCartographyComplete,
     setStatusDetail: (detail) => {
       dashboardRuntime?.setPhase('post-print', detail)
     },
-    savePostPrintState: (postPrintStep, action = 'post-print-active') => {
+    savePostPrintState: (postPrintStep, action = 'post-print-active', meta = {}) => {
       const detail = String(action || '').startsWith('blocked-')
         ? mapPostPrintStatusDetail(action)
         : mapPostPrintStatusDetail(postPrintStep)
@@ -7080,7 +7268,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
         state: 'post_print_workflow',
         action,
-        postPrintStep
+        postPrintStep,
+        ...meta
       })
     },
     ...extra
