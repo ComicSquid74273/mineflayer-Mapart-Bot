@@ -50,6 +50,10 @@ function createPlacementWorkload(deps) {
     return text === 'unconfirmed-place'
   }
 
+  function shouldEmergencyRestockMissingItem(bot, blockName) {
+    return countInventoryItems(bot, blockName) <= 0
+  }
+
   function applyAdaptiveSlowdown(config, missingCount, batchSize, label) {
     const advanced = config.advanced || {}
     if (advanced.scannerAdaptiveSlowdown === false || batchSize <= 0) return false
@@ -162,9 +166,15 @@ function createPlacementWorkload(deps) {
                   console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
                 }
                 if (allowEmergencyRestock && String(result.reason || '').startsWith('missing-item-')) {
-                  emergencyRestockBlock = target.blockName
-                  active = false
-                  break
+                  if (shouldEmergencyRestockMissingItem(bot, target.blockName)) {
+                    emergencyRestockBlock = target.blockName
+                    active = false
+                    break
+                  }
+                  pendingUntil.set(key, Date.now() + retryCooldownMs)
+                  if (config.errorHandling?.logErrors !== false) {
+                    console.log(`[NERV-SCANNER-INVENTORY-SYNC] ${target.blockName} reported missing but inventory still has ${countInventoryItems(bot, target.blockName)}; retrying placement without refill.`)
+                  }
                 }
               }
             } catch (err) {
@@ -317,13 +327,17 @@ function createPlacementWorkload(deps) {
                 }
 
                 if (String(result.reason || '').startsWith('missing-item-')) {
-                  hardStops += 1
-                  if (allowEmergencyRestock) {
+                  if (allowEmergencyRestock && shouldEmergencyRestockMissingItem(bot, target.blockName)) {
+                    hardStops += 1
                     emergencyRestockBlock = target.blockName
                     active = false
+                    lastTickTime = Date.now()
+                    break
                   }
-                  lastTickTime = Date.now()
-                  break
+                  pendingUntil.set(key, Date.now() + retryCooldownMs)
+                  if (config.errorHandling?.logErrors !== false) {
+                    console.log(`[NERV-WORKLOAD-INVENTORY-SYNC] ${target.blockName} reported missing but inventory still has ${countInventoryItems(bot, target.blockName)}; retrying placement without refill.`)
+                  }
                 }
               }
             } catch (err) {

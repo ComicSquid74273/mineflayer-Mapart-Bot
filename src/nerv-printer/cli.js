@@ -3152,6 +3152,8 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const requestedStackCount = Math.max(1, toNumber(requestedPulls, 1))
   const sameChestSyncRetries = Math.max(0, toNumber(advanced.restockSameChestSyncRetries, 2))
   const sameChestRetryDelayMs = Math.max(200, toNumber(advanced.restockSameChestRetryDelayMs, Math.max(syncWaitMs, 1200)))
+  const sameChestRetryPollMs = Math.max(25, toNumber(advanced.restockSameChestRetryPollMs, 100))
+  const sameChestRetrySettleMs = Math.max(0, toNumber(advanced.restockSameChestRetrySettleMs, 150))
   const fastBurstStacks = Math.max(1, toNumber(advanced.restockFastStacksPerBurst, 8))
   const fastBurstSettleMs = Math.max(100, toNumber(advanced.restockFastSettleMs, 300))
   const fastBurstMinItems = Math.max(stackSize * 2, toNumber(advanced.restockFastMinItems, stackSize * 2))
@@ -3428,7 +3430,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             if (config.errorHandling?.logErrors !== false) {
               const haveNow = countInventoryItems(bot, blockName)
               const nextAction = retrySameChest
-                ? `Retrying same chest after ${sameChestRetryDelayMs}ms.`
+                ? `Polling same chest retry for up to ${sameChestRetryDelayMs}ms.`
                 : 'Trying next chest/replan.'
               console.log(`[RESTOCK-WARN] ${blockName} withdraws did not reach inventory after sync wait; have=${haveNow} target=${targetCount}. ${nextAction}`)
             }
@@ -3447,8 +3449,15 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           break
         }
 
-        await delay(sameChestRetryDelayMs)
-        const haveAfterRetryWait = countInventoryItems(bot, blockName)
+        const haveAfterRetryWait = await waitForInventoryCountChangeOrTarget(
+          bot,
+          blockName,
+          retryStartHave,
+          Math.min(desiredItemCount, retryTargetCount || desiredItemCount),
+          sameChestRetryDelayMs,
+          sameChestRetryPollMs,
+          sameChestRetrySettleMs
+        )
         if (haveAfterRetryWait >= desiredItemCount || haveAfterRetryWait >= retryTargetCount) {
           const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
           if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
@@ -4371,6 +4380,36 @@ function countInventoryItems(bot, itemName) {
   }
 
   return count
+}
+
+async function waitForInventoryCountChangeOrTarget(bot, itemName, beforeCount, targetCount, timeoutMs, pollMs = 100, settleMs = 150) {
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  let latest = countInventoryItems(bot, itemName)
+  if (latest >= targetCount) return latest
+  if (latest > beforeCount) {
+    const settleDeadline = Date.now() + Math.max(0, settleMs)
+    while (Date.now() < settleDeadline && latest < targetCount) {
+      await delay(Math.min(Math.max(25, pollMs), Math.max(25, settleDeadline - Date.now())))
+      latest = countInventoryItems(bot, itemName)
+    }
+    return latest
+  }
+
+  while (Date.now() < deadline) {
+    await delay(Math.min(Math.max(25, pollMs), Math.max(25, deadline - Date.now())))
+    latest = countInventoryItems(bot, itemName)
+    if (latest >= targetCount) return latest
+    if (latest > beforeCount) {
+      const settleDeadline = Date.now() + Math.max(0, settleMs)
+      while (Date.now() < settleDeadline && latest < targetCount) {
+        await delay(Math.min(Math.max(25, pollMs), Math.max(25, settleDeadline - Date.now())))
+        latest = countInventoryItems(bot, itemName)
+      }
+      return latest
+    }
+  }
+
+  return countInventoryItems(bot, itemName)
 }
 
 function getBuildMaterialSlotCapacity(bot) {
@@ -6002,6 +6041,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
     return actual?.name === target.blockName
   }
   const isTransientPlacementReason = (reason) => String(reason || '') === 'unconfirmed-place'
+  const shouldEmergencyRestockMissingItem = (blockName) => countInventoryItems(bot, blockName) <= 0
   const getUnresolvedTargets = (targets) => getUniqueTargets(scanPlacementErrors(bot, targets, {
     config,
     logPrefix: `${label}-VERIFY`,
@@ -6060,6 +6100,14 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
                 retryPriority.add(key)
               }
               if (String(result.reason || '').startsWith('missing-item-')) {
+                if (!shouldEmergencyRestockMissingItem(target.blockName)) {
+                  pendingUntil.set(key, Date.now() + retryCooldownMs)
+                  retryPriority.add(key)
+                  if (config.errorHandling?.logErrors !== false) {
+                    console.log(`[${label}-INVENTORY-SYNC] ${target.blockName} reported missing but inventory still has ${countInventoryItems(bot, target.blockName)}; retrying placement without refill.`)
+                  }
+                  continue
+                }
                 emergencyRestockBlock = target.blockName
                 active = false
                 break
@@ -6226,9 +6274,15 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
                 console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
               }
               if (allowEmergencyRestock && String(result.reason || '').startsWith('missing-item-')) {
-                emergencyRestockBlock = target.blockName
-                active = false
-                break
+                if (countInventoryItems(bot, target.blockName) <= 0) {
+                  emergencyRestockBlock = target.blockName
+                  active = false
+                  break
+                }
+                retryPriority.add(key)
+                if (config.errorHandling?.logErrors !== false) {
+                  console.log(`[NERV-SCANNER-INVENTORY-SYNC] ${target.blockName} reported missing but inventory still has ${countInventoryItems(bot, target.blockName)}; retrying placement without refill.`)
+                }
               }
             }
           } catch (err) {
@@ -6458,13 +6512,17 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
 
               if (String(result.reason || '').startsWith('missing-item-')) {
-                hardStops += 1
-                if (allowEmergencyRestock) {
+                if (allowEmergencyRestock && countInventoryItems(bot, target.blockName) <= 0) {
+                  hardStops += 1
                   emergencyRestockBlock = target.blockName
                   active = false
+                  lastTickTime = Date.now()
+                  break
                 }
-                lastTickTime = Date.now()
-                break
+                pendingUntil.set(key, Date.now() + retryCooldownMs)
+                if (config.errorHandling?.logErrors !== false) {
+                  console.log(`[NERV-WORKLOAD-INVENTORY-SYNC] ${target.blockName} reported missing but inventory still has ${countInventoryItems(bot, target.blockName)}; retrying placement without refill.`)
+                }
               }
             }
           } catch (err) {

@@ -367,7 +367,7 @@
     "inventoryCycleTestRows": 2,
     "repairTestWaitAfterMs": 5000,
     "repairTestMaxPasses": 3,
-    "repairSprintMode": "off",
+    "repairSprintMode": "true",
     "repairGoalRange": 3.25,
     "repairTargetSettleMs": 0,
     "repairMoveTimeoutMs": 30000,
