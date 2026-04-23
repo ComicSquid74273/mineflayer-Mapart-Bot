@@ -4276,9 +4276,57 @@ async function moveOneWindowItemConfirmed(bot, window, fromSlot, toSlot, predica
   return await waitForWindowSlot(window, toSlot, predicate, timeoutMs, pollMs)
 }
 
-async function quickMoveWindowSlotConfirmed(bot, window, fromSlot, targetSlot, predicate, timeoutMs = 3000, pollMs = 100) {
+async function quickMoveWindowSlotConfirmed(bot, window, fromSlot, targetSlot, predicate, timeoutMs = 3000, pollMs = 100, clickTicks = 2) {
+  await assertWindowCursorEmpty(window, `before quick-moving slot ${fromSlot}`)
   await bot.clickWindow(fromSlot, 0, 1)
+  await waitBotTicks(bot, clickTicks)
+  await assertWindowCursorEmpty(window, `after quick-moving slot ${fromSlot}`)
   return await waitForWindowSlot(window, targetSlot, predicate, timeoutMs, pollMs)
+}
+
+async function quickMoveCartographyInputConfirmed(bot, window, sourceSlot, targetSlot, itemName, timeoutMs = 3000, pollMs = 100, clickTicks = 2) {
+  const sourceStack = window?.slots?.[sourceSlot]
+  const sourceBefore = toNumber(sourceStack?.count, 0)
+  if (!sourceStack || sourceBefore <= 0) {
+    throw new Error(`Cannot quick-move ${itemName}: source slot ${sourceSlot} is empty.`)
+  }
+
+  console.log(`[CARTO-NERV] quick-move-input item=${itemName} from=${sourceSlot} to=${targetSlot} before=${formatCartographyWindowState(window)}`)
+  const targetReady = await quickMoveWindowSlotConfirmed(
+    bot,
+    window,
+    sourceSlot,
+    targetSlot,
+    (stack) => stack?.name === itemName && toNumber(stack.count, 0) > 0,
+    timeoutMs,
+    pollMs,
+    clickTicks
+  )
+  const sourceChanged = await waitForWindowSlot(window, sourceSlot, (stack) => (
+    !stack ||
+    stack.name !== sourceStack.name ||
+    toNumber(stack.count, 0) < sourceBefore
+  ), timeoutMs, pollMs)
+  console.log(`[CARTO-NERV] quick-move-input-done item=${itemName} ready=${Boolean(targetReady)} sourceChanged=${Boolean(sourceChanged)} after=${formatCartographyWindowState(window)}`)
+  return Boolean(targetReady)
+}
+
+async function quickMoveCartographyOutputConfirmed(bot, window, beforeCount, timeoutMs = 3000, pollMs = 100, clickTicks = 2) {
+  const outputStack = window?.slots?.[2]
+  if (!outputStack || outputStack.name !== 'filled_map' || toNumber(outputStack.count, 0) <= 0) {
+    return false
+  }
+  const itemId = outputStack.type
+  console.log(`[CARTO-NERV] quick-move-output from=2 beforeWindowFilled=${beforeCount} before=${formatCartographyWindowState(window)}`)
+  await assertWindowCursorEmpty(window, 'before quick-moving cartography output')
+  await bot.clickWindow(2, 0, 1)
+  await waitBotTicks(bot, clickTicks)
+  await assertWindowCursorEmpty(window, 'after quick-moving cartography output')
+
+  const outputCleared = await waitForWindowSlotEmpty(window, 2, timeoutMs, pollMs)
+  const afterCount = await waitForWindowInventoryCount(window, itemId, 'filled_map', beforeCount + 1, timeoutMs, pollMs)
+  console.log(`[CARTO-NERV] quick-move-output-done outputCleared=${outputCleared} afterWindowFilled=${afterCount} target=${beforeCount + 1} after=${formatCartographyWindowState(window)}`)
+  return outputCleared && afterCount > beforeCount
 }
 
 async function reclaimWindowSlotToInventory(bot, window, slot, timeoutMs = 2000, pollMs = 100) {
@@ -4994,7 +5042,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       const clickTicks = Math.max(2, toNumber(advanced.postPrintCartographyClickWaitTicks, 4))
       const outputSettleTicks = Math.max(10, toNumber(advanced.postPrintCartographyOutputSettleTicks, 20))
       const cartographyAccessRange = Math.max(0.35, toNumber(advanced.postPrintCartographyAccessRange, 0.6))
-      const maxAttempts = Math.max(1, toNumber(advanced.postPrintCartographyAttempts, 2))
+      const maxAttempts = Math.max(1, toNumber(advanced.postPrintCartographyAttempts, 1))
       let lastWindowState = ''
       let lockedMapTaken = false
       let lockedMapConfirmedInWindow = false
@@ -5076,8 +5124,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           }
 
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-map-input`)
-          console.log(`[CARTO-MANUAL] attempt=${attempt} before-map-input from=${filledMapSlot} to=0 ${formatCartographyWindowState(window)}`)
-          const inputMapReady = await moveOneWindowItemConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs, clickTicks)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} before-map-input mode=nerv-quick-move from=${filledMapSlot} to=0 ${formatCartographyWindowState(window)}`)
+          const inputMapReady = await quickMoveCartographyInputConfirmed(bot, window, filledMapSlot, 0, 'filled_map', outputWaitMs, pollMs, clickTicks)
           await delay(actionDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-map-input`)
           await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-map-input`)
@@ -5087,8 +5135,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             throw new Error('Glass pane disappeared before cartography input.')
           }
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-pane-input`)
-          console.log(`[CARTO-MANUAL] attempt=${attempt} before-pane-input from=${paneSlot} to=1 ${formatCartographyWindowState(window)}`)
-          const inputPaneReady = await moveOneWindowItemConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs, clickTicks)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} before-pane-input mode=nerv-quick-move from=${paneSlot} to=1 ${formatCartographyWindowState(window)}`)
+          const inputPaneReady = await quickMoveCartographyInputConfirmed(bot, window, paneSlot, 1, 'glass_pane', outputWaitMs, pollMs, clickTicks)
           await delay(actionDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-pane-input`)
           await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-pane-input`)
@@ -5103,14 +5151,12 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             const inputsPresent = window?.slots?.[0]?.name === 'filled_map' && window?.slots?.[1]?.name === 'glass_pane'
             if (inputMapReady && inputPaneReady && !outputStack && inputsPresent) {
               console.log(`[POSTPRINT-WARN] Cartography table accepted map + glass pane but produced no output: ${lastWindowState}. Treating the map as already locked/unlockable and continuing without retrying the lock.`)
-              console.log(`[CARTO-MANUAL] attempt=${attempt} reclaiming accepted inputs without output.`)
-              await reclaimCartographyInputs(bot, window, outputWaitMs, pollMs)
+              console.log(`[CARTO-MANUAL] attempt=${attempt} closing table to let server return accepted inputs; avoiding cursor reclaim clicks.`)
               lockedMapTaken = true
               lockedMapConfirmedInWindow = true
               break
             }
-            console.log(`[CARTO-MANUAL] attempt=${attempt} reclaiming inputs after incomplete output. inputMapReady=${inputMapReady} inputPaneReady=${inputPaneReady} outputReady=${Boolean(outputStack)}`)
-            await reclaimCartographyInputs(bot, window, outputWaitMs, pollMs)
+            console.log(`[CARTO-MANUAL] attempt=${attempt} incomplete output. inputMapReady=${inputMapReady} inputPaneReady=${inputPaneReady} outputReady=${Boolean(outputStack)}; closing instead of cursor reclaiming.`)
             if (attempt < maxAttempts) {
               console.log(`[POSTPRINT-WARN] Cartography output not ready on attempt ${attempt}/${maxAttempts}: ${lastWindowState}. Reopening table and retrying.`)
               try { window.close() } catch { }
@@ -5124,8 +5170,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           const filledMapId = getItemId(bot, 'filled_map')
           const mapsBeforeOutput = countWindowInventoryItems(window, filledMapId, 'filled_map')
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-output`)
-          console.log(`[CARTO-MANUAL] attempt=${attempt} taking-output beforeWindowFilled=${mapsBeforeOutput} ${formatCartographyWindowState(window)}`)
-          const outputTaken = await takeWindowOutputToInventoryConfirmed(bot, window, 2, 'filled_map', mapsBeforeOutput, outputWaitMs, pollMs, clickTicks)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} taking-output mode=nerv-quick-move beforeWindowFilled=${mapsBeforeOutput} ${formatCartographyWindowState(window)}`)
+          const outputTaken = await quickMoveCartographyOutputConfirmed(bot, window, mapsBeforeOutput, outputWaitMs, pollMs, clickTicks)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-output`)
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
           console.log(`[CARTO-MANUAL] attempt=${attempt} after-output outputTaken=${outputTaken} ${formatCartographyWindowState(window)} ${formatCartographyBotState(bot, config)}`)
