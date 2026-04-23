@@ -4461,8 +4461,9 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   }
 
   const postPrintSteps = ['withdraw', 'fill_map', 'cartography', 'rename_store', 'reset', 'center', 'done']
-  const resumeStep = postPrintSteps.includes(context.resumePostPrintStep) ? context.resumePostPrintStep : 'withdraw'
-  const resumeStepIndex = postPrintSteps.indexOf(resumeStep)
+  const requestedResumeStep = postPrintSteps.includes(context.resumePostPrintStep) ? context.resumePostPrintStep : 'withdraw'
+  let resumeStep = requestedResumeStep
+  let resumeStepIndex = postPrintSteps.indexOf(resumeStep)
   const shouldRunStep = (step) => postPrintSteps.indexOf(step) >= resumeStepIndex && resumeStep !== 'done'
   let cartographySucceeded = context.postPrintCartographyComplete === true || context.cartographyComplete === true
   const savePostPrintStep = (nextStep, action = `next-${nextStep}`, meta = {}) => {
@@ -4495,6 +4496,15 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   const finishedChestPos = machine.finishedMapChest?.enabled ? machine.finishedMapChest.position : null
   const anvilConfig = machine.anvil?.enabled ? machine.anvil : null
   const resetConfig = machine.resetBlock?.enabled ? machine.resetBlock : null
+
+  if (advanced.postPrintUseCartographyEnabled !== false &&
+    !cartographySucceeded &&
+    resumeStepIndex > postPrintSteps.indexOf('cartography')) {
+    const fallbackStep = countInventoryByType(bot, 'filled_map') > 0 ? 'cartography' : 'withdraw'
+    console.log(`[POSTPRINT-RESUME] Saved step=${requestedResumeStep} but cartographyComplete=false; rewinding to step=${fallbackStep}.`)
+    resumeStep = fallbackStep
+    resumeStepIndex = postPrintSteps.indexOf(resumeStep)
+  }
 
   if (shouldRunStep('withdraw') && !mapChestPos) {
     return failPostPrint('withdraw', 'Missing map material chest position. Post-print workflow cannot continue.')
@@ -7516,7 +7526,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
       state: 'post_print_workflow',
       action: 'run-post-print',
-      postPrintStep: resumePostPrintStep
+      postPrintStep: resumePostPrintStep,
+      postPrintCartographyComplete: resumePostPrintCartographyComplete
     })
   }
 
@@ -7578,7 +7589,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
       state: 'post_print_workflow',
       action: 'post-print-test-only',
-      postPrintStep: resumePostPrintStep
+      postPrintStep: resumePostPrintStep,
+      postPrintCartographyComplete: false
     })
   }
 
@@ -8035,7 +8047,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
       state: 'post_print_workflow',
       action: 'run-post-print',
-      postPrintStep: resumePostPrintStep
+      postPrintStep: resumePostPrintStep,
+      postPrintCartographyComplete: resumePostPrintCartographyComplete
     })
   }
 
