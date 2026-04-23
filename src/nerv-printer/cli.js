@@ -11462,8 +11462,10 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
     const pollMs = Math.max(250, toNumber(config.advanced?.platformWatchdogPollMs, 1000))
     const logMs = Math.max(1000, toNumber(config.advanced?.platformHoldLogMs, 5000))
     const stuckTimeoutMs = Math.max(60000, toNumber(config.advanced?.platformHoldStuckTimeoutMs, 180000))
+    const portalCooldownMs = Math.max(5000, toNumber(config.advanced?.platformHoldPortalCooldownMs, 15000))
     let lastLog = 0
     let announced = false
+    let lastPortalAttemptAt = 0
     const stuckAt = Date.now()
 
     while (bot?._client && bot._client.state !== 'disconnected' && bot.__nervSessionActive !== false) {
@@ -11483,6 +11485,19 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
           console.log(`[PLATFORM-HOLD] Recovered on platform at X:${Math.round(pos.x)} Z:${Math.round(pos.z)}. Resuming.`)
         }
         return
+      }
+
+      const holdState = runtime?.classification?.state
+      if (
+        isLobbyPortalEnabled(config) &&
+        holdState !== 'transfer-lobby' &&
+        holdState !== 'missing-position' &&
+        Date.now() - lastPortalAttemptAt > portalCooldownMs
+      ) {
+        lastPortalAttemptAt = Date.now()
+        console.log(`[PLATFORM-HOLD] In lobby zone (${holdState}) during ${reason}; running portal automation to recover platform position.`)
+        await runLobbyPortalAutomation(bot, config)
+        continue
       }
 
       stopBotMovement(bot)
