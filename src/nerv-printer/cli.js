@@ -3447,6 +3447,14 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               console.log(`[RESTOCK-BURST] ${blockName}: quickMovedStacks=${burst.stacksMoved} windowHave=${windowHave} invHave=${haveAfterWait} target=${targetCount}`)
             }
 
+            if (windowHave >= Math.min(targetCount, expectedWindowTarget)) {
+              // The open container window is the authoritative view for this transaction.
+              // bot.inventory can stay stale until the window closes, so do not classify a
+              // confirmed window quick-move as a failed withdrawal.
+              observedHave = Math.max(observedHave, windowHave)
+              continue
+            }
+
             if (windowHave > haveBeforePull && haveAfterWait < Math.min(targetCount, windowHave)) {
               haveAfterWait = await waitForInventoryCountChangeOrTarget(
                 bot,
@@ -3537,9 +3545,20 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           return false
         }
 
-        if (countInventoryItems(bot, blockName) >= haveAtStart + willPullTotal || countInventoryItems(bot, blockName) >= desiredItemCount) {
+        if (observedHave >= haveAtStart + willPullTotal || observedHave >= desiredItemCount ||
+          countInventoryItems(bot, blockName) >= haveAtStart + willPullTotal ||
+          countInventoryItems(bot, blockName) >= desiredItemCount) {
+          await waitForInventoryCountChangeOrTarget(
+            bot,
+            blockName,
+            haveAtStart,
+            Math.min(desiredItemCount, haveAtStart + willPullTotal),
+            Math.max(250, sameChestRetrySettleMs),
+            sameChestRetryPollMs,
+            sameChestRetrySettleMs
+          )
           const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
-          await bot.equip(inventoryItem, 'hand')
+          if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
           restockFailureCache.delete(blockName)
           unavailableMaterialCache.delete(blockName)
           return true
