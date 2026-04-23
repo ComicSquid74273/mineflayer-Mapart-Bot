@@ -3300,6 +3300,29 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
         await delay(toNumber(advanced.postRestockDelayMs, 300))
 
+        // On high-latency servers (e.g. 6b6t), inventory update packets may arrive after the
+        // pull loop exits. If we issued all planned withdrawals but actual inventory hasn't
+        // caught up yet, poll briefly before the final success check rather than returning false.
+        if (!stoppedForInventoryFull && plannedHaveAfterPulls >= targetCount) {
+          const haveNow = countInventoryItems(bot, blockName)
+          if (haveNow < haveAtStart + willPullTotal) {
+            const syncWaitMs = toNumber(advanced.restockInventorySyncWaitMs, 2000)
+            const pollMs = 200
+            let elapsed = 0
+            while (elapsed < syncWaitMs) {
+              await delay(pollMs)
+              elapsed += pollMs
+              if (countInventoryItems(bot, blockName) >= haveAtStart + willPullTotal) break
+            }
+            if (config.errorHandling?.logErrors !== false) {
+              const haveAfterSync = countInventoryItems(bot, blockName)
+              if (haveAfterSync < haveAtStart + willPullTotal) {
+                console.log(`[RESTOCK-WARN] ${blockName} inventory still lagging after ${syncWaitMs}ms sync wait: have=${haveAfterSync} target=${haveAtStart + willPullTotal}`)
+              }
+            }
+          }
+        }
+
         if (stoppedForInventoryFull) {
           const haveNow = countInventoryItems(bot, blockName)
           // Inventory is full but check if we actually have enough for what was planned.
@@ -4745,6 +4768,21 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       stableNeededByBlock.set(blockName, count + restockBuffer)
     }
   }
+
+  // Preserve materials from upcoming windows: mark them as required for however much we
+  // currently have in inventory so getNervInventoryInformation won't flag those slots as
+  // dump candidates. This prevents pre-traversal dumps from discarding items that are
+  // needed in the very next column batch.
+  const preserveMaterials = options.preserveMaterials
+  if (Array.isArray(preserveMaterials)) {
+    for (const mat of preserveMaterials) {
+      if (!stableNeededByBlock.has(mat)) {
+        const haveNow = countInventoryItems(bot, mat)
+        if (haveNow > 0) stableNeededByBlock.set(mat, haveNow)
+      }
+    }
+  }
+
   if (config.advanced?.debugPrints) {
     const windowLabel = planning.cols?.length
       ? `cols=${planning.cols.join(',')}`
@@ -6852,12 +6890,26 @@ async function runPrint(bot, config) {
       inventoryCols: inventoryWindow.cols.join(','),
       colBatch: inventoryCols.join(',')
     })
+    // Collect materials from all remaining column windows so the pre-dump step doesn't
+    // discard items that will be needed in the very next batch(es).
+    const lookaheadMaterials = new Set(inventoryWindow.materials)
+    for (let li = i + printChunkLines; li < colTraversal.length; li += printChunkLines) {
+      const futureCols = colTraversal.slice(li, li + printChunkLines)
+      for (const futureRow of inventoryRowOrder) {
+        for (const futureCol of futureCols) {
+          const futureTarget = byColRow.get(`${futureCol}:${futureRow}`)
+          if (futureTarget?.blockName) lookaheadMaterials.add(futureTarget.blockName)
+        }
+      }
+    }
+
     const materialsReady = await ensureMaterialsForTargets(bot, config, inventoryWindow.targets, {
       windowed: true,
       cols: inventoryWindow.cols,
       materials: inventoryWindow.materials,
       dumpWithoutRestock: true,
-      dumpAllUnneededBeforeRestock: true
+      dumpAllUnneededBeforeRestock: true,
+      preserveMaterials: [...lookaheadMaterials]
     })
     if (!materialsReady) {
       console.log('[NERV-INVENTORY-WARN] Could not fully clean/refill inventory for this window; continuing with current inventory. Emergency restocks will handle any shortfalls.')
