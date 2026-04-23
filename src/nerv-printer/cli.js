@@ -3110,9 +3110,11 @@ async function openContainerAt(bot, position, accessPosition) {
   const goalPos = accessPosition || position
   const goal = new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2)
 
-  const gotoPromise = bot.pathfinder.goto(goal)
-  gotoPromise.catch(() => {})
-  await gotoPromise
+  if (distanceToPoint(bot?.entity?.position, goalPos) > 2.25) {
+    const gotoPromise = bot.pathfinder.goto(goal)
+    gotoPromise.catch(() => {})
+    await gotoPromise
+  }
 
   const block = bot.blockAt(blockPos)
   if (!block) {
@@ -3125,6 +3127,7 @@ async function openContainerAt(bot, position, accessPosition) {
 async function restockMaterial(bot, config, blockName, requestedPulls = 1, neededByBlock = null) {
   const advanced = config.advanced || {}
   const failureCooldownMs = Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))
+  const syncWaitMs = Math.max(200, toNumber(advanced.restockInventorySyncWaitMs, 2000))
   const lastFailedAt = restockFailureCache.get(blockName)
   if (lastFailedAt && Date.now() - lastFailedAt < failureCooldownMs) {
     return false
@@ -3241,15 +3244,17 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         }
 
         // Pull in stack-sized increments until we get what we need from this chest.
-        let plannedHaveAfterPulls = haveAtStart
+        let observedHave = haveAtStart
         const targetCount = haveAtStart + willPullTotal
         let attempts = 0
         let stoppedForInventoryFull = false
+        let stoppedForInventorySync = false
         const maxAttempts = chestSlots.length + 8
-        while (plannedHaveAfterPulls < targetCount && attempts < maxAttempts) {
+        while (observedHave < targetCount && attempts < maxAttempts) {
           attempts++
           const haveBeforePull = countInventoryItems(bot, blockName)
-          const amountStillNeeded = targetCount - plannedHaveAfterPulls
+          observedHave = Math.max(observedHave, haveBeforePull)
+          const amountStillNeeded = targetCount - observedHave
           const currentCapacity = inventoryCapacityForItem(bot, blockName)
           if (currentCapacity <= 0) {
             if (config.errorHandling?.logErrors !== false) {
@@ -3261,17 +3266,28 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           const pullAmount = Math.min(stackSize, amountStillNeeded, currentCapacity)
           try {
             await container.withdraw(itemId, null, pullAmount)
-            plannedHaveAfterPulls += pullAmount
+            if (bot.supportFeature?.('stateIdUsed')) {
+              await waitForInventoryStateUpdate(bot, Math.min(syncWaitMs, 500))
+            }
             await delay(toNumber(advanced.inventoryActionDelayMs, 80))
-            const haveAfterPull = countInventoryItems(bot, blockName)
-            if (haveAfterPull <= haveBeforePull) {
-              // Items not yet reflected in inventory — wait longer for server sync
-              await delay(250)
-              const haveAfterWait = countInventoryItems(bot, blockName)
+            let haveAfterWait = countInventoryItems(bot, blockName)
+            if (haveAfterWait <= haveBeforePull) {
+              let elapsed = 0
+              const pollMs = 200
+              while (elapsed < syncWaitMs && haveAfterWait <= haveBeforePull) {
+                await delay(pollMs)
+                elapsed += pollMs
+                haveAfterWait = countInventoryItems(bot, blockName)
+              }
               if (config.errorHandling?.logErrors !== false && haveAfterWait <= haveBeforePull) {
-                console.log(`[RESTOCK-WARN] ${blockName} inventory update pending: before=${haveBeforePull} after=${haveAfterWait} requested=${pullAmount} planned=${plannedHaveAfterPulls}/${targetCount}`)
+                console.log(`[RESTOCK-WARN] ${blockName} inventory update pending: before=${haveBeforePull} after=${haveAfterWait} requested=${pullAmount} target=${targetCount}`)
               }
             }
+            if (haveAfterWait <= haveBeforePull) {
+              stoppedForInventorySync = true
+              break
+            }
+            observedHave = Math.max(observedHave, haveAfterWait)
           } catch (err) {
             const message = String(err?.message || err).toLowerCase()
             const inventoryFull = message.includes('no free') ||
@@ -3284,7 +3300,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               // Check if we actually got some items despite the error
               const haveNowCheck = countInventoryItems(bot, blockName)
               if (haveNowCheck > haveAtStart) {
-                plannedHaveAfterPulls = haveNowCheck
+                observedHave = Math.max(observedHave, haveNowCheck)
               } else if (config.errorHandling?.logErrors !== false) {
                 console.log(`[RESTOCK-WARN] Inventory full while pulling ${blockName}; stopping this chest.`)
               }
@@ -3303,21 +3319,20 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         // On high-latency servers (e.g. 6b6t), inventory update packets may arrive after the
         // pull loop exits. If we issued all planned withdrawals but actual inventory hasn't
         // caught up yet, poll briefly before the final success check rather than returning false.
-        if (!stoppedForInventoryFull && plannedHaveAfterPulls >= targetCount) {
+        if (!stoppedForInventoryFull && !stoppedForInventorySync && observedHave >= targetCount) {
           const haveNow = countInventoryItems(bot, blockName)
-          if (haveNow < haveAtStart + willPullTotal) {
-            const syncWaitMs = toNumber(advanced.restockInventorySyncWaitMs, 2000)
+          if (haveNow < targetCount) {
             const pollMs = 200
             let elapsed = 0
             while (elapsed < syncWaitMs) {
               await delay(pollMs)
               elapsed += pollMs
-              if (countInventoryItems(bot, blockName) >= haveAtStart + willPullTotal) break
+              if (countInventoryItems(bot, blockName) >= targetCount) break
             }
             if (config.errorHandling?.logErrors !== false) {
               const haveAfterSync = countInventoryItems(bot, blockName)
-              if (haveAfterSync < haveAtStart + willPullTotal) {
-                console.log(`[RESTOCK-WARN] ${blockName} inventory still lagging after ${syncWaitMs}ms sync wait: have=${haveAfterSync} target=${haveAtStart + willPullTotal}`)
+              if (haveAfterSync < targetCount) {
+                console.log(`[RESTOCK-WARN] ${blockName} inventory still lagging after ${syncWaitMs}ms sync wait: have=${haveAfterSync} target=${targetCount}`)
               }
             }
           }
@@ -3347,6 +3362,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           unavailableMaterialCache.delete(blockName)
           return true
         }
+
+        if (stoppedForInventorySync && config.errorHandling?.logErrors !== false) {
+          const haveNow = countInventoryItems(bot, blockName)
+          console.log(`[RESTOCK-WARN] ${blockName} withdraws did not reach inventory after sync wait; have=${haveNow} target=${targetCount}. Trying next chest/replan.`)
+        }
       } catch (err) {
         if (config.advanced?.debugPrints) {
           console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.z}: ${err?.message || err}`)
@@ -3362,6 +3382,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const haveAfterRestock = countInventoryItems(bot, blockName)
   if (haveAfterRestock > haveBeforeRestock) {
     console.log(`[RESTOCK-WARN] Partial restock for ${blockName}: have=${haveAfterRestock} target=${desiredItemCount}.`)
+    return false
   }
 
   restockFailureCache.set(blockName, Date.now())
@@ -6890,26 +6911,12 @@ async function runPrint(bot, config) {
       inventoryCols: inventoryWindow.cols.join(','),
       colBatch: inventoryCols.join(',')
     })
-    // Collect materials from all remaining column windows so the pre-dump step doesn't
-    // discard items that will be needed in the very next batch(es).
-    const lookaheadMaterials = new Set(inventoryWindow.materials)
-    for (let li = i + printChunkLines; li < colTraversal.length; li += printChunkLines) {
-      const futureCols = colTraversal.slice(li, li + printChunkLines)
-      for (const futureRow of inventoryRowOrder) {
-        for (const futureCol of futureCols) {
-          const futureTarget = byColRow.get(`${futureCol}:${futureRow}`)
-          if (futureTarget?.blockName) lookaheadMaterials.add(futureTarget.blockName)
-        }
-      }
-    }
-
     const materialsReady = await ensureMaterialsForTargets(bot, config, inventoryWindow.targets, {
       windowed: true,
       cols: inventoryWindow.cols,
       materials: inventoryWindow.materials,
       dumpWithoutRestock: true,
-      dumpAllUnneededBeforeRestock: true,
-      preserveMaterials: [...lookaheadMaterials]
+      dumpAllUnneededBeforeRestock: true
     })
     if (!materialsReady) {
       console.log('[NERV-INVENTORY-WARN] Could not fully clean/refill inventory for this window; continuing with current inventory. Emergency restocks will handle any shortfalls.')
