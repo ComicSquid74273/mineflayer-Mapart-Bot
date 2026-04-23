@@ -4036,19 +4036,54 @@ async function depositToChest(bot, config, chestPos, itemName, amount, accessPos
   }
 }
 
-async function gotoConfiguredAccess(bot, position, accessPosition, range = 2) {
+function getLivePlatformStatus(bot, config) {
+  const pos = bot?.entity?.position
+  const classification = classifySpatialPosition(pos, config)
+  return {
+    pos,
+    classification,
+    platform: classification?.platform === true || (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config))
+  }
+}
+
+function assertLivePlatformReady(bot, config, reason = 'platform-action') {
+  if (!isBotSessionLive(bot)) {
+    throw new Error(`${reason} blocked: bot session is not live`)
+  }
+  if (config?.advanced?.platformWatchdogEnabled === false || getPlatformBounds(config) == null) return
+  const status = getLivePlatformStatus(bot, config)
+  if (status.platform) return
+  throw new Error(`${reason} blocked: live position is not on printer platform (state=${status.classification?.state || 'unknown'} p=${JSON.stringify(status.pos || null)})`)
+}
+
+function closeCurrentWindowIfOpen(bot, reason = 'window-reset') {
+  const window = bot?.currentWindow
+  if (!window || typeof window.close !== 'function') return
+  try {
+    window.close()
+    console.log(`[WINDOW-RESET] Closed stale open window before ${reason}.`)
+  } catch { }
+}
+
+async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, config = null, reason = 'configured-access') {
   const goalPos = accessPosition || position
   if (!goalPos) throw new Error('Missing configured access position')
+  if (config) assertLivePlatformReady(bot, config, `${reason}:pre-goto`)
   if (distanceToPoint(bot?.entity?.position, goalPos) <= Math.max(2.25, Number(range))) return
   const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, range))
   gotoPromise.catch(() => {})
   await gotoPromise
+  if (config) assertLivePlatformReady(bot, config, `${reason}:post-goto`)
 }
 
-async function openBlockWindowAt(bot, position, accessPosition) {
+async function openBlockWindowAt(bot, position, accessPosition, options = {}) {
   const Vec3 = bot.entity.position.constructor
   const blockPos = new Vec3(position.x, position.y, position.z)
-  await gotoConfiguredAccess(bot, position, accessPosition, 2)
+  const config = options.config || null
+  const reason = options.reason || 'open-block-window'
+  if (config) assertLivePlatformReady(bot, config, `${reason}:pre-open`)
+  await gotoConfiguredAccess(bot, position, accessPosition, 2, config, reason)
+  if (config) assertLivePlatformReady(bot, config, `${reason}:at-access`)
   const block = bot.blockAt(blockPos)
   if (!block) throw new Error(`No block at ${position.x} ${position.y} ${position.z}`)
   return await bot.openBlock(block)
@@ -4606,6 +4641,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     setPostPrintStatus('cartography')
     try {
       await waitForPlatformReady(bot, config, 'postprint-cartography')
+      assertLivePlatformReady(bot, config, 'postprint-cartography')
+      closeCurrentWindowIfOpen(bot, 'postprint-cartography')
       const outputWaitMs = Math.max(1000, toNumber(advanced.postPrintCartographyOutputWaitMs, 4000))
       const actionDelayMs = Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
       const pollMs = Math.max(50, toNumber(advanced.postPrintCartographyPollMs, 100))
@@ -4625,8 +4662,13 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             await bot.equip(filledMapForTable, 'hand')
           }
 
-          window = await openBlockWindowAt(bot, cartographyConfig.position, cartographyConfig.accessPosition)
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-open`)
+          window = await openBlockWindowAt(bot, cartographyConfig.position, cartographyConfig.accessPosition, {
+            config,
+            reason: `postprint-cartography-attempt-${attempt}`
+          })
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-open`)
 
           const filledMapSlot = findWindowInventorySlot(window, bot, 'filled_map')
           let paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
@@ -4634,14 +4676,18 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             throw new Error('Missing filled map or glass pane in inventory for cartography step.')
           }
 
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-map-input`)
           const inputMapReady = await quickMoveWindowSlotConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs)
           await delay(actionDelayMs)
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-map-input`)
           paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
           if (paneSlot < 0) {
             throw new Error('Glass pane disappeared before cartography input.')
           }
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-pane-input`)
           const inputPaneReady = await quickMoveWindowSlotConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs)
           await delay(actionDelayMs)
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-pane-input`)
           const outputStack = await waitForWindowSlot(window, 2, (stack) => stack && toNumber(stack.count, 0) > 0, outputWaitMs, pollMs)
           lastWindowState = `in0=${formatWindowStack(window?.slots?.[0])} in1=${formatWindowStack(window?.slots?.[1])} out=${formatWindowStack(window?.slots?.[2])}`
 
@@ -4659,8 +4705,10 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
 
           const filledMapId = getItemId(bot, 'filled_map')
           const mapsBeforeOutput = countWindowInventoryItems(window, filledMapId, 'filled_map')
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-output`)
           await bot.clickWindow(2, 0, 1)
           await delay(actionDelayMs)
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-output`)
           const outputCleared = await waitForWindowSlotEmpty(window, 2, outputWaitMs, pollMs)
           const mapsAfterOutput = await waitForWindowInventoryCount(window, filledMapId, 'filled_map', mapsBeforeOutput + 1, outputWaitMs, pollMs)
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
@@ -12350,6 +12398,7 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
   const runtime = classifyRuntimePosition(bot, config, reason)
   if (runtime?.classification?.platform === true) return
   if (isPositionUsable(bot?.entity?.position) && isPositionInsidePlatformBounds(bot.entity.position, config)) return
+  closeCurrentWindowIfOpen(bot, reason)
 
   if (bot.__nervPlatformHoldPromise) {
     return bot.__nervPlatformHoldPromise
@@ -12398,6 +12447,7 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
       }
 
       stopBotMovement(bot)
+      closeCurrentWindowIfOpen(bot, reason)
       maybeRequestPlatformRecoveryTpa(bot, config, reason, runtime)
       const now = Date.now()
       if (!announced || now - lastLog >= logMs) {
