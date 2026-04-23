@@ -4528,6 +4528,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       const maxAttempts = Math.max(1, toNumber(advanced.postPrintCartographyAttempts, 2))
       let lastWindowState = ''
       let lockedMapTaken = false
+      let lockedMapConfirmedInWindow = false
 
       for (let attempt = 1; attempt <= maxAttempts && !lockedMapTaken; attempt += 1) {
         let window = null
@@ -4584,6 +4585,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             throw new Error(`Cartography output click did not return filled_map to inventory: ${lastWindowState}`)
           }
           lockedMapTaken = true
+          lockedMapConfirmedInWindow = true
         } finally {
           if (window && typeof window.close === 'function') {
             try { window.close() } catch { }
@@ -4591,7 +4593,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
         }
       }
 
-      if (countInventoryByType(bot, 'filled_map') <= 0) {
+      if (!lockedMapConfirmedInWindow && countInventoryByType(bot, 'filled_map') <= 0) {
         await waitForInventoryCountChangeOrTarget(
           bot,
           'filled_map',
@@ -4602,7 +4604,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
         )
       }
-      if (countInventoryByType(bot, 'filled_map') <= 0) {
+      if (!lockedMapConfirmedInWindow && countInventoryByType(bot, 'filled_map') <= 0) {
         throw new Error('No filled map found in inventory after taking cartography output.')
       }
 
