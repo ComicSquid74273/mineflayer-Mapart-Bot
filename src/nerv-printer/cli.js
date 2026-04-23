@@ -6480,22 +6480,9 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
                 inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               }
               if (String(result.reason || '').startsWith('missing-item-')) {
-                if (!shouldEmergencyRestockMissingItem(target.blockName)) {
-                  const haveNow = countInventoryItems(bot, target.blockName)
-                  const desyncHitKey = `${target.blockName}:${key}`
-                  const hitCount = (inventoryDesyncHits.get(desyncHitKey) || 0) + 1
-                  inventoryDesyncHits.set(desyncHitKey, hitCount)
-                  const recovered = await recoverMissingItemInventoryDesync(bot, config, target.blockName, `${label} ${key}`)
-                  pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
-                  retryPriority.add(key)
-                  if (config.errorHandling?.logErrors !== false && (recovered || hitCount >= maxInventoryDesyncHits)) {
-                    const status = recovered ? 're-equipped' : 'equip recovery failed'
-                    console.log(`[${label}-INVENTORY-RECOVER] ${target.blockName} reported missing while inventory had ${haveNow}; ${status}; bounded retry ${hitCount}/${maxInventoryDesyncHits}.`)
-                  }
-                  if (hitCount >= maxInventoryDesyncHits && !recovered) {
-                    active = false
-                  }
-                  continue
+                const haveNow = countInventoryItems(bot, target.blockName)
+                if (config.errorHandling?.logErrors !== false && haveNow > 0) {
+                  console.log(`[${label}-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; forcing emergency refill instead of bounded retries.`)
                 }
                 emergencyRestockBlock = target.blockName
                 active = false
@@ -6668,25 +6655,12 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
                 console.log(`[NERV-SCANNER-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
               }
               if (allowEmergencyRestock && String(result.reason || '').startsWith('missing-item-')) {
-                if (countInventoryItems(bot, target.blockName) <= 0) {
-                  emergencyRestockBlock = target.blockName
-                  active = false
-                  break
-                }
                 const haveNow = countInventoryItems(bot, target.blockName)
-                const desyncHitKey = `${target.blockName}:${key}`
-                const hitCount = (inventoryDesyncHits.get(desyncHitKey) || 0) + 1
-                inventoryDesyncHits.set(desyncHitKey, hitCount)
-                const recovered = await recoverMissingItemInventoryDesync(bot, config, target.blockName, `NERV-SCANNER ${key}`)
-                retryPriority.add(key)
-                if (config.errorHandling?.logErrors !== false && (recovered || hitCount >= maxInventoryDesyncHits)) {
-                  const status = recovered ? 're-equipped' : 'equip recovery failed'
-                  console.log(`[NERV-SCANNER-INVENTORY-RECOVER] ${target.blockName} reported missing while inventory had ${haveNow}; ${status}; bounded retry ${hitCount}/${maxInventoryDesyncHits}.`)
+                if (config.errorHandling?.logErrors !== false && haveNow > 0) {
+                  console.log(`[NERV-SCANNER-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; forcing emergency refill instead of bounded retries.`)
                 }
-                if (hitCount >= maxInventoryDesyncHits && !recovered) {
-                  active = false
-                }
-                await delay(inventoryDesyncCooldownMs)
+                emergencyRestockBlock = target.blockName
+                active = false
                 break
               }
             }
@@ -6922,31 +6896,22 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else {
                 const haveNow = countInventoryItems(bot, target.blockName)
-                if (allowEmergencyRestock && haveNow <= 0) {
+                if (allowEmergencyRestock) {
                   hardStops += 1
+                  if (config.errorHandling?.logErrors !== false && haveNow > 0) {
+                    console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; forcing emergency refill instead of bounded retries.`)
+                  }
                   emergencyRestockBlock = target.blockName
                   active = false
                   lastTickTime = Date.now()
                   break
                 }
-                const desyncHitKey = `${target.blockName}:${key}`
-                const hitCount = (inventoryDesyncHits.get(desyncHitKey) || 0) + 1
-                inventoryDesyncHits.set(desyncHitKey, hitCount)
-                const recovered = await recoverMissingItemInventoryDesync(bot, config, target.blockName, `NERV-WORKLOAD ${key}`)
-                pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
-                retryPriority.add(key)
-                if (recovered) {
-                  if (config.errorHandling?.logErrors !== false) {
-                    console.log(`[NERV-WORKLOAD-INVENTORY-RECOVER] ${target.blockName} reported missing while inventory had ${haveNow}; re-equipped and queued bounded retry ${hitCount}/${maxInventoryDesyncHits}.`)
-                  }
-                } else if (config.errorHandling?.logErrors !== false) {
-                  console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; equip recovery failed ${hitCount}/${maxInventoryDesyncHits}.`)
+                if (config.errorHandling?.logErrors !== false) {
+                  console.log(`[NERV-WORKLOAD-INVENTORY-DESYNC] ${target.blockName} reported missing while inventory had ${haveNow}; emergency restock disabled, stopping bounded retry path.`)
                 }
                 lastTickTime = Date.now()
-                if (hitCount >= maxInventoryDesyncHits && !recovered) {
-                  hardStops += 1
-                  active = false
-                }
+                hardStops += 1
+                active = false
                 break
               }
             }
