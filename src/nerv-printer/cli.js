@@ -3152,10 +3152,17 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const requestedStackCount = Math.max(1, toNumber(requestedPulls, 1))
   const sameChestSyncRetries = Math.max(0, toNumber(advanced.restockSameChestSyncRetries, 2))
   const sameChestRetryDelayMs = Math.max(200, toNumber(advanced.restockSameChestRetryDelayMs, Math.max(syncWaitMs, 1200)))
+  const fastBurstStacks = Math.max(1, toNumber(advanced.restockFastStacksPerBurst, 8))
+  const fastBurstSettleMs = Math.max(100, toNumber(advanced.restockFastSettleMs, 300))
+  const fastBurstMinItems = Math.max(stackSize * 2, toNumber(advanced.restockFastMinItems, stackSize * 2))
   const haveBeforeRestock = countInventoryItems(bot, blockName)
-  const desiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
+  const exactDesiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
     ? Math.max(haveBeforeRestock + 1, toNumber(neededByBlock.get(blockName), haveBeforeRestock + requestedStackCount * stackSize))
     : Math.max(stackSize, haveBeforeRestock + (requestedStackCount * stackSize))
+  const initialRoundedDeficit = Math.max(0, exactDesiredItemCount - haveBeforeRestock)
+  const desiredItemCount = initialRoundedDeficit > 0
+    ? haveBeforeRestock + (Math.ceil(initialRoundedDeficit / stackSize) * stackSize)
+    : exactDesiredItemCount
   const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
 
   if (!inventoryHasRoomForItem(bot, blockName)) {
@@ -3224,7 +3231,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         // How much do we need vs what the chest has?
         const haveAtStart = countInventoryItems(bot, blockName)
         retryStartHave = haveAtStart
-        const stillNeedTotal = Math.max(0, desiredItemCount - haveAtStart)
+        const exactStillNeedTotal = Math.max(0, exactDesiredItemCount - haveAtStart)
+        const roundedStillNeedTotal = exactStillNeedTotal > 0
+          ? Math.ceil(exactStillNeedTotal / stackSize) * stackSize
+          : 0
+        const stillNeedTotal = Math.max(0, desiredItemCount - haveAtStart, roundedStillNeedTotal)
         // Use empty-slots-only capacity for the chest interaction budget.
         // mineflayer's container.withdraw() can fail with "inventory full" when
         // there are no empty slots even if a partial same-item stack exists —
@@ -3252,7 +3263,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         }
 
         if (config.errorHandling?.logErrors !== false) {
-          console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} need=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal} empty=${Math.floor(emptySlotCapacity / stackSize)}slots`)
+          console.log(`[RESTOCK-PULL] ${blockName}: have=${haveAtStart} needExact=${exactDesiredItemCount} needRounded=${desiredItemCount} chestHas=${totalInChest} pulling=${willPullTotal} empty=${Math.floor(emptySlotCapacity / stackSize)}slots`)
         }
 
         // Pull in stack-sized increments until we get what we need from this chest.
@@ -3275,6 +3286,43 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             stoppedForInventoryFull = true
             break
           }
+
+          const shouldUseFastBurst = amountStillNeeded >= fastBurstMinItems && currentCapacity >= stackSize
+          if (shouldUseFastBurst) {
+            const burstNeed = Math.min(amountStillNeeded, currentCapacity)
+            const burstStacksRequested = Math.max(1, Math.min(fastBurstStacks, Math.floor(burstNeed / stackSize)))
+            try {
+              const burst = await quickMoveChestItemStacks(bot, container, itemId, burstNeed, stackSize, burstStacksRequested)
+              if (burst.stacksMoved > 0) {
+                await delay(fastBurstSettleMs)
+                let haveAfterBurst = countInventoryItems(bot, blockName)
+                if (haveAfterBurst <= haveBeforePull) {
+                  let elapsed = 0
+                  const pollMs = 100
+                  while (elapsed < syncWaitMs && haveAfterBurst <= haveBeforePull) {
+                    await delay(pollMs)
+                    elapsed += pollMs
+                    haveAfterBurst = countInventoryItems(bot, blockName)
+                  }
+                }
+                if (haveAfterBurst > haveBeforePull) {
+                  observedHave = Math.max(observedHave, haveAfterBurst)
+                  if (config.errorHandling?.logErrors !== false) {
+                    console.log(`[RESTOCK-BURST] ${blockName}: moved=${haveAfterBurst - haveBeforePull} requestedStacks=${burstStacksRequested} target=${targetCount}`)
+                  }
+                  continue
+                }
+                if (config.errorHandling?.logErrors !== false) {
+                  console.log(`[RESTOCK-WARN] ${blockName} fast stack burst did not reach inventory after sync wait: before=${haveBeforePull} target=${targetCount}`)
+                }
+              }
+            } catch (err) {
+              if (config.errorHandling?.logErrors !== false) {
+                console.log(`[RESTOCK-WARN] fast stack burst error for ${blockName}: ${err?.message || err}`)
+              }
+            }
+          }
+
           const pullAmount = Math.min(stackSize, amountStillNeeded, currentCapacity)
           try {
             await container.withdraw(itemId, null, pullAmount)
@@ -3745,6 +3793,37 @@ function findWindowInventorySlot(window, bot, itemName) {
 async function moveWindowItem(bot, fromSlot, toSlot) {
   await bot.clickWindow(fromSlot, 0, 0)
   await bot.clickWindow(toSlot, 0, 0)
+}
+
+function getChestWindowSlots(window) {
+  const inventoryStart = Number.isFinite(window?.inventoryStart) ? window.inventoryStart : 0
+  const slots = []
+  for (let i = 0; i < inventoryStart; i += 1) {
+    const stack = window?.slots?.[i]
+    if (!stack || toNumber(stack.count, 0) <= 0) continue
+    slots.push({ slot: i, stack })
+  }
+  return slots
+}
+
+async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stackSize, maxStacks = 8) {
+  const slots = getChestWindowSlots(window)
+    .filter((entry) => entry.stack?.type === itemId)
+    .sort((a, b) => toNumber(b.stack?.count, 0) - toNumber(a.stack?.count, 0))
+
+  let movedEstimate = 0
+  let stacksMoved = 0
+  for (const entry of slots) {
+    if (stacksMoved >= maxStacks) break
+    const count = Math.max(0, toNumber(entry.stack?.count, 0))
+    if (count <= 0) continue
+    if (amountNeeded - movedEstimate < Math.max(1, Math.min(stackSize, count))) break
+    await bot.clickWindow(entry.slot, 0, 1)
+    movedEstimate += count
+    stacksMoved += 1
+  }
+
+  return { movedEstimate, stacksMoved }
 }
 
 function formatWindowStack(stack) {
