@@ -318,7 +318,7 @@
     "postPrintTargetXpLevel": 3,
     "postPrintSkipResetInteraction": false,
     "postPrintWalkToCenter": true,
-    "postPrintCenterWaitMs": 20000,
+    "postPrintCenterWaitMs": 30000,
     "postPrintInteractionDelayMs": 200,
     "postPrintMapSettleDelayMs": 200,
     "dumpAimSettleMs": 150,
