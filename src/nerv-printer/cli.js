@@ -4076,16 +4076,42 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
   if (config) assertLivePlatformReady(bot, config, `${reason}:post-goto`)
 }
 
-async function openBlockWindowAt(bot, position, accessPosition, options = {}) {
+async function waitForBlockAt(bot, position, options = {}) {
   const Vec3 = bot.entity.position.constructor
   const blockPos = new Vec3(position.x, position.y, position.z)
+  const timeoutMs = Math.max(500, toNumber(options.timeoutMs, 10000))
+  const pollMs = Math.max(50, toNumber(options.pollMs, 200))
+  const expectedNames = Array.isArray(options.expectedNames) ? options.expectedNames.filter(Boolean) : []
+  const deadline = Date.now() + timeoutMs
+  let latest = null
+
+  while (Date.now() <= deadline) {
+    latest = bot.blockAt(blockPos)
+    if (latest && (!expectedNames.length || expectedNames.includes(latest.name))) return latest
+    if (typeof bot.waitForChunksToLoad === 'function') {
+      try { await bot.waitForChunksToLoad() } catch { }
+    }
+    await delay(pollMs)
+  }
+
+  if (!latest) throw new Error(`No block at ${position.x} ${position.y} ${position.z}`)
+  if (expectedNames.length) {
+    throw new Error(`Unexpected block at ${position.x} ${position.y} ${position.z}: ${latest.name}, expected=${expectedNames.join('|')}`)
+  }
+  return latest
+}
+
+async function openBlockWindowAt(bot, position, accessPosition, options = {}) {
   const config = options.config || null
   const reason = options.reason || 'open-block-window'
   if (config) assertLivePlatformReady(bot, config, `${reason}:pre-open`)
   await gotoConfiguredAccess(bot, position, accessPosition, 2, config, reason)
   if (config) assertLivePlatformReady(bot, config, `${reason}:at-access`)
-  const block = bot.blockAt(blockPos)
-  if (!block) throw new Error(`No block at ${position.x} ${position.y} ${position.z}`)
+  const block = await waitForBlockAt(bot, position, {
+    timeoutMs: options.blockWaitMs,
+    pollMs: options.blockPollMs,
+    expectedNames: options.expectedNames
+  })
   return await bot.openBlock(block)
 }
 
@@ -4265,8 +4291,10 @@ async function takeWindowOutputToInventoryConfirmed(bot, window, outputSlot, ite
   const targetSlot = findEmptyWindowInventorySlot(window)
   if (targetSlot < 0) throw new Error(`No empty inventory slot available for cartography output ${itemName}.`)
 
+  console.log(`[CARTO-OUTPUT] start outputSlot=${outputSlot} targetSlot=${targetSlot} beforeCount=${beforeCount} ${formatCartographyWindowState(window)}`)
   await assertWindowCursorEmpty(window, `before taking output slot ${outputSlot}`)
   await safeWindowClick(bot, window, outputSlot, 0, 0, { precondition: 'empty', ticks: clickTicks })
+  console.log(`[CARTO-OUTPUT] after-output-click ${formatCartographyWindowState(window)}`)
 
   const cursor = await waitForWindowCursorState(
     window,
@@ -4274,15 +4302,132 @@ async function takeWindowOutputToInventoryConfirmed(bot, window, outputSlot, ite
     timeoutMs,
     pollMs
   )
+  console.log(`[CARTO-OUTPUT] cursor-after-wait=${formatWindowStack(cursor)}`)
   if (cursor?.name === itemName) {
     await safeWindowClick(bot, window, targetSlot, 0, 0, { precondition: 'any', ticks: clickTicks })
+    console.log(`[CARTO-OUTPUT] after-target-click ${formatCartographyWindowState(window)}`)
   }
 
   await assertWindowCursorEmpty(window, `after taking output slot ${outputSlot}`)
   const itemId = getItemId(bot, itemName)
   const outputCleared = await waitForWindowSlotEmpty(window, outputSlot, timeoutMs, pollMs)
   const afterCount = await waitForWindowInventoryCount(window, itemId, itemName, beforeCount + 1, timeoutMs, pollMs)
+  console.log(`[CARTO-OUTPUT] done outputCleared=${outputCleared} afterCount=${afterCount} target=${beforeCount + 1} ${formatCartographyWindowState(window)}`)
   return outputCleared && afterCount > beforeCount
+}
+
+async function callFirstAvailableMethod(target, names, args = []) {
+  for (const name of names) {
+    if (typeof target?.[name] !== 'function') continue
+    return await target[name](...args)
+  }
+  throw new Error(`Missing cartography API method: ${names.join('|')}`)
+}
+
+function getCartographyApiWindow(table) {
+  return table?.window || table
+}
+
+async function lockMapWithCartographyApi(bot, config, cartographyConfig, advanced, options = {}) {
+  if (typeof bot?.openCartographyTable !== 'function') {
+    console.log('[CARTO-API] unavailable openCartographyTable=false')
+    return null
+  }
+  const clickTicks = Math.max(2, toNumber(options.clickTicks, toNumber(advanced?.postPrintCartographyClickWaitTicks, 4)))
+  const outputSettleTicks = Math.max(10, toNumber(options.outputSettleTicks, toNumber(advanced?.postPrintCartographyOutputSettleTicks, 20)))
+  const outputWaitMs = Math.max(1000, toNumber(options.outputWaitMs, toNumber(advanced?.postPrintCartographyOutputWaitMs, 4000)))
+  const pollMs = Math.max(50, toNumber(options.pollMs, toNumber(advanced?.postPrintCartographyPollMs, 100)))
+  let table = null
+
+  try {
+    console.log(`[CARTO-API] start ${formatCartographyBotState(bot, config)} target=${formatCoordTriplet(cartographyConfig.position)} access=${formatCoordTriplet(cartographyConfig.accessPosition)}`)
+    assertLivePlatformReady(bot, config, 'postprint-cartography-api:pre-open')
+    console.log('[CARTO-API] goto access')
+    await gotoConfiguredAccess(bot, cartographyConfig.position, cartographyConfig.accessPosition, 2, config, 'postprint-cartography-api')
+    console.log(`[CARTO-API] at access ${formatCartographyBotState(bot, config)}`)
+    assertLivePlatformReady(bot, config, 'postprint-cartography-api:at-access')
+    console.log('[CARTO-API] waiting for cartography_table block')
+    const block = await waitForBlockAt(bot, cartographyConfig.position, {
+      timeoutMs: Math.max(1000, toNumber(advanced?.postPrintMachineBlockWaitMs, 10000)),
+      pollMs,
+      expectedNames: ['cartography_table']
+    })
+    console.log(`[CARTO-API] block ready name=${block?.name || 'unknown'} pos=${formatCoordTriplet(block?.position || cartographyConfig.position)}`)
+    table = await bot.openCartographyTable(block)
+    console.log('[CARTO-API] opened table')
+    await waitBotTicks(bot, clickTicks)
+    assertLivePlatformReady(bot, config, 'postprint-cartography-api:after-open')
+
+    const tableWindow = getCartographyApiWindow(table)
+    if (tableWindow?.selectedItem !== undefined) {
+      await assertWindowCursorEmpty(tableWindow, 'postprint-cartography-api:after-open')
+    }
+    console.log(`[CARTO-API] after-open ${formatCartographyWindowState(tableWindow)} ${formatCartographyBotState(bot, config)}`)
+
+    const mapItem = findInventoryItemByType(bot, 'filled_map')
+    const paneItem = findInventoryItemByType(bot, 'glass_pane')
+    console.log(`[CARTO-API] selected materials map=${formatWindowStack(mapItem)} locked=${isFilledMapKnownLocked(mapItem)} pane=${formatWindowStack(paneItem)}`)
+    if (!mapItem || !paneItem) throw new Error('Missing filled map or glass pane before cartography API lock.')
+    if (isFilledMapKnownLocked(mapItem)) {
+      console.log('[CARTO-API] map already appears locked; skipping lock inputs')
+      return true
+    }
+
+    console.log('[CARTO-API] put map')
+    await callFirstAvailableMethod(table, ['putMap', 'putInput', 'putInputItem'], [mapItem])
+    await waitBotTicks(bot, clickTicks)
+    assertLivePlatformReady(bot, config, 'postprint-cartography-api:after-map-input')
+    if (tableWindow?.selectedItem !== undefined) {
+      await assertWindowCursorEmpty(tableWindow, 'postprint-cartography-api:after-map-input')
+    }
+    console.log(`[CARTO-API] after-map-input ${formatCartographyWindowState(tableWindow)} ${formatCartographyBotState(bot, config)}`)
+
+    const freshPane = findInventoryItemByType(bot, 'glass_pane')
+    if (!freshPane) throw new Error('Glass pane disappeared before cartography API modifier input.')
+    console.log(`[CARTO-API] put modifier pane=${formatWindowStack(freshPane)}`)
+    await callFirstAvailableMethod(table, ['putModifier', 'putSecondItem', 'putAdditionalItem'], [freshPane])
+    await waitBotTicks(bot, clickTicks)
+    assertLivePlatformReady(bot, config, 'postprint-cartography-api:after-pane-input')
+    if (tableWindow?.selectedItem !== undefined) {
+      await assertWindowCursorEmpty(tableWindow, 'postprint-cartography-api:after-pane-input')
+    }
+    console.log(`[CARTO-API] after-pane-input ${formatCartographyWindowState(tableWindow)} ${formatCartographyBotState(bot, config)}`)
+
+    console.log(`[CARTO-API] waiting output settle ticks=${outputSettleTicks}`)
+    await waitBotTicks(bot, outputSettleTicks)
+    const output = typeof table.outputItem === 'function'
+      ? table.outputItem()
+      : tableWindow?.slots?.[2]
+    console.log(`[CARTO-API] output-read output=${formatWindowStack(output)} ${formatCartographyWindowState(tableWindow)}`)
+    if (!output) {
+      console.log('[POSTPRINT-WARN] Cartography API accepted inputs but produced no output; treating map as already locked/unlockable.')
+      return true
+    }
+
+    const before = countInventoryByType(bot, 'filled_map')
+    console.log(`[CARTO-API] take output beforeFilled=${before}`)
+    await callFirstAvailableMethod(table, ['takeOutput', 'takeResult'], [])
+    await waitBotTicks(bot, clickTicks)
+    assertLivePlatformReady(bot, config, 'postprint-cartography-api:after-output')
+    console.log(`[CARTO-API] after-output ${formatCartographyWindowState(tableWindow)} ${formatCartographyBotState(bot, config)}`)
+
+    const deadline = Date.now() + outputWaitMs
+    while (Date.now() <= deadline) {
+      if (countInventoryByType(bot, 'filled_map') > before || findInventoryItemByType(bot, 'filled_map')) {
+        console.log(`[CARTO-API] complete beforeFilled=${before} afterFilled=${countInventoryByType(bot, 'filled_map')}`)
+        return true
+      }
+      await delay(pollMs)
+    }
+    throw new Error('Cartography API output was taken but filled_map was not visible in inventory.')
+  } finally {
+    if (table && typeof table.close === 'function') {
+      try { table.close() } catch { }
+    } else if (table?.window && typeof table.window.close === 'function') {
+      try { table.window.close() } catch { }
+    }
+    console.log(`[CARTO-API] closed ${formatCartographyBotState(bot, config)}`)
+  }
 }
 
 async function takeOneChestItemToInventory(bot, window, itemId, itemName, timeoutMs = 3000, pollMs = 100) {
@@ -4345,6 +4490,20 @@ async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stack
 function formatWindowStack(stack) {
   if (!stack) return 'empty'
   return `${stack.name || stack.displayName || stack.type || 'unknown'}x${toNumber(stack.count, 0)}`
+}
+
+function formatCursorStack(window) {
+  return formatWindowStack(getWindowCursorItem(window))
+}
+
+function formatCartographyWindowState(window) {
+  if (!window) return 'window=null'
+  return `in0=${formatWindowStack(window.slots?.[0])} in1=${formatWindowStack(window.slots?.[1])} out=${formatWindowStack(window.slots?.[2])} cursor=${formatCursorStack(window)} range=${window.inventoryStart ?? 'n/a'}-${window.inventoryEnd ?? 'n/a'}`
+}
+
+function formatCartographyBotState(bot, config) {
+  const status = getLivePlatformStatus(bot, config)
+  return `pos=${formatBotPosition(bot)} state=${status.classification?.state || 'unknown'} platform=${status.platform} held=${formatWindowStack(bot?.heldItem)} filled=${countInventoryByType(bot, 'filled_map')} pane=${countInventoryItems(bot, 'glass_pane')}`
 }
 
 async function waitForWindowSlot(window, slot, predicate, timeoutMs = 3000, pollMs = 100) {
@@ -4774,35 +4933,67 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       let lockedMapTaken = false
       let lockedMapConfirmedInWindow = false
 
+      console.log(`[CARTO] start useApi=${advanced.postPrintCartographyUseApi !== false} attempts=${maxAttempts} clickTicks=${clickTicks} outputSettleTicks=${outputSettleTicks} ${formatCartographyBotState(bot, config)}`)
+      if (advanced.postPrintCartographyUseApi !== false) {
+        try {
+          const apiLocked = await lockMapWithCartographyApi(bot, config, cartographyConfig, advanced, {
+            clickTicks,
+            outputSettleTicks,
+            outputWaitMs,
+            pollMs
+          })
+          if (apiLocked === true) {
+            lockedMapTaken = true
+            lockedMapConfirmedInWindow = true
+            console.log('[CARTO] API path completed cartography lock.')
+          } else if (apiLocked === null) {
+            console.log('[POSTPRINT] Mineflayer cartography API unavailable; using guarded manual cartography clicks.')
+          }
+        } catch (err) {
+          const message = String(err?.message || err || '')
+          if (message.includes('Missing cartography API method')) {
+            console.log(`[POSTPRINT-WARN] ${message}; using guarded manual cartography clicks.`)
+          } else {
+            throw err
+          }
+        }
+      }
+
       for (let attempt = 1; attempt <= maxAttempts && !lockedMapTaken; attempt += 1) {
         let window = null
         try {
+          console.log(`[CARTO-MANUAL] attempt=${attempt}/${maxAttempts} begin ${formatCartographyBotState(bot, config)}`)
           const filledMapForTable = findInventoryItemByType(bot, 'filled_map')
           if (!filledMapForTable) {
             throw new Error('No filled map available for cartography step.')
           }
+          console.log(`[CARTO-MANUAL] attempt=${attempt} material map=${formatWindowStack(filledMapForTable)} locked=${isFilledMapKnownLocked(filledMapForTable)} paneCount=${countInventoryItems(bot, 'glass_pane')}`)
           if (isFilledMapKnownLocked(filledMapForTable)) {
             console.log('[POSTPRINT] Filled map already appears locked; skipping cartography lock input and continuing to rename/store.')
             lockedMapTaken = true
             lockedMapConfirmedInWindow = true
             break
           }
-          if (bot.heldItem?.type !== filledMapForTable.type) {
-            await bot.equip(filledMapForTable, 'hand')
-          }
 
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-open`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} opening table target=${formatCoordTriplet(cartographyConfig.position)} access=${formatCoordTriplet(cartographyConfig.accessPosition)}`)
           window = await openBlockWindowAt(bot, cartographyConfig.position, cartographyConfig.accessPosition, {
             config,
-            reason: `postprint-cartography-attempt-${attempt}`
+            reason: `postprint-cartography-attempt-${attempt}`,
+            blockWaitMs: Math.max(1000, toNumber(advanced.postPrintMachineBlockWaitMs, 10000)),
+            blockPollMs: pollMs,
+            expectedNames: ['cartography_table']
           })
+          console.log(`[CARTO-MANUAL] attempt=${attempt} opened window type=${window?.type || 'unknown'} id=${window?.id ?? 'n/a'} ${formatCartographyWindowState(window)}`)
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
           await waitBotTicks(bot, clickTicks)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-open`)
           await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-open`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} after-open ${formatCartographyWindowState(window)} ${formatCartographyBotState(bot, config)}`)
 
           const filledMapSlot = findWindowInventorySlot(window, bot, 'filled_map')
           let paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
+          console.log(`[CARTO-MANUAL] attempt=${attempt} source-slots filledMapSlot=${filledMapSlot} paneSlot=${paneSlot}`)
           if (filledMapSlot < 0 || paneSlot < 0) {
             const filledMapId = getItemId(bot, 'filled_map')
             const paneId = getItemId(bot, 'glass_pane')
@@ -4817,32 +5008,40 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           }
 
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-map-input`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} before-map-input from=${filledMapSlot} to=0 ${formatCartographyWindowState(window)}`)
           const inputMapReady = await moveOneWindowItemConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs, clickTicks)
           await delay(actionDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-map-input`)
           await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-map-input`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} after-map-input ready=${inputMapReady} ${formatCartographyWindowState(window)} ${formatCartographyBotState(bot, config)}`)
           paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
           if (paneSlot < 0) {
             throw new Error('Glass pane disappeared before cartography input.')
           }
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-pane-input`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} before-pane-input from=${paneSlot} to=1 ${formatCartographyWindowState(window)}`)
           const inputPaneReady = await moveOneWindowItemConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs, clickTicks)
           await delay(actionDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-pane-input`)
           await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-pane-input`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} after-pane-input ready=${inputPaneReady} ${formatCartographyWindowState(window)} ${formatCartographyBotState(bot, config)}`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} waiting-output ticks=${outputSettleTicks}`)
           await waitBotTicks(bot, outputSettleTicks)
           const outputStack = await waitForWindowSlot(window, 2, (stack) => stack && toNumber(stack.count, 0) > 0, outputWaitMs, pollMs)
           lastWindowState = `in0=${formatWindowStack(window?.slots?.[0])} in1=${formatWindowStack(window?.slots?.[1])} out=${formatWindowStack(window?.slots?.[2])}`
+          console.log(`[CARTO-MANUAL] attempt=${attempt} output-ready=${Boolean(outputStack)} ${formatCartographyWindowState(window)}`)
 
           if (!inputMapReady || !inputPaneReady || !outputStack) {
             const inputsPresent = window?.slots?.[0]?.name === 'filled_map' && window?.slots?.[1]?.name === 'glass_pane'
             if (inputMapReady && inputPaneReady && !outputStack && inputsPresent) {
               console.log(`[POSTPRINT-WARN] Cartography table accepted map + glass pane but produced no output: ${lastWindowState}. Treating the map as already locked/unlockable and continuing without retrying the lock.`)
+              console.log(`[CARTO-MANUAL] attempt=${attempt} reclaiming accepted inputs without output.`)
               await reclaimCartographyInputs(bot, window, outputWaitMs, pollMs)
               lockedMapTaken = true
               lockedMapConfirmedInWindow = true
               break
             }
+            console.log(`[CARTO-MANUAL] attempt=${attempt} reclaiming inputs after incomplete output. inputMapReady=${inputMapReady} inputPaneReady=${inputPaneReady} outputReady=${Boolean(outputStack)}`)
             await reclaimCartographyInputs(bot, window, outputWaitMs, pollMs)
             if (attempt < maxAttempts) {
               console.log(`[POSTPRINT-WARN] Cartography output not ready on attempt ${attempt}/${maxAttempts}: ${lastWindowState}. Reopening table and retrying.`)
@@ -4857,9 +5056,11 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           const filledMapId = getItemId(bot, 'filled_map')
           const mapsBeforeOutput = countWindowInventoryItems(window, filledMapId, 'filled_map')
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-output`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} taking-output beforeWindowFilled=${mapsBeforeOutput} ${formatCartographyWindowState(window)}`)
           const outputTaken = await takeWindowOutputToInventoryConfirmed(bot, window, 2, 'filled_map', mapsBeforeOutput, outputWaitMs, pollMs, clickTicks)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-output`)
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+          console.log(`[CARTO-MANUAL] attempt=${attempt} after-output outputTaken=${outputTaken} ${formatCartographyWindowState(window)} ${formatCartographyBotState(bot, config)}`)
 
           if (!outputTaken) {
             throw new Error(`Cartography output click did not return filled_map to inventory: ${lastWindowState}`)
@@ -4868,7 +5069,10 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           lockedMapConfirmedInWindow = true
         } finally {
           if (window && typeof window.close === 'function') {
-            try { window.close() } catch { }
+            try {
+              window.close()
+              console.log(`[CARTO-MANUAL] attempt=${attempt} window closed ${formatCartographyBotState(bot, config)}`)
+            } catch { }
           }
         }
       }
@@ -4889,6 +5093,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       }
 
       cartographySucceeded = true
+      console.log(`[CARTO] complete lockedMapTaken=${lockedMapTaken} confirmed=${lockedMapConfirmedInWindow} ${formatCartographyBotState(bot, config)}`)
       savePostPrintStep('rename_store', 'cartography-complete', { postPrintCartographyComplete: true })
     } catch (err) {
       return failPostPrint('cartography', `Cartography step failed: ${err?.message || err}`)
