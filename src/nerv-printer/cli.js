@@ -5038,6 +5038,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       }
       const outputWaitMs = Math.max(1000, toNumber(advanced.postPrintCartographyOutputWaitMs, 4000))
       const actionDelayMs = Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
+      const cartographyHumanDelayMs = Math.max(actionDelayMs, toNumber(advanced.postPrintCartographyHumanDelayMs, 1000))
+      const cartographyOutputHumanDelayMs = Math.max(cartographyHumanDelayMs, toNumber(advanced.postPrintCartographyOutputHumanDelayMs, 1500))
       const pollMs = Math.max(50, toNumber(advanced.postPrintCartographyPollMs, 100))
       const clickTicks = Math.max(2, toNumber(advanced.postPrintCartographyClickWaitTicks, 4))
       const outputSettleTicks = Math.max(10, toNumber(advanced.postPrintCartographyOutputSettleTicks, 20))
@@ -5047,7 +5049,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       let lockedMapTaken = false
       let lockedMapConfirmedInWindow = false
 
-      console.log(`[CARTO] start useApi=${advanced.postPrintCartographyUseApi !== false} attempts=${maxAttempts} accessRange=${cartographyAccessRange} clickTicks=${clickTicks} outputSettleTicks=${outputSettleTicks} ${formatCartographyBotState(bot, config)}`)
+      console.log(`[CARTO] start useApi=${advanced.postPrintCartographyUseApi !== false} attempts=${maxAttempts} accessRange=${cartographyAccessRange} clickTicks=${clickTicks} humanDelayMs=${cartographyHumanDelayMs} outputHumanDelayMs=${cartographyOutputHumanDelayMs} outputSettleTicks=${outputSettleTicks} ${formatCartographyBotState(bot, config)}`)
       if (advanced.postPrintCartographyUseApi !== false) {
         try {
           const apiLocked = await lockMapWithCartographyApi(bot, config, cartographyConfig, advanced, {
@@ -5101,7 +5103,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             expectedNames: ['cartography_table']
           })
           console.log(`[CARTO-MANUAL] attempt=${attempt} opened window type=${window?.type || 'unknown'} id=${window?.id ?? 'n/a'} ${formatCartographyWindowState(window)}`)
-          await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+          console.log(`[CARTO-MANUAL] attempt=${attempt} human-delay after-open ms=${cartographyHumanDelayMs}`)
+          await delay(cartographyHumanDelayMs)
           await waitBotTicks(bot, clickTicks)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-open`)
           await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-open`)
@@ -5126,7 +5129,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-map-input`)
           console.log(`[CARTO-MANUAL] attempt=${attempt} before-map-input mode=nerv-quick-move from=${filledMapSlot} to=0 ${formatCartographyWindowState(window)}`)
           const inputMapReady = await quickMoveCartographyInputConfirmed(bot, window, filledMapSlot, 0, 'filled_map', outputWaitMs, pollMs, clickTicks)
-          await delay(actionDelayMs)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} human-delay after-map-input ms=${cartographyHumanDelayMs}`)
+          await delay(cartographyHumanDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-map-input`)
           await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-map-input`)
           console.log(`[CARTO-MANUAL] attempt=${attempt} after-map-input ready=${inputMapReady} ${formatCartographyWindowState(window)} ${formatCartographyBotState(bot, config)}`)
@@ -5137,7 +5141,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-pane-input`)
           console.log(`[CARTO-MANUAL] attempt=${attempt} before-pane-input mode=nerv-quick-move from=${paneSlot} to=1 ${formatCartographyWindowState(window)}`)
           const inputPaneReady = await quickMoveCartographyInputConfirmed(bot, window, paneSlot, 1, 'glass_pane', outputWaitMs, pollMs, clickTicks)
-          await delay(actionDelayMs)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} human-delay after-pane-input ms=${cartographyHumanDelayMs}`)
+          await delay(cartographyHumanDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-pane-input`)
           await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-pane-input`)
           console.log(`[CARTO-MANUAL] attempt=${attempt} after-pane-input ready=${inputPaneReady} ${formatCartographyWindowState(window)} ${formatCartographyBotState(bot, config)}`)
@@ -5170,6 +5175,9 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           const filledMapId = getItemId(bot, 'filled_map')
           const mapsBeforeOutput = countWindowInventoryItems(window, filledMapId, 'filled_map')
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-output`)
+          console.log(`[CARTO-MANUAL] attempt=${attempt} human-delay before-output ms=${cartographyOutputHumanDelayMs}`)
+          await delay(cartographyOutputHumanDelayMs)
+          assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-output-after-delay`)
           console.log(`[CARTO-MANUAL] attempt=${attempt} taking-output mode=nerv-quick-move beforeWindowFilled=${mapsBeforeOutput} ${formatCartographyWindowState(window)}`)
           const outputTaken = await quickMoveCartographyOutputConfirmed(bot, window, mapsBeforeOutput, outputWaitMs, pollMs, clickTicks)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-output`)
