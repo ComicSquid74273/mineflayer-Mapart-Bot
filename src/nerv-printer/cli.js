@@ -4065,15 +4065,28 @@ function closeCurrentWindowIfOpen(bot, reason = 'window-reset') {
   } catch { }
 }
 
-async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, config = null, reason = 'configured-access') {
+function assertNearPoint(bot, point, maxDistance, reason = 'position-check') {
+  const dist = distanceToPoint(bot?.entity?.position, point)
+  if (dist <= maxDistance) return
+  throw new Error(`${reason}: bot is ${dist.toFixed(2)} blocks from required access point ${JSON.stringify(point)} at ${formatBotPosition(bot)}`)
+}
+
+async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, config = null, reason = 'configured-access', options = {}) {
   const goalPos = accessPosition || position
   if (!goalPos) throw new Error('Missing configured access position')
   if (config) assertLivePlatformReady(bot, config, `${reason}:pre-goto`)
-  if (distanceToPoint(bot?.entity?.position, goalPos) <= Math.max(2.25, Number(range))) return
-  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, range))
+  const strict = options.strict === true
+  const goalRange = Math.max(0.1, Number(range))
+  const readyDistance = strict ? Math.max(0.35, goalRange) : Math.max(2.25, goalRange)
+  if (distanceToPoint(bot?.entity?.position, goalPos) <= readyDistance) {
+    if (strict) assertNearPoint(bot, goalPos, readyDistance, `${reason}:access-ready`)
+    return
+  }
+  const gotoPromise = bot.pathfinder.goto(new GoalNear(goalPos.x, goalPos.y, goalPos.z, goalRange))
   gotoPromise.catch(() => {})
   await gotoPromise
   if (config) assertLivePlatformReady(bot, config, `${reason}:post-goto`)
+  if (strict) assertNearPoint(bot, goalPos, readyDistance, `${reason}:post-goto-access`)
 }
 
 async function waitForBlockAt(bot, position, options = {}) {
@@ -4104,9 +4117,14 @@ async function waitForBlockAt(bot, position, options = {}) {
 async function openBlockWindowAt(bot, position, accessPosition, options = {}) {
   const config = options.config || null
   const reason = options.reason || 'open-block-window'
+  const accessRange = Math.max(0.1, toNumber(options.accessRange, 2))
+  const strictAccess = options.strictAccess === true
   if (config) assertLivePlatformReady(bot, config, `${reason}:pre-open`)
-  await gotoConfiguredAccess(bot, position, accessPosition, 2, config, reason)
+  await gotoConfiguredAccess(bot, position, accessPosition, accessRange, config, reason, { strict: strictAccess })
   if (config) assertLivePlatformReady(bot, config, `${reason}:at-access`)
+  if (strictAccess && (accessPosition || position)) {
+    assertNearPoint(bot, accessPosition || position, Math.max(0.35, accessRange), `${reason}:strict-access`)
+  }
   const block = await waitForBlockAt(bot, position, {
     timeoutMs: options.blockWaitMs,
     pollMs: options.blockPollMs,
@@ -4337,13 +4355,14 @@ async function lockMapWithCartographyApi(bot, config, cartographyConfig, advance
   const outputSettleTicks = Math.max(10, toNumber(options.outputSettleTicks, toNumber(advanced?.postPrintCartographyOutputSettleTicks, 20)))
   const outputWaitMs = Math.max(1000, toNumber(options.outputWaitMs, toNumber(advanced?.postPrintCartographyOutputWaitMs, 4000)))
   const pollMs = Math.max(50, toNumber(options.pollMs, toNumber(advanced?.postPrintCartographyPollMs, 100)))
+  const accessRange = Math.max(0.35, toNumber(advanced?.postPrintCartographyAccessRange, 0.6))
   let table = null
 
   try {
     console.log(`[CARTO-API] start ${formatCartographyBotState(bot, config)} target=${formatCoordTriplet(cartographyConfig.position)} access=${formatCoordTriplet(cartographyConfig.accessPosition)}`)
     assertLivePlatformReady(bot, config, 'postprint-cartography-api:pre-open')
     console.log('[CARTO-API] goto access')
-    await gotoConfiguredAccess(bot, cartographyConfig.position, cartographyConfig.accessPosition, 2, config, 'postprint-cartography-api')
+    await gotoConfiguredAccess(bot, cartographyConfig.position, cartographyConfig.accessPosition, accessRange, config, 'postprint-cartography-api', { strict: true })
     console.log(`[CARTO-API] at access ${formatCartographyBotState(bot, config)}`)
     assertLivePlatformReady(bot, config, 'postprint-cartography-api:at-access')
     console.log('[CARTO-API] waiting for cartography_table block')
@@ -4928,12 +4947,13 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       const pollMs = Math.max(50, toNumber(advanced.postPrintCartographyPollMs, 100))
       const clickTicks = Math.max(2, toNumber(advanced.postPrintCartographyClickWaitTicks, 4))
       const outputSettleTicks = Math.max(10, toNumber(advanced.postPrintCartographyOutputSettleTicks, 20))
+      const cartographyAccessRange = Math.max(0.35, toNumber(advanced.postPrintCartographyAccessRange, 0.6))
       const maxAttempts = Math.max(1, toNumber(advanced.postPrintCartographyAttempts, 2))
       let lastWindowState = ''
       let lockedMapTaken = false
       let lockedMapConfirmedInWindow = false
 
-      console.log(`[CARTO] start useApi=${advanced.postPrintCartographyUseApi !== false} attempts=${maxAttempts} clickTicks=${clickTicks} outputSettleTicks=${outputSettleTicks} ${formatCartographyBotState(bot, config)}`)
+      console.log(`[CARTO] start useApi=${advanced.postPrintCartographyUseApi !== false} attempts=${maxAttempts} accessRange=${cartographyAccessRange} clickTicks=${clickTicks} outputSettleTicks=${outputSettleTicks} ${formatCartographyBotState(bot, config)}`)
       if (advanced.postPrintCartographyUseApi !== false) {
         try {
           const apiLocked = await lockMapWithCartographyApi(bot, config, cartographyConfig, advanced, {
@@ -4980,6 +5000,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           window = await openBlockWindowAt(bot, cartographyConfig.position, cartographyConfig.accessPosition, {
             config,
             reason: `postprint-cartography-attempt-${attempt}`,
+            accessRange: cartographyAccessRange,
+            strictAccess: true,
             blockWaitMs: Math.max(1000, toNumber(advanced.postPrintMachineBlockWaitMs, 10000)),
             blockPollMs: pollMs,
             expectedNames: ['cartography_table']
