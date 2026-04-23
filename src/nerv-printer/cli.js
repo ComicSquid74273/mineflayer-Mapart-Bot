@@ -4642,6 +4642,19 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     try {
       await waitForPlatformReady(bot, config, 'postprint-cartography')
       assertLivePlatformReady(bot, config, 'postprint-cartography')
+      if (countInventoryByType(bot, 'filled_map') <= 0) {
+        throw new Error('No filled map available before cartography step.')
+      }
+      if (countInventoryItems(bot, 'glass_pane') <= 0) {
+        if (!mapChestPos) {
+          throw new Error('No glass pane in inventory and missing map material chest position.')
+        }
+        console.log('[POSTPRINT] Glass pane missing while resuming cartography; withdrawing one before locking map.')
+        const gotPane = await withdrawFromChest(bot, config, mapChestPos, 'glass_pane', 1)
+        if (!gotPane || countInventoryItems(bot, 'glass_pane') <= 0) {
+          throw new Error('Could not withdraw glass pane before cartography step.')
+        }
+      }
       closeCurrentWindowIfOpen(bot, 'postprint-cartography')
       const outputWaitMs = Math.max(1000, toNumber(advanced.postPrintCartographyOutputWaitMs, 4000))
       const actionDelayMs = Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
@@ -4673,7 +4686,16 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           const filledMapSlot = findWindowInventorySlot(window, bot, 'filled_map')
           let paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
           if (filledMapSlot < 0 || paneSlot < 0) {
-            throw new Error('Missing filled map or glass pane in inventory for cartography step.')
+            const filledMapId = getItemId(bot, 'filled_map')
+            const paneId = getItemId(bot, 'glass_pane')
+            throw new Error(
+              'Missing filled map or glass pane in cartography window inventory: ' +
+              `filledMapSlot=${filledMapSlot} paneSlot=${paneSlot} ` +
+              `botFilled=${countInventoryByType(bot, 'filled_map')} botPane=${countInventoryItems(bot, 'glass_pane')} ` +
+              `windowFilled=${countWindowInventoryItems(window, filledMapId, 'filled_map')} ` +
+              `windowPane=${countWindowInventoryItems(window, paneId, 'glass_pane')} ` +
+              `windowRange=${window?.inventoryStart ?? 'n/a'}-${window?.inventoryEnd ?? 'n/a'}`
+            )
           }
 
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-map-input`)
