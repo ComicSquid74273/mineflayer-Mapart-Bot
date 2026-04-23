@@ -4123,21 +4123,68 @@ async function moveWindowItemConfirmed(bot, window, fromSlot, toSlot, predicate,
   return await waitForWindowSlot(window, toSlot, predicate, timeoutMs, pollMs)
 }
 
-async function moveOneWindowItemConfirmed(bot, window, fromSlot, toSlot, predicate, timeoutMs = 3000, pollMs = 100) {
+async function waitBotTicks(bot, ticks = 4) {
+  const count = Math.max(1, Math.floor(toNumber(ticks, 4)))
+  if (typeof bot?.waitForTicks === 'function') {
+    await bot.waitForTicks(count)
+    return
+  }
+  await delay(count * 50)
+}
+
+function getWindowCursorItem(window) {
+  return window?.selectedItem || null
+}
+
+async function waitForWindowCursorState(window, predicate, timeoutMs = 3000, pollMs = 100) {
+  const timeout = Math.max(100, toNumber(timeoutMs, 3000))
+  const poll = Math.max(25, toNumber(pollMs, 100))
+  let elapsed = 0
+  while (elapsed <= timeout) {
+    const cursor = getWindowCursorItem(window)
+    if (predicate(cursor)) return cursor
+    await delay(poll)
+    elapsed += poll
+  }
+  return getWindowCursorItem(window)
+}
+
+async function waitForWindowCursorEmpty(window, timeoutMs = 3000, pollMs = 100) {
+  const cursor = await waitForWindowCursorState(window, (item) => !item || toNumber(item.count, 0) <= 0, timeoutMs, pollMs)
+  return !cursor || toNumber(cursor.count, 0) <= 0
+}
+
+async function assertWindowCursorEmpty(window, reason = 'window-click') {
+  if (await waitForWindowCursorEmpty(window, 1500, 50)) return
+  const cursor = getWindowCursorItem(window)
+  throw new Error(`${reason}: cursor not empty (${cursor?.name || cursor?.displayName || cursor?.type || 'unknown'}x${toNumber(cursor?.count, 0)})`)
+}
+
+async function safeWindowClick(bot, window, slot, mouseButton = 0, mode = 0, options = {}) {
+  const precondition = options.precondition || 'empty'
+  const ticks = Math.max(1, toNumber(options.ticks, 4))
+  if (precondition === 'empty') {
+    await assertWindowCursorEmpty(window, `before click slot=${slot}`)
+  }
+  await bot.clickWindow(slot, mouseButton, mode)
+  await waitBotTicks(bot, ticks)
+}
+
+async function moveOneWindowItemConfirmed(bot, window, fromSlot, toSlot, predicate, timeoutMs = 3000, pollMs = 100, clickTicks = 4) {
   const sourceStack = window?.slots?.[fromSlot]
   const sourceCount = toNumber(sourceStack?.count, 0)
   if (sourceCount <= 0) return false
 
+  await assertWindowCursorEmpty(window, `before moving slot ${fromSlot} to ${toSlot}`)
   if (sourceCount <= 1) {
-    await bot.clickWindow(fromSlot, 0, 0)
-    await delay(pollMs)
-    await bot.clickWindow(toSlot, 0, 0)
+    await safeWindowClick(bot, window, fromSlot, 0, 0, { precondition: 'empty', ticks: clickTicks })
+    await safeWindowClick(bot, window, toSlot, 0, 0, { precondition: 'any', ticks: clickTicks })
+    await assertWindowCursorEmpty(window, `after moving slot ${fromSlot} to ${toSlot}`)
   } else {
-    await bot.clickWindow(fromSlot, 0, 0)
-    await delay(pollMs)
-    await bot.clickWindow(toSlot, 1, 0)
-    await delay(pollMs)
-    await bot.clickWindow(fromSlot, 0, 0)
+    await safeWindowClick(bot, window, fromSlot, 0, 0, { precondition: 'empty', ticks: clickTicks })
+    await safeWindowClick(bot, window, toSlot, 1, 0, { precondition: 'any', ticks: clickTicks })
+    await safeWindowClick(bot, window, fromSlot, 0, 0, { precondition: 'any', ticks: clickTicks })
+    await assertWindowCursorEmpty(window, `after moving one item from slot ${fromSlot} to ${toSlot}`)
   }
 
   return await waitForWindowSlot(window, toSlot, predicate, timeoutMs, pollMs)
@@ -4151,7 +4198,9 @@ async function quickMoveWindowSlotConfirmed(bot, window, fromSlot, targetSlot, p
 async function reclaimWindowSlotToInventory(bot, window, slot, timeoutMs = 2000, pollMs = 100) {
   const stack = window?.slots?.[slot]
   if (!stack || toNumber(stack.count, 0) <= 0) return true
-  await bot.clickWindow(slot, 0, 1)
+  const targetSlot = findEmptyWindowInventorySlot(window)
+  if (targetSlot < 0) return false
+  await moveOneWindowItemConfirmed(bot, window, slot, targetSlot, (target) => target && target.name === stack.name, timeoutMs, pollMs)
   return await waitForWindowSlotEmpty(window, slot, timeoutMs, pollMs)
 }
 
@@ -4210,6 +4259,30 @@ function findEmptyWindowInventorySlot(window) {
     if (!stack || toNumber(stack.count, 0) <= 0) return i
   }
   return -1
+}
+
+async function takeWindowOutputToInventoryConfirmed(bot, window, outputSlot, itemName, beforeCount, timeoutMs = 3000, pollMs = 100, clickTicks = 4) {
+  const targetSlot = findEmptyWindowInventorySlot(window)
+  if (targetSlot < 0) throw new Error(`No empty inventory slot available for cartography output ${itemName}.`)
+
+  await assertWindowCursorEmpty(window, `before taking output slot ${outputSlot}`)
+  await safeWindowClick(bot, window, outputSlot, 0, 0, { precondition: 'empty', ticks: clickTicks })
+
+  const cursor = await waitForWindowCursorState(
+    window,
+    (item) => item?.name === itemName || (!item || toNumber(item.count, 0) <= 0),
+    timeoutMs,
+    pollMs
+  )
+  if (cursor?.name === itemName) {
+    await safeWindowClick(bot, window, targetSlot, 0, 0, { precondition: 'any', ticks: clickTicks })
+  }
+
+  await assertWindowCursorEmpty(window, `after taking output slot ${outputSlot}`)
+  const itemId = getItemId(bot, itemName)
+  const outputCleared = await waitForWindowSlotEmpty(window, outputSlot, timeoutMs, pollMs)
+  const afterCount = await waitForWindowInventoryCount(window, itemId, itemName, beforeCount + 1, timeoutMs, pollMs)
+  return outputCleared && afterCount > beforeCount
 }
 
 async function takeOneChestItemToInventory(bot, window, itemId, itemName, timeoutMs = 3000, pollMs = 100) {
@@ -4694,6 +4767,8 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       const outputWaitMs = Math.max(1000, toNumber(advanced.postPrintCartographyOutputWaitMs, 4000))
       const actionDelayMs = Math.max(50, toNumber(advanced.inventoryActionDelayMs, 100))
       const pollMs = Math.max(50, toNumber(advanced.postPrintCartographyPollMs, 100))
+      const clickTicks = Math.max(2, toNumber(advanced.postPrintCartographyClickWaitTicks, 4))
+      const outputSettleTicks = Math.max(10, toNumber(advanced.postPrintCartographyOutputSettleTicks, 20))
       const maxAttempts = Math.max(1, toNumber(advanced.postPrintCartographyAttempts, 2))
       let lastWindowState = ''
       let lockedMapTaken = false
@@ -4722,7 +4797,9 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
             reason: `postprint-cartography-attempt-${attempt}`
           })
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+          await waitBotTicks(bot, clickTicks)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-open`)
+          await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-open`)
 
           const filledMapSlot = findWindowInventorySlot(window, bot, 'filled_map')
           let paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
@@ -4740,17 +4817,20 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           }
 
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-map-input`)
-          const inputMapReady = await moveOneWindowItemConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs)
+          const inputMapReady = await moveOneWindowItemConfirmed(bot, window, filledMapSlot, 0, (stack) => stack?.name === 'filled_map', outputWaitMs, pollMs, clickTicks)
           await delay(actionDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-map-input`)
+          await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-map-input`)
           paneSlot = findWindowInventorySlot(window, bot, 'glass_pane')
           if (paneSlot < 0) {
             throw new Error('Glass pane disappeared before cartography input.')
           }
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-pane-input`)
-          const inputPaneReady = await moveOneWindowItemConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs)
+          const inputPaneReady = await moveOneWindowItemConfirmed(bot, window, paneSlot, 1, (stack) => stack?.name === 'glass_pane', outputWaitMs, pollMs, clickTicks)
           await delay(actionDelayMs)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-pane-input`)
+          await assertWindowCursorEmpty(window, `postprint-cartography-attempt-${attempt}:after-pane-input`)
+          await waitBotTicks(bot, outputSettleTicks)
           const outputStack = await waitForWindowSlot(window, 2, (stack) => stack && toNumber(stack.count, 0) > 0, outputWaitMs, pollMs)
           lastWindowState = `in0=${formatWindowStack(window?.slots?.[0])} in1=${formatWindowStack(window?.slots?.[1])} out=${formatWindowStack(window?.slots?.[2])}`
 
@@ -4777,14 +4857,11 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
           const filledMapId = getItemId(bot, 'filled_map')
           const mapsBeforeOutput = countWindowInventoryItems(window, filledMapId, 'filled_map')
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:before-output`)
-          await bot.clickWindow(2, 0, 1)
-          await delay(actionDelayMs)
+          const outputTaken = await takeWindowOutputToInventoryConfirmed(bot, window, 2, 'filled_map', mapsBeforeOutput, outputWaitMs, pollMs, clickTicks)
           assertLivePlatformReady(bot, config, `postprint-cartography-attempt-${attempt}:after-output`)
-          const outputCleared = await waitForWindowSlotEmpty(window, 2, outputWaitMs, pollMs)
-          const mapsAfterOutput = await waitForWindowInventoryCount(window, filledMapId, 'filled_map', mapsBeforeOutput + 1, outputWaitMs, pollMs)
           await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
 
-          if (!outputCleared || mapsAfterOutput <= mapsBeforeOutput) {
+          if (!outputTaken) {
             throw new Error(`Cartography output click did not return filled_map to inventory: ${lastWindowState}`)
           }
           lockedMapTaken = true
