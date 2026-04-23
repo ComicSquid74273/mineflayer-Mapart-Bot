@@ -18,7 +18,11 @@
       "Bash(curl -s --connect-timeout 5 http://54.83.185.104:4080/health)",
       "Bash(curl -s http://54.83.185.104:4080/api/dashboard/nodes)",
       "Bash(curl -s -u admin-demo:admin-demo http://54.83.185.104:4080/api/dashboard/logs)",
-      "Bash(node --check dashboard-service/src/server.js)"
+      "Bash(node --check dashboard-service/src/server.js)",
+      "Bash(gh api *)",
+      "Bash(curl -s https://raw.githubusercontent.com/MeteorDevelopment/meteor-client/master/src/main/java/meteordevelopment/meteorclient/systems/modules/player/AntiHunger.java)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/MeteorDevelopment/meteor-client/master/src/main/java/meteordevelopment/meteorclient/systems/modules/player/AntiHunger.java\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); deps=d.get\\('dependencies',{}\\); [print\\(k,v\\) for k in deps if 'mine' in k.lower\\(\\) or 'physics' in k.lower\\(\\)]\")"
     ]
   }
 }

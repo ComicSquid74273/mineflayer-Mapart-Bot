@@ -7550,8 +7550,11 @@ function applyAntiHunger(bot, config) {
         const inWater = Boolean(bot.entity?.isInWater || bot.entity?.isInLava)
         const hasVehicle = bot.vehicle != null
         const isDigging = bot.targetDigBlock != null
-        const verticalVelocity = Number(bot.entity?.velocity?.y || 0)
-        if (!hasVehicle && !inWater && realOnGround && verticalVelocity <= 0 && !isDigging) {
+        // MeteorClient uses fallDistance <= 0 (effectively always true when onGround).
+        // velocity.y fails when stepping onto carpet: physics briefly computes a small
+        // positive y-velocity for the step-up, so the spoof was silently skipped on
+        // every single carpet step, letting exhaustion accumulate despite anti-hunger.
+        if (!hasVehicle && !inWater && realOnGround && !isDigging) {
           if (Object.prototype.hasOwnProperty.call(data, 'onGround')) data.onGround = false
           if (Object.prototype.hasOwnProperty.call(data, 'ground')) data.ground = false
         }
