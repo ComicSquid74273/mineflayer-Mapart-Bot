@@ -2114,6 +2114,8 @@ function createDefaultConfig() {
       scannerAdaptiveMaxPlaceDelayMs: 16,
       scannerAdaptiveMinPlaceDelayMs: 6,
       scannerRetryCooldownMs: 30,
+      scannerPlaceConfirmMs: 80,
+      scannerPlaceConfirmPollMs: 15,
       placementStallTimeoutMs: 5000,
       placementStallRecoveryAttempts: 5,
       placementStallRecoveryDelayMs: 1000,
@@ -7393,7 +7395,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   return { placed, already, skipped, seen: seen.size, missing }
 }
 
-async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true) {
+async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true, stallRecoveryState = { used: 0 }) {
   if (!batchTargets.length) {
     return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
   }
@@ -7405,6 +7407,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const pollMs = Math.max(0, toNumber(advanced.scannerWorkloadPollMs, 0))
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
   const optimisticRetryMs = Math.max(25, toNumber(advanced.scannerOptimisticRetryMs, Math.max(120, pollMs * 4)))
+  const placeConfirmMs = Math.max(0, toNumber(advanced.scannerPlaceConfirmMs, Math.max(45, pollMs * 4)))
+  const placeConfirmPollMs = Math.max(5, toNumber(advanced.scannerPlaceConfirmPollMs, 15))
+  const unconfirmedRetryCooldownMs = Math.max(retryCooldownMs, placeConfirmMs, optimisticRetryMs)
   const inlineRepairEnabled = advanced.scannerInlineRepairEnabled === true
   const missRecoveryEnabled = advanced.scannerMissRecoveryEnabled !== false
   const missRecoveryThreshold = Math.max(1, toNumber(advanced.scannerMissRecoveryThreshold, 3))
@@ -7441,8 +7446,59 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let lastAlertScanAt = 0
   const maxInventoryDesyncHits = Math.max(1, toNumber(advanced.scannerInventoryDesyncMaxHits, 3))
   const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
+  const stallTimeoutMs = Math.max(0, toNumber(advanced.placementStallTimeoutMs, 5000))
+  const stallMaxRecoveries = Math.max(0, toNumber(advanced.placementStallRecoveryAttempts, 5))
+  const stallRecoveryDelayMs = Math.max(0, toNumber(advanced.placementStallRecoveryDelayMs, 1000))
+  const stallRecovery = stallRecoveryState || { used: 0 }
+  const stall = {
+    lastProgressAt: Date.now(),
+    attemptsSinceProgress: 0,
+    lastTarget: null
+  }
+  let stallRecoveryRequested = false
 
   const getTargetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
+  const confirmTargetPlaced = async (target) => {
+    const Vec3Confirm = bot.entity.position.constructor
+    const targetPos = new Vec3Confirm(target.position.x, target.position.y, target.position.z)
+    return await waitForTargetBlockPlaced(bot, targetPos, target.blockName, placeConfirmMs, placeConfirmPollMs)
+  }
+  const isTransientPlacementReason = (reason) => {
+    const text = String(reason || '')
+    return text === 'unconfirmed-place' || text.startsWith('held-item-desync-')
+  }
+  const notePlacementProgress = () => {
+    stall.lastProgressAt = Date.now()
+    stall.attemptsSinceProgress = 0
+    stall.lastTarget = null
+    stallRecovery.used = 0
+  }
+  const notePlacementAttempt = (target) => {
+    stall.attemptsSinceProgress += 1
+    stall.lastTarget = target
+  }
+  const handlePlacementStall = async () => {
+    if (!stallTimeoutMs || stall.attemptsSinceProgress <= 0) return false
+    const stalledMs = Date.now() - stall.lastProgressAt
+    if (stalledMs < stallTimeoutMs) return false
+    const target = stall.lastTarget
+    const pos = target?.position
+    const targetLabel = pos ? `${pos.x} ${pos.y} ${pos.z}` : 'unknown'
+    const held = bot?.heldItem?.name || 'empty'
+    const botPos = bot?.entity?.position
+    const botLabel = botPos ? `${botPos.x.toFixed(2)} ${botPos.y.toFixed(2)} ${botPos.z.toFixed(2)}` : 'unknown'
+    stopBotMovement(bot)
+    if (stallRecovery.used < stallMaxRecoveries) {
+      stallRecovery.used += 1
+      console.log(`[NERV-WORKLOAD-STALL-RECOVER] no confirmed placement progress for ${stalledMs}ms attempts=${stall.attemptsSinceProgress} recovery=${stallRecovery.used}/${stallMaxRecoveries} lastTarget=${targetLabel} held=${held} pos=${botLabel}`)
+      stall.lastProgressAt = Date.now()
+      stall.attemptsSinceProgress = 0
+      stall.lastTarget = null
+      if (stallRecoveryDelayMs > 0) await delay(stallRecoveryDelayMs)
+      return true
+    }
+    throw new Error(`[NERV-WORKLOAD-STALL] no confirmed placement progress for ${stalledMs}ms attempts=${stall.attemptsSinceProgress} lastTarget=${targetLabel} held=${held} pos=${botLabel}`)
+  }
   const raiseRepairAlert = (target, reason) => {
     const key = getTargetKey(target)
     if (seen.has(key)) return
@@ -7530,7 +7586,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       if (allowPlacement) {
         const burstExcluded = new Set(seen)
         for (const [key, until] of pendingUntil.entries()) {
-          if (until > now && !retryPriority.has(key)) burstExcluded.add(key)
+          if (until > now) burstExcluded.add(key)
           else pendingUntil.delete(key)
         }
 
@@ -7540,30 +7596,46 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
           const key = `${target.position.x}:${target.position.y}:${target.position.z}`
           burstExcluded.add(key)
+          notePlacementAttempt(target)
 
           try {
             const result = await placeNervScannerTarget(bot, config, target)
 
             if (result.state === 'placed') {
-              placed += 1
-              pendingUntil.set(key, now + optimisticRetryMs)
-              retryPriority.delete(key)
-              inventoryDesyncHits.delete(`${target.blockName}:${key}`)
-              clearRepairAlert(key)
+              const confirmed = await confirmTargetPlaced(target)
+              if (confirmed) {
+                placed += 1
+                seen.add(key)
+                pendingUntil.delete(key)
+                retryPriority.delete(key)
+                inventoryDesyncHits.delete(`${target.blockName}:${key}`)
+                clearRepairAlert(key)
+                notePlacementProgress()
+              } else {
+                pendingUntil.set(key, Date.now() + unconfirmedRetryCooldownMs)
+                retryPriority.add(key)
+                if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
+                  console.log(`[NERV-WORKLOAD-UNCONFIRMED] ${target.position.x} ${target.position.y} ${target.position.z} (${target.blockName}) retryAfter=${unconfirmedRetryCooldownMs}ms`)
+                }
+              }
             } else if (result.state === 'already') {
               already += 1
               seen.add(key)
               pendingUntil.delete(key)
               inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               clearRepairAlert(key)
+              notePlacementProgress()
             } else {
-              skipped += 1
+              if (!isTransientPlacementReason(result.reason)) {
+                skipped += 1
+              }
               if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
               }
 
               if (!String(result.reason || '').startsWith('missing-item-')) {
-                pendingUntil.set(key, 0)
+                pendingUntil.set(key, Date.now() + retryCooldownMs)
+                retryPriority.add(key)
                 inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else {
                 const haveNow = countInventoryItems(bot, target.blockName)
@@ -7586,14 +7658,27 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           } catch (err) {
             skipped += 1
             hardStops += 1
-            pendingUntil.set(key, 0)
+            pendingUntil.set(key, Date.now() + retryCooldownMs)
+            retryPriority.add(key)
             if (config.errorHandling?.logErrors !== false) {
               console.log(`[NERV-WORKLOAD-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
             }
             lastTickTime = Date.now()
             break
           }
+
+          if (await handlePlacementStall()) {
+            stallRecoveryRequested = true
+            active = false
+            break
+          }
         }
+      }
+
+      if (await handlePlacementStall()) {
+        stallRecoveryRequested = true
+        active = false
+        break
       }
 
       if (pollMs > 0) await delay(pollMs)
@@ -7610,7 +7695,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
       const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
       bot.setControlState('sprint', shouldSprint)
-      await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+      try {
+        await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+      } catch (err) {
+        if (stallRecoveryRequested) break
+        throw err
+      }
 
       if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
         const drainTimeoutMs = Math.max(50, toNumber(advanced.inlineRepairDrainMs, Math.max(200, retryCooldownMs * 4)))
@@ -7724,6 +7814,41 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     await placementLoop
   }
 
+  if (stallRecoveryRequested) {
+    hardStops += 1
+    const Vec3StallRetry = bot.entity.position.constructor
+    const remainingTargets = batchTargets.filter((target) => {
+      const actual = bot.blockAt(new Vec3StallRetry(target.position.x, target.position.y, target.position.z))
+      return actual?.name !== target.blockName
+    })
+    console.log(`[NERV-WORKLOAD-STALL-RETRY] remaining=${remainingTargets.length}/${batchTargets.length}; retrying stalled batch in-session.`)
+    if (remainingTargets.length) {
+      const retry = await runNervTimeWorkloadPlacementBatch(bot, config, remainingTargets, startOnNorthSide, allowEmergencyRestock, stallRecovery)
+      placed += retry.placed
+      already += retry.already
+      skipped += retry.skipped
+      hardStops += retry.hardStops
+      rawAllowedTotal += retry.rawAllowed
+      cappedTotal += retry.capped
+      maxAllowedSeen = Math.max(maxAllowedSeen, retry.maxAllowed)
+    }
+    const missingAfterRetry = batchTargets.filter((target) => {
+      const actual = bot.blockAt(new Vec3StallRetry(target.position.x, target.position.y, target.position.z))
+      return actual?.name !== target.blockName
+    }).length
+    return {
+      placed,
+      already,
+      skipped,
+      seen: batchTargets.length - missingAfterRetry,
+      missing: missingAfterRetry,
+      hardStops,
+      rawAllowed: rawAllowedTotal,
+      capped: cappedTotal,
+      maxAllowed: maxAllowedSeen
+    }
+  }
+
   if (allowEmergencyRestock && emergencyRestockBlock) {
     console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; stopping movement, refilling, and retrying remaining targets once.`)
     const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
@@ -7734,7 +7859,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         return actual?.name !== target.blockName
       })
       if (remainingTargets.length) {
-        const retry = await runNervTimeWorkloadPlacementBatch(bot, config, remainingTargets, startOnNorthSide, false)
+        const retry = await runNervTimeWorkloadPlacementBatch(bot, config, remainingTargets, startOnNorthSide, false, stallRecovery)
         placed += retry.placed
         already += retry.already
         skipped += retry.skipped
