@@ -1868,6 +1868,19 @@ function markProgressInterrupted(config, reason, sessionNumber) {
   })
 }
 
+function hasUnfinishedProgressIntent(config) {
+  const files = config.files || {}
+  if (files.resumeProgress === false) return false
+
+  const progressFile = path.resolve(process.cwd(), files.progressFile || './logs/nerv-printer-progress.json')
+  const previous = readProgressState(progressFile)
+  if (!previous) return false
+
+  const phase = normalizeResumePhase(previous.phase)
+  if (phase === 'finished') return false
+  return phase === 'printing' || phase === 'repair' || phase === 'post_print'
+}
+
 function createDefaultConfig() {
   return {
     bot: {
@@ -2101,6 +2114,9 @@ function createDefaultConfig() {
       scannerAdaptiveMaxPlaceDelayMs: 16,
       scannerAdaptiveMinPlaceDelayMs: 6,
       scannerRetryCooldownMs: 30,
+      placementStallTimeoutMs: 5000,
+      placementStallRecoveryAttempts: 5,
+      placementStallRecoveryDelayMs: 1000,
       litematicRowSettleMs: 150,
       litematicRowVerifyEveryRows: 2,
       litematicRowRepairThreshold: 2,
@@ -13346,13 +13362,20 @@ function runSingleSession(config, sessionNumber) {
       }
 
       if (printer.startOnSpawn === false) {
-        if (printingIntentActive) {
-          console.log('[STATE] startOnSpawn is false but printing intent is active — resuming printing after reconnect.')
+        const savedProgressIntent = hasUnfinishedProgressIntent(config)
+        const shouldResumeManagedPrint = printingIntentActive || savedProgressIntent
+        if (shouldResumeManagedPrint) {
+          printingIntentActive = true
+        }
+        if (printingIntentActive && savedProgressIntent) {
+          console.log('[STATE] startOnSpawn is false but unfinished progress exists - resuming printing after reconnect.')
+        } else if (printingIntentActive) {
+          console.log('[STATE] startOnSpawn is false but printing intent is active - resuming printing after reconnect.')
         } else {
           console.log('[STATE] startOnSpawn is false. Waiting idle for start command.')
         }
         dashboardRuntime?.setPhase('idle')
-        await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, printingIntentActive)
+        await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, shouldResumeManagedPrint)
         return
       }
 

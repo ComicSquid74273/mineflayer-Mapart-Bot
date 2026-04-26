@@ -384,6 +384,9 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.scannerAdaptiveMaxPlaceDelayMs` | `18` | Max adaptive placement delay. | Raise if server is dropping many packets. |
 | `advanced.scannerAdaptiveMinPlaceDelayMs` | `6` | Min adaptive placement delay. | Keep at least `6` on servers with lag. |
 | `advanced.scannerRetryCooldownMs` | `35` | Delay before retrying an unconfirmed placement. | Increase if duplicate/too-fast retries happen. |
+| `advanced.placementStallTimeoutMs` | `5000` | Abort a fast placement batch after this long without confirmed placement progress. | Set `0` to disable; increase only if the server confirms very slowly. |
+| `advanced.placementStallRecoveryAttempts` | `5` | Same-session stalled-batch recovery attempts before reconnect fallback. | A successful confirmed placement resets this counter. |
+| `advanced.placementStallRecoveryDelayMs` | `1000` | Pause before retrying remaining targets after a stall. | Increase if server needs a moment after rejected placements. |
 | `advanced.scannerPreSwapDelayMs` | `25` | Delay before item swap in scanner placement. | Increase if held item updates late. |
 | `advanced.scannerPostSwapDelayMs` | `45` | Delay after item swap in scanner placement. | Increase if `missing-item-*` appears despite inventory. |
 | `advanced.scannerWorkloadMode` | `time` | `time` or `fixed`. | Use `time` for lag-aware workload; `fixed` is older scanner tick mode. |
