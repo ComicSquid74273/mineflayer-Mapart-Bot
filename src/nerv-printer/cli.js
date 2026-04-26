@@ -4948,65 +4948,70 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     setPostPrintStatus('fill_map')
     const mapItem = findInventoryItemByType(bot, 'map')
     if (!mapItem) {
-      return failPostPrint('fill_map', 'No empty map in inventory to fill.')
-    }
+      if (countInventoryByType(bot, 'filled_map') > 0) {
+        console.log('[POSTPRINT-RESUME] No empty map found, but a filled map is already in inventory; continuing at cartography.')
+        savePostPrintStep('cartography', 'map-already-filled')
+      } else {
+        return failPostPrint('withdraw', 'No empty or filled map in inventory while resuming fill_map; rewinding to withdraw materials.')
+      }
+    } else {
+      const center = getMapCenterPosition(config)
+      await waitForPlatformReady(bot, config, 'postprint-fill-map')
+      try {
+        await bot.pathfinder.goto(new GoalNear(center.x, center.y, center.z, 1))
+      } catch (err) {
+        return failPostPrint('fill_map', `Could not reach map center before map activation: ${err?.message || err}`)
+      }
 
-    const center = getMapCenterPosition(config)
-    await waitForPlatformReady(bot, config, 'postprint-fill-map')
-    try {
-      await bot.pathfinder.goto(new GoalNear(center.x, center.y, center.z, 1))
-    } catch (err) {
-      return failPostPrint('fill_map', `Could not reach map center before map activation: ${err?.message || err}`)
-    }
+      await bot.equip(mapItem, 'hand')
+      await bot.activateItem()
+      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+      if (typeof bot.deactivateItem === 'function') bot.deactivateItem()
 
-    await bot.equip(mapItem, 'hand')
-    await bot.activateItem()
-    await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
-    if (typeof bot.deactivateItem === 'function') bot.deactivateItem()
+      const filledMapItem = findInventoryItemByType(bot, 'filled_map')
+      if (!filledMapItem) {
+        return failPostPrint('fill_map', 'Map activation did not produce a filled map.')
+      }
 
-    const filledMapItem = findInventoryItemByType(bot, 'filled_map')
-    if (!filledMapItem) {
-      return failPostPrint('fill_map', 'Map activation did not produce a filled map.')
-    }
+      try {
+        await bot.equip(filledMapItem, 'hand')
+        console.log('[POSTPRINT] Equipped filled map in hand for terrain data capture.')
+      } catch (err) {
+        return failPostPrint('fill_map', `Could not equip filled map: ${err?.message || err}`)
+      }
 
-    try {
-      await bot.equip(filledMapItem, 'hand')
-      console.log('[POSTPRINT] Equipped filled map in hand for terrain data capture.')
-    } catch (err) {
-      return failPostPrint('fill_map', `Could not equip filled map: ${err?.message || err}`)
-    }
+      const fillSquare = Math.max(0, toNumber(config.printer?.mapFillSquareSize, 1))
+      if (fillSquare > 0) {
+        const walkPoints = [
+          { x: center.x - fillSquare, y: center.y, z: center.z + fillSquare },
+          { x: center.x + fillSquare, y: center.y, z: center.z + fillSquare },
+          { x: center.x + fillSquare, y: center.y, z: center.z - fillSquare },
+          { x: center.x - fillSquare, y: center.y, z: center.z - fillSquare }
+        ]
 
-    const fillSquare = Math.max(0, toNumber(config.printer?.mapFillSquareSize, 1))
-    if (fillSquare > 0) {
-      const walkPoints = [
-        { x: center.x - fillSquare, y: center.y, z: center.z + fillSquare },
-        { x: center.x + fillSquare, y: center.y, z: center.z + fillSquare },
-        { x: center.x + fillSquare, y: center.y, z: center.z - fillSquare },
-        { x: center.x - fillSquare, y: center.y, z: center.z - fillSquare }
-      ]
-
-      for (const p of walkPoints) {
-        const currentMap = findInventoryItemByType(bot, 'filled_map')
-        if (currentMap && bot.heldItem?.type !== currentMap.type) {
-          await bot.equip(currentMap, 'hand')
-        }
-        try {
-          await bot.pathfinder.goto(new GoalNear(p.x, p.y, p.z, 1))
-        } catch (err) {
-          return failPostPrint('fill_map', `Map fill walk failed: ${err?.message || err}`)
-        }
-        const stillHolding = findInventoryItemByType(bot, 'filled_map')
-        if (stillHolding && bot.heldItem?.type !== stillHolding.type) {
-          await bot.equip(stillHolding, 'hand')
+        for (const p of walkPoints) {
+          const currentMap = findInventoryItemByType(bot, 'filled_map')
+          if (currentMap && bot.heldItem?.type !== currentMap.type) {
+            await bot.equip(currentMap, 'hand')
+          }
+          try {
+            await bot.pathfinder.goto(new GoalNear(p.x, p.y, p.z, 1))
+          } catch (err) {
+            return failPostPrint('fill_map', `Map fill walk failed: ${err?.message || err}`)
+          }
+          const stillHolding = findInventoryItemByType(bot, 'filled_map')
+          if (stillHolding && bot.heldItem?.type !== stillHolding.type) {
+            await bot.equip(stillHolding, 'hand')
+          }
         }
       }
-    }
 
-    await delay(toNumber(advanced.postPrintMapSettleDelayMs, 1500))
-    if (countInventoryByType(bot, 'filled_map') <= 0) {
-      return failPostPrint('fill_map', 'Filled map disappeared before cartography step.')
+      await delay(toNumber(advanced.postPrintMapSettleDelayMs, 1500))
+      if (countInventoryByType(bot, 'filled_map') <= 0) {
+        return failPostPrint('fill_map', 'Filled map disappeared before cartography step.')
+      }
+      savePostPrintStep('cartography', 'map-filled')
     }
-    savePostPrintStep('cartography', 'map-filled')
   } else if (shouldRunStep('fill_map')) {
     savePostPrintStep('cartography', 'fill-map-skipped')
   }
