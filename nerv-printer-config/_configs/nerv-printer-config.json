@@ -318,7 +318,7 @@
     "postPrintSkipResetInteraction": false,
     "postPrintWalkToCenter": true,
     "postPrintCenterWaitMs": 30000,
-    "postPrintInteractionDelayMs": 20,
+    "postPrintInteractionDelayMs": 16,
     "postPrintMapSettleDelayMs": 200,
     "dumpAimSettleMs": 150,
     "dumpYawInvert": false,
