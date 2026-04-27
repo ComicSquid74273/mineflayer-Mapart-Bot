@@ -7418,7 +7418,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
   const inlineSegmentBlocks = Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, Math.max(2, placeRange - 1)))
-  const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks)
+  const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineRepairEnabled ? inlineSegmentBlocks : 0)
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
   const neededByBlock = estimateNeededFromLookahead(batchTargets)
