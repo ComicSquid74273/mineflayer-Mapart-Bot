@@ -7406,10 +7406,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 30))
   const pollMs = Math.max(0, toNumber(advanced.scannerWorkloadPollMs, 0))
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
-  const optimisticRetryMs = Math.max(25, toNumber(advanced.scannerOptimisticRetryMs, Math.max(120, pollMs * 4)))
   const placeConfirmMs = Math.max(0, toNumber(advanced.scannerPlaceConfirmMs, Math.max(45, pollMs * 4)))
   const placeConfirmPollMs = Math.max(5, toNumber(advanced.scannerPlaceConfirmPollMs, 15))
-  const unconfirmedRetryCooldownMs = Math.max(retryCooldownMs, placeConfirmMs, optimisticRetryMs)
   const inlineRepairEnabled = advanced.scannerInlineRepairEnabled === true
   const missRecoveryEnabled = advanced.scannerMissRecoveryEnabled !== false
   const missRecoveryThreshold = Math.max(1, toNumber(advanced.scannerMissRecoveryThreshold, 3))
@@ -7439,6 +7437,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let emergencyRestockBlock = null
   let prevCheckpointPos = null
   const seen = new Set()
+  const deferredUntilFinalRepair = new Set()
   const pendingUntil = new Map()
   const retryPriority = new Set()
   const repairAlerts = new Map()
@@ -7520,6 +7519,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     const Vec3Current = bot.entity.position.constructor
     return batchTargets.filter((target) => {
       if (activeCols instanceof Set && !activeCols.has(target.col)) return false
+      if (deferredUntilFinalRepair.has(getTargetKey(target))) return false
       const actual = bot.blockAt(new Vec3Current(target.position.x, target.position.y, target.position.z))
       return actual?.name !== target.blockName
     })
@@ -7537,6 +7537,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       const key = getTargetKey(target)
       if (seen.has(key)) {
+        clearRepairAlert(key)
+        pendingUntil.delete(key)
+        continue
+      }
+      if (deferredUntilFinalRepair.has(key)) {
         clearRepairAlert(key)
         pendingUntil.delete(key)
         continue
@@ -7584,7 +7589,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint' || currentAction === 'inline-repair'
       if (allowPlacement) {
-        const burstExcluded = new Set(seen)
+        const burstExcluded = new Set([...seen, ...deferredUntilFinalRepair])
         for (const [key, until] of pendingUntil.entries()) {
           if (until > now) burstExcluded.add(key)
           else pendingUntil.delete(key)
@@ -7606,21 +7611,25 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               if (confirmed) {
                 placed += 1
                 seen.add(key)
+                deferredUntilFinalRepair.delete(key)
                 pendingUntil.delete(key)
                 retryPriority.delete(key)
                 inventoryDesyncHits.delete(`${target.blockName}:${key}`)
                 clearRepairAlert(key)
                 notePlacementProgress()
               } else {
-                pendingUntil.set(key, Date.now() + unconfirmedRetryCooldownMs)
-                retryPriority.add(key)
+                deferredUntilFinalRepair.add(key)
+                pendingUntil.delete(key)
+                retryPriority.delete(key)
+                clearRepairAlert(key)
                 if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
-                  console.log(`[NERV-WORKLOAD-UNCONFIRMED] ${target.position.x} ${target.position.y} ${target.position.z} (${target.blockName}) retryAfter=${unconfirmedRetryCooldownMs}ms`)
+                  console.log(`[NERV-WORKLOAD-UNCONFIRMED] ${target.position.x} ${target.position.y} ${target.position.z} (${target.blockName}) deferred-to-final-repair`)
                 }
               }
             } else if (result.state === 'already') {
               already += 1
               seen.add(key)
+              deferredUntilFinalRepair.delete(key)
               pendingUntil.delete(key)
               inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               clearRepairAlert(key)
@@ -7634,8 +7643,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
 
               if (!String(result.reason || '').startsWith('missing-item-')) {
-                pendingUntil.set(key, Date.now() + retryCooldownMs)
-                retryPriority.add(key)
+                deferredUntilFinalRepair.add(key)
+                pendingUntil.delete(key)
+                retryPriority.delete(key)
+                clearRepairAlert(key)
                 inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else {
                 const haveNow = countInventoryItems(bot, target.blockName)
@@ -7658,8 +7669,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           } catch (err) {
             skipped += 1
             hardStops += 1
-            pendingUntil.set(key, Date.now() + retryCooldownMs)
-            retryPriority.add(key)
+            deferredUntilFinalRepair.add(key)
+            pendingUntil.delete(key)
+            retryPriority.delete(key)
+            clearRepairAlert(key)
             if (config.errorHandling?.logErrors !== false) {
               console.log(`[NERV-WORKLOAD-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
             }
