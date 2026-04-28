@@ -386,7 +386,7 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.scannerRetryCooldownMs` | `35` | Delay before retrying an unconfirmed placement. | Increase if duplicate/too-fast retries happen. |
 | `advanced.scannerPlaceConfirmMs` | `80` | Confirmation window used by non-optimistic placement paths. | Litematic workload stays optimistic for smooth movement. |
 | `advanced.scannerPlaceConfirmPollMs` | `15` | Poll interval while waiting for placement confirmation. | Keep small; this is only used by confirming placement paths. |
-| `advanced.placementStallTimeoutMs` | `5000` | Marks a local stuck area after this long without optimistic placement progress. | Set `0` to disable; skipped areas are left for final repair. |
+| `advanced.placementStallTimeoutMs` | `5000` | Marks a local stuck area after this long without real block-world placement progress. | Set `0` to disable; skipped areas are left for final repair. |
 | `advanced.placementStallSkipRadiusBlocks` | `5` | Radius around the stalled target to skip in the main print pass. | Keep near `placeRange + 1`; final repair handles skipped blocks. |
 | `advanced.scannerPreSwapDelayMs` | `25` | Delay before item swap in scanner placement. | Increase if held item updates late. |
 | `advanced.scannerPostSwapDelayMs` | `45` | Delay after item swap in scanner placement. | Increase if `missing-item-*` appears despite inventory. |
@@ -396,7 +396,7 @@ Important workload logs:
 
 ```text
 [NERV-WORKLOAD-BATCH] placed=... seen=... missing=... hardStops=... rawAllowed=... capped=...
-[NERV-WORKLOAD-STALL-SKIP] buffer=... skipped=... lastTarget=x y z
+[NERV-WORKLOAD-STALL-SKIP] buffer=... skipped=... lastTarget=x y z stalledMs=... attempts=... optimistic=...
 [NERV-WORKLOAD-ADAPT-SLOW] missing=... placeDelayMs=... lineEndSettleMs=...
 [NERV-WORKLOAD-ADAPT-RECOVER] missing=... placeDelayMs=... lineEndSettleMs=...
 ```

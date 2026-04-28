@@ -7446,8 +7446,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
   const stallTimeoutMs = Math.max(0, toNumber(advanced.placementStallTimeoutMs, 5000))
   const stall = {
-    lastProgressAt: Date.now(),
-    attemptsSinceProgress: 0,
+    lastWorldProgressAt: Date.now(),
+    attemptsSinceWorldProgress: 0,
+    optimisticPlacementsSinceWorldProgress: 0,
     lastTarget: null
   }
 
@@ -7456,18 +7457,22 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     const text = String(reason || '')
     return text === 'unconfirmed-place' || text.startsWith('held-item-desync-')
   }
-  const notePlacementProgress = () => {
-    stall.lastProgressAt = Date.now()
-    stall.attemptsSinceProgress = 0
+  const noteWorldPlacementProgress = () => {
+    stall.lastWorldProgressAt = Date.now()
+    stall.attemptsSinceWorldProgress = 0
+    stall.optimisticPlacementsSinceWorldProgress = 0
     stall.lastTarget = null
   }
+  const noteOptimisticPlacement = () => {
+    stall.optimisticPlacementsSinceWorldProgress += 1
+  }
   const notePlacementAttempt = (target) => {
-    stall.attemptsSinceProgress += 1
+    stall.attemptsSinceWorldProgress += 1
     stall.lastTarget = target
   }
   const handlePlacementStall = () => {
-    if (!stallTimeoutMs || stall.attemptsSinceProgress <= 0) return []
-    const stalledMs = Date.now() - stall.lastProgressAt
+    if (!stallTimeoutMs || stall.attemptsSinceWorldProgress <= 0) return []
+    const stalledMs = Date.now() - stall.lastWorldProgressAt
     if (stalledMs < stallTimeoutMs) return []
     const target = stall.lastTarget
     const pos = target?.position
@@ -7497,9 +7502,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
 
     skipped += skippedKeys.length
-    console.log(`[NERV-WORKLOAD-STALL-SKIP] buffer=${stallSkipRadiusBlocks} skipped=${skippedKeys.length} lastTarget=${targetLabel} stalledMs=${stalledMs} attempts=${stall.attemptsSinceProgress}`)
-    stall.lastProgressAt = Date.now()
-    stall.attemptsSinceProgress = 0
+    console.log(`[NERV-WORKLOAD-STALL-SKIP] buffer=${stallSkipRadiusBlocks} skipped=${skippedKeys.length} lastTarget=${targetLabel} stalledMs=${stalledMs} attempts=${stall.attemptsSinceWorldProgress} optimistic=${stall.optimisticPlacementsSinceWorldProgress}`)
+    stall.lastWorldProgressAt = Date.now()
+    stall.attemptsSinceWorldProgress = 0
+    stall.optimisticPlacementsSinceWorldProgress = 0
     stall.lastTarget = null
     return skippedKeys
   }
@@ -7519,6 +7525,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const clearRepairAlert = (key) => {
     repairAlerts.delete(key)
     retryPriority.delete(key)
+  }
+  const markTargetPlacedInWorld = (target, key = getTargetKey(target)) => {
+    seen.add(key)
+    pendingUntil.delete(key)
+    inventoryDesyncHits.delete(`${target.blockName}:${key}`)
+    clearRepairAlert(key)
+    noteWorldPlacementProgress()
   }
   const getUnresolvedTargetsForActiveCols = (activeCols) => {
     const Vec3Current = bot.entity.position.constructor
@@ -7558,9 +7571,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       const actual = bot.blockAt(targetPos)
       if (actual?.name === target.blockName) {
-        seen.add(key)
-        clearRepairAlert(key)
-        pendingUntil.delete(key)
+        markTargetPlacedInWorld(target, key)
         continue
       }
 
@@ -7617,14 +7628,16 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               retryPriority.delete(key)
               inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               clearRepairAlert(key)
-              notePlacementProgress()
+              const Vec3Placed = bot.entity.position.constructor
+              const actual = bot.blockAt(new Vec3Placed(target.position.x, target.position.y, target.position.z))
+              if (actual?.name === target.blockName) {
+                markTargetPlacedInWorld(target, key)
+              } else {
+                noteOptimisticPlacement()
+              }
             } else if (result.state === 'already') {
               already += 1
-              seen.add(key)
-              pendingUntil.delete(key)
-              inventoryDesyncHits.delete(`${target.blockName}:${key}`)
-              clearRepairAlert(key)
-              notePlacementProgress()
+              markTargetPlacedInWorld(target, key)
             } else {
               if (!isTransientPlacementReason(result.reason)) {
                 skipped += 1
@@ -7704,8 +7717,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             if (currentActiveCols instanceof Set && !currentActiveCols.has(t.col)) return false
             const actual = bot.blockAt(new Vec3Drain(t.position.x, t.position.y, t.position.z))
             if (actual?.name === t.blockName) {
-              seen.add(key)
-              pendingUntil.delete(key)
+              markTargetPlacedInWorld(t, key)
               return false
             }
             const pendingExpiry = pendingUntil.get(key)
@@ -7765,9 +7777,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const key = getTargetKey(target)
               const actual = bot.blockAt(new Vec3Miss(target.position.x, target.position.y, target.position.z))
               if (actual?.name === target.blockName) {
-                seen.add(key)
-                pendingUntil.delete(key)
-                clearRepairAlert(key)
+                markTargetPlacedInWorld(target, key)
               }
             }
           }
@@ -7788,9 +7798,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             const key = getTargetKey(target)
             const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
             if (actual?.name === target.blockName) {
-              seen.add(key)
-              pendingUntil.delete(key)
-              clearRepairAlert(key)
+              markTargetPlacedInWorld(target, key)
             } else {
               raiseRepairAlert(target, 'lineend-unresolved')
             }
