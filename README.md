@@ -253,7 +253,7 @@ Print movement, placement, and row/batch behavior.
 | `printer.startDelayMs` | `1500` | Wait after spawn before starting. | Increase if chunks/login are slow. |
 | `printer.allowJump` | `false` | Enables jump/parkour pathing if `true`. | Keep `false` on flat printer platforms. |
 | `printer.placeWhileSprinting` | `true` | Allows placing during movement. | Keep `true` for NERV-style continuous placement. |
-| `printer.postPrintTestOnly` | `false` | Skip printing and run post-print workflow only. | Useful only for post-print testing. |
+| `printer.postPrintTestOnly` | `false` | Skip printing and run post-print workflow only. | For CLI testing, `npm run test:post-print` also disables reset and final center walk. |
 | `printer.printOffset.x/y/z` | `0,0,-1` | Shift all print targets. | Wrong offset causes full-map misalignment. |
 | `printer.linesPerRun` | `3` | Width of one print run in map columns/lines. | Higher is faster but can skip more; `3` is stable. |
 | `printer.placeRange` | `5` | Placement scan/range radius. | Higher sees more targets; too high can pick awkward targets. |
@@ -285,6 +285,11 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.autoEatEnabled` | `true` | Enables pre-traversal food checks. | Disable only if food should be handled manually. |
 | `advanced.autoEatMinHunger` | `12` | Eat before a traversal batch when hunger is below this value. | Raise for more buffer; lower to visit the food chest less often. |
 | `advanced.autoEatFoodItem` | `cooked_beef` | Item pulled from `machine.foodChest` and consumed. | `cooked_beef` is Minecraft steak. |
+| `advanced.supportStockDashboardWarningsEnabled` | `true` | Sends once-per-map-run dashboard warnings for support stock only. | Checks food, XP bottles, empty maps, and glass panes; carpet stock warnings are not sent. |
+| `advanced.supportStockFoodMinStacks` | `5` | Minimum food stacks expected in `machine.foodChest`. | Dashboard warns if the combined count is lower. |
+| `advanced.supportStockXpBottleMinStacks` | `5` | Minimum XP bottle stacks expected across XP bottle chests/dispenser. | Supports legacy `xpBottleChests`, `machine.xpBottleChest`, and `machine.xpDispenser`. |
+| `advanced.supportStockEmptyMapMinStacks` | `1` | Minimum empty map stacks expected across `mapMaterialChests`. | Used before each map run. |
+| `advanced.supportStockGlassPaneMinStacks` | `1` | Minimum glass pane stacks expected across `mapMaterialChests`. | Used before each map run. |
 | `advanced.anvilPillarMinCount` | `3` | Minimum anvils expected in the vertical pillar at `machine.anvil`. | Dashboard warns when visible anvils drop below this. |
 | `advanced.anvilPillarScanLimit` | `16` | Max vertical blocks to scan upward from `machine.anvil`. | Raise only if the pillar is taller than 16 anvils. |
 | `advanced.platformWatchdogEnabled` | `true` | Pauses pathing/placing if the bot leaves platform bounds or enters limbo coords. | Keep enabled on public servers/restarts. |

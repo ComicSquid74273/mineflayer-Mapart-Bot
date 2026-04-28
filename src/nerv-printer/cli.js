@@ -369,6 +369,11 @@ function reportDashboardWarning(config, category, message, details = {}) {
   }
 }
 
+function reportSupportStockWarning(config, message, details = {}) {
+  console.log(`[SUPPORT-STOCK-WARN] ${message}`)
+  reportDashboardWarning(config, 'support-stock', message, details)
+}
+
 function getDashboardConfig(config) {
   const raw = config?.dashboard
   const envEnabled = String(process.env.NERV_DASHBOARD_ENABLED || '').toLowerCase()
@@ -2263,6 +2268,7 @@ function createDefaultConfig() {
       finishedMapChest: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       resetBlock: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       xpBottleChest: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
+      xpBottleChests: [],
       xpButton: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       xpDispenser: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       anvil: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
@@ -2408,6 +2414,14 @@ function applyAnchorTranslation(config) {
     node.accessPosition = translatePoint(node.accessPosition, delta)
   }
 
+  if (Array.isArray(machine.xpBottleChests)) {
+    machine.xpBottleChests = machine.xpBottleChests.map((node) => ({
+      ...node,
+      position: translatePoint(node.position, delta),
+      accessPosition: translatePoint(node.accessPosition, delta)
+    }))
+  }
+
   if (Array.isArray(machine.mapMaterialChests)) {
     machine.mapMaterialChests = machine.mapMaterialChests.map((pos) => translatePoint(pos, delta))
   }
@@ -2533,6 +2547,25 @@ function importNervFolderConfig(imported, baseConfig) {
       accessPosition: toOpenPos(imported?.xpBottleChest)
     }
   }
+  const xpBottleChests = Array.isArray(imported?.xpBottleChests)
+    ? imported.xpBottleChests
+      .map((entry) => {
+        const position = toBlockPos(entry)
+        if (!position) return null
+        return {
+          enabled: true,
+          position,
+          accessPosition: toOpenPos(entry)
+        }
+      })
+      .filter(Boolean)
+    : []
+  if (xpBottleChests.length) {
+    merged.machine.xpBottleChests = xpBottleChests
+    if (!xpBottleChestPos) {
+      merged.machine.xpBottleChest = xpBottleChests[0]
+    }
+  }
 
   const xpButtonPos = toBlockPos(imported?.xpButton)
   if (xpButtonPos) {
@@ -2631,6 +2664,9 @@ function mergeUserConfig(base, loaded, options = {}) {
       finishedMapChest: { ...base.machine.finishedMapChest, ...(loaded.machine?.finishedMapChest || {}) },
       resetBlock: { ...base.machine.resetBlock, ...(loaded.machine?.resetBlock || {}) },
       xpBottleChest: { ...base.machine.xpBottleChest, ...(loaded.machine?.xpBottleChest || {}) },
+      xpBottleChests: Array.isArray(loaded.machine?.xpBottleChests)
+        ? loaded.machine.xpBottleChests
+        : (base.machine.xpBottleChests || []),
       xpButton: { ...base.machine.xpButton, ...(loaded.machine?.xpButton || {}) },
       xpDispenser: { ...base.machine.xpDispenser, ...(loaded.machine?.xpDispenser || {}) },
       anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) },
@@ -2644,6 +2680,9 @@ function mergeUserConfig(base, loaded, options = {}) {
       finishedMapChest: { ...base.machine.finishedMapChest, ...(loaded.machine?.finishedMapChest || {}) },
       resetBlock: { ...base.machine.resetBlock, ...(loaded.machine?.resetBlock || {}) },
       xpBottleChest: { ...base.machine.xpBottleChest, ...(loaded.machine?.xpBottleChest || {}) },
+      xpBottleChests: Array.isArray(loaded.machine?.xpBottleChests)
+        ? loaded.machine.xpBottleChests
+        : (base.machine.xpBottleChests || []),
       xpButton: { ...base.machine.xpButton, ...(loaded.machine?.xpButton || {}) },
       xpDispenser: { ...base.machine.xpDispenser, ...(loaded.machine?.xpDispenser || {}) },
       anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) },
@@ -3500,14 +3539,14 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
   if (!spots.length) {
     unavailableMaterialCache.add(blockName)
-    reportDashboardWarning(config, 'material-supply', `Mapart material chest is not configured for ${blockName}.`, { item: blockName })
+    console.log(`[RESTOCK-WARN] Mapart material chest is not configured for ${blockName}.`)
     return false
   }
 
   const itemId = bot.registry.itemsByName[blockName]?.id
   if (!itemId) {
     unavailableMaterialCache.add(blockName)
-    reportDashboardWarning(config, 'material-supply', `Unknown mapart material ${blockName}.`, { item: blockName })
+    console.log(`[RESTOCK-WARN] Unknown mapart material ${blockName}.`)
     return false
   }
 
@@ -3598,10 +3637,6 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         }
 
         if (totalInChest <= 0) {
-          reportDashboardWarning(config, 'material-supply', `Mapart material chest is low or empty: no ${blockName} found.`, {
-            item: blockName,
-            chest: { x: spot.x, y: spot.y, z: spot.z }
-          })
           if (config.advanced?.debugPrints) {
             console.log(`[RESTOCK-SKIP] Chest at ${spot.x} ${spot.y} ${spot.z} has 0 of ${blockName}, moving to next.`)
           }
@@ -4530,6 +4565,119 @@ function getChestWindowSlots(window) {
     slots.push({ slot: i, stack })
   }
   return slots
+}
+
+function countChestWindowItems(window, itemId, itemName = null) {
+  return getChestWindowSlots(window)
+    .filter((entry) => (itemId && entry.stack?.type === itemId) || (itemName && entry.stack?.name === itemName))
+    .reduce((sum, entry) => sum + toNumber(entry.stack?.count, 0), 0)
+}
+
+function normalizeMachineChestList(...sources) {
+  const result = []
+  const seen = new Set()
+  for (const source of sources) {
+    const entries = Array.isArray(source) ? source : [source]
+    for (const entry of entries) {
+      if (!entry) continue
+      const position = entry.position || entry
+      if (!Number.isFinite(position?.x) || !Number.isFinite(position?.y) || !Number.isFinite(position?.z)) continue
+      const accessPosition = entry.accessPosition || null
+      const key = `${position.x}:${position.y}:${position.z}:${accessPosition?.x ?? ''}:${accessPosition?.y ?? ''}:${accessPosition?.z ?? ''}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      result.push({ position, accessPosition })
+    }
+  }
+  return result
+}
+
+async function countItemAcrossChests(bot, config, itemName, chests, label) {
+  const itemId = getItemId(bot, itemName)
+  if (!itemId) {
+    reportSupportStockWarning(config, `Unknown support stock item ${itemName}; cannot check ${label}.`, { item: itemName, label })
+    return { count: 0, checked: 0, failed: chests.length }
+  }
+
+  let count = 0
+  let checked = 0
+  let failed = 0
+  for (const chest of chests) {
+    assertRuntimeContinue(bot, config, 'stopping-during-stock-check')
+    let container = null
+    try {
+      container = await openContainerAt(bot, chest.position, chest.accessPosition)
+      await delay(Math.max(50, toNumber(config.advanced?.supportStockCheckSettleMs, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))))
+      count += countChestWindowItems(container, itemId, itemName)
+      checked += 1
+    } catch (err) {
+      failed += 1
+      console.log(`[SUPPORT-STOCK-WARN] Could not check ${label} chest at ${chest.position.x} ${chest.position.y} ${chest.position.z}: ${err?.message || err}`)
+    } finally {
+      if (container) {
+        try { container.close() } catch { }
+      }
+    }
+  }
+
+  return { count, checked, failed }
+}
+
+async function checkSupportStockWarningsOnce(bot, config, reason = 'map-run') {
+  if (config.__supportStockWarningsCheckedForRun) return
+  config.__supportStockWarningsCheckedForRun = true
+
+  const advanced = config.advanced || {}
+  if (advanced.supportStockDashboardWarningsEnabled === false) return
+
+  const machine = config.machine || {}
+  const foodItem = String(advanced.autoEatFoodItem || 'cooked_beef').replace(/^minecraft:/, '')
+  const thresholds = {
+    food: Math.max(1, toNumber(advanced.supportStockFoodMinStacks, 5)),
+    xp: Math.max(1, toNumber(advanced.supportStockXpBottleMinStacks, 5)),
+    map: Math.max(1, toNumber(advanced.supportStockEmptyMapMinStacks, 1)),
+    pane: Math.max(1, toNumber(advanced.supportStockGlassPaneMinStacks, 1))
+  }
+
+  const checkStackThreshold = async (label, itemName, chests, minStacks) => {
+    if (!chests.length) {
+      reportSupportStockWarning(config, `${label} stock chest is not configured.`, { reason, item: itemName })
+      return
+    }
+    const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[itemName]?.stackSize, 64))
+    const minItems = minStacks * stackSize
+    const result = await countItemAcrossChests(bot, config, itemName, chests, label)
+    if (result.checked <= 0) {
+      reportSupportStockWarning(config, `${label} stock could not be checked.`, { reason, item: itemName, checked: result.checked, failed: result.failed })
+      return
+    }
+    if (result.count < minItems) {
+      reportSupportStockWarning(config, `${label} stock is low: ${result.count}/${minItems} ${itemName} available.`, {
+        reason,
+        item: itemName,
+        count: result.count,
+        minItems,
+        minStacks,
+        checkedChests: result.checked,
+        failedChests: result.failed
+      })
+    } else {
+      console.log(`[SUPPORT-STOCK] ${label} ok: ${result.count}/${minItems} ${itemName} across ${result.checked} chest(s).`)
+    }
+  }
+
+  const foodChests = normalizeMachineChestList(machine.foodChest?.enabled !== false ? machine.foodChest : null)
+  const xpChests = normalizeMachineChestList(
+    machine.xpBottleChests,
+    machine.xpBottleChest?.enabled !== false ? machine.xpBottleChest : null,
+    machine.xpDispenser?.enabled !== false ? machine.xpDispenser : null
+  )
+  const mapChests = normalizeMachineChestList(machine.mapMaterialChests)
+
+  await checkStackThreshold('Food', foodItem, foodChests, thresholds.food)
+  await checkStackThreshold('XP bottle', 'experience_bottle', xpChests, thresholds.xp)
+  await checkStackThreshold('Empty map', 'map', mapChests, thresholds.map)
+  await checkStackThreshold('Glass pane', 'glass_pane', mapChests, thresholds.pane)
 }
 
 function countWindowInventoryItems(window, itemId, itemName = null) {
@@ -8432,6 +8580,7 @@ async function waitForStartupSupport(bot, config, targets) {
 
 async function runPrint(bot, config, dashboardRuntime = null) {
   config.__dashboardRuntime = dashboardRuntime || null
+  config.__supportStockWarningsCheckedForRun = false
   ensureUsableEntityState(bot, config, 'run-print-start', { allowPlatformSeed: true, log: false })
   const files = config.files || {}
   const printer = config.printer || {}
@@ -8559,11 +8708,62 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     checkRuntimeStop()
   }
 
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const cliPostPrintTestOnly = hasCliFlag('--test-post-print') || hasCliFlag('--post-print-test-only')
+  const postPrintTestOnly = printer.postPrintTestOnly === true || cliPostPrintTestOnly
+  const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'litematic').toLowerCase()
+  const isLitematicBandMode = scannerWorkloadMode === 'litematic' || scannerWorkloadMode === 'reactive'
+
+  await checkSupportStockWarningsOnce(bot, config, postPrintTestOnly ? 'post-print-test' : 'map-run')
+
+  if (postPrintTestOnly) {
+    console.log('[TEST] postPrintTestOnly=true, skipping carpet placement and running post-print workflow only.')
+    if (cliPostPrintTestOnly) {
+      config.advanced = {
+        ...(config.advanced || {}),
+        postPrintResetEnabled: false,
+        postPrintWalkToCenter: false
+      }
+      console.log('[TEST] --test-post-print disables reset and final center walk for isolated post-print testing.')
+    }
+    resumePostPrintStep = 'withdraw'
+    if (progressEnabled) {
+      writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
+        state: 'post_print_workflow',
+        action: 'post-print-test-only',
+        postPrintStep: resumePostPrintStep,
+        postPrintCartographyComplete: false
+      })
+    }
+
+    setRuntimeStopCheckpoint('post_print', 'dashboard-stop-before-post-print-test', {
+      postPrintStep: resumePostPrintStep,
+      postPrintCartographyComplete: false
+    })
+    checkRuntimeStop()
+    const postPrintOnlyResult = await runPostPrintWorkflowWithRecovery(bot, config, makePostPrintContext, resumePostPrintStep, { label: 'test-only' })
+    if (!postPrintOnlyResult?.completed) {
+      console.log(`[POSTPRINT-WARN] Post-print test-only workflow stopped at step=${postPrintOnlyResult?.failedStep || 'unknown'}.`)
+      return {
+        sourceType: input.sourceType,
+        sourcePath: input.sourcePath,
+        sourceName: input.sourceName,
+        didWork: true
+      }
+    }
+    await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
+    return {
+      sourceType: input.sourceType,
+      sourcePath: input.sourcePath,
+      sourceName: input.sourceName,
+      didWork: true
+    }
+  }
+
   if (!pending.length) {
     console.log('[PLAN] No build targets found.')
     console.log('[VERIFY] Progress indicates completed build. Running verification/repair and post-print workflow.')
 
-    const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
     const Vec3Verify = bot.entity.position.constructor
     let placed = 0
     let skipped = 0
@@ -8744,49 +8944,6 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       clearProgressState(progressFile)
     }
 
-    return {
-      sourceType: input.sourceType,
-      sourcePath: input.sourcePath,
-      sourceName: input.sourceName,
-      didWork: true
-    }
-  }
-
-  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
-  const postPrintTestOnly = printer.postPrintTestOnly === true
-  const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'litematic').toLowerCase()
-  const isLitematicBandMode = scannerWorkloadMode === 'litematic' || scannerWorkloadMode === 'reactive'
-
-  if (postPrintTestOnly) {
-    console.log('[TEST] postPrintTestOnly=true, skipping carpet placement and running post-print workflow only.')
-    // Force fresh start in test mode so previous progress doesn't skip steps
-    resumePostPrintStep = 'withdraw'
-    // Persist phase=post_print so crash here resumes post-print, not repair again
-  if (progressEnabled) {
-    writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'post_print', {
-      state: 'post_print_workflow',
-      action: 'post-print-test-only',
-      postPrintStep: resumePostPrintStep,
-      postPrintCartographyComplete: false
-    })
-  }
-
-  setRuntimeStopCheckpoint('post_print', 'dashboard-stop-before-post-print-test', {
-    postPrintStep: resumePostPrintStep,
-    postPrintCartographyComplete: false
-  })
-  checkRuntimeStop()
-  const postPrintOnlyResult = await runPostPrintWorkflowWithRecovery(bot, config, makePostPrintContext, resumePostPrintStep, { label: 'test-only' })
-  if (!postPrintOnlyResult?.completed) {
-    console.log(`[POSTPRINT-WARN] Post-print test-only workflow stopped at step=${postPrintOnlyResult?.failedStep || 'unknown'}.`)
-    return {
-      sourceType: input.sourceType,
-      sourcePath: input.sourcePath,
-      sourceName: input.sourceName,
-      didWork: true
-    }
-  }
-    await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
     return {
       sourceType: input.sourceType,
       sourcePath: input.sourcePath,
@@ -15779,6 +15936,19 @@ async function start() {
       startOnSpawn: false
     }
     console.log('[CONTROL] wait-for-command mode enabled. The bot will connect and remain idle until a dashboard or terminal start command is issued.')
+  }
+  if (hasCliFlag('--test-post-print') || hasCliFlag('--post-print-test-only')) {
+    config.printer = {
+      ...(config.printer || {}),
+      startOnSpawn: true,
+      postPrintTestOnly: true
+    }
+    config.advanced = {
+      ...(config.advanced || {}),
+      postPrintResetEnabled: false,
+      postPrintWalkToCenter: false
+    }
+    console.log('[TEST-POSTPRINT] Running post-print workflow only. Printing, reset, and final center walk are disabled.')
   }
   const reconnect = getReconnectConfig(config)
   logStartupSummary(config, reconnect)
