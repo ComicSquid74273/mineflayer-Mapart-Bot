@@ -325,7 +325,7 @@
     "postPrintRequireRenameBeforeStore": false,
     "postPrintRenameAttempts": 3,
     "postPrintMinXpLevel": 2,
-    "postPrintTargetXpLevel": 3,
+    "postPrintTargetXpLevel": 2,
     "postPrintSkipResetInteraction": false,
     "postPrintWalkToCenter": true,
     "postPrintCenterWaitMs": 30000,
