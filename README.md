@@ -336,6 +336,9 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.postPrintRenameAttempts` | `3` | Number of anvil rename attempts before holding the map for retry. | Raise on laggy servers if rename verification is late. |
 | `advanced.postPrintMinXpLevel` | `2` | Minimum XP before refill behavior. | Raise if rename costs more. |
 | `advanced.postPrintTargetXpLevel` | `3` | Desired XP target after refill. | Raise for repeated post-print actions. |
+| `advanced.postPrintXpBottlePullStacks` | `1` | XP bottle stacks to pull from the configured XP chest/source when below minimum XP. | Used before anvil rename; leftover bottles are returned by default. |
+| `advanced.postPrintXpBottleMaxThrows` | `64` | Maximum XP bottles to throw during one post-print XP refill. | Safety cap for laggy XP pickup. |
+| `advanced.postPrintReturnUnusedXpBottles` | `true` | Return unused XP bottles to the XP chest/source after reaching the minimum level. | Set `false` only if you want leftovers kept in inventory. |
 | `advanced.postPrintSkipResetInteraction` | `false` | Skip reset interaction while keeping workflow. | Useful for testing post-print without resetting. |
 | `advanced.postPrintWalkToCenter` | `true` | Walk to map center during fill. | Disable if fill path is handled externally. |
 | `advanced.postPrintCenterWaitMs` | `20000` | Wait at center during map fill. | Increase if map fill is incomplete. |

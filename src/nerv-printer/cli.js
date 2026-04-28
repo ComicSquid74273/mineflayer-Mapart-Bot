@@ -2539,12 +2539,13 @@ function importNervFolderConfig(imported, baseConfig) {
     }
   }
 
-  const xpBottleChestPos = toBlockPos(imported?.xpBottleChest)
+  const importedXpBottleChest = imported?.xpBottleChest || imported?.xpChest
+  const xpBottleChestPos = toBlockPos(importedXpBottleChest)
   if (xpBottleChestPos) {
     merged.machine.xpBottleChest = {
       enabled: true,
       position: xpBottleChestPos,
-      accessPosition: toOpenPos(imported?.xpBottleChest)
+      accessPosition: toOpenPos(importedXpBottleChest)
     }
   }
   const xpBottleChests = Array.isArray(imported?.xpBottleChests)
@@ -4188,6 +4189,57 @@ async function withdrawFromChest(bot, config, chestPos, itemName, amount, access
   }
 }
 
+async function withdrawItemStacksFromChests(bot, config, chests, itemName, desiredItems, options = {}) {
+  const itemId = bot.registry.itemsByName[itemName]?.id
+  if (!itemId) return 0
+
+  const itemInfo = bot.registry.itemsByName[itemName] || {}
+  const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
+  const timeoutMs = Math.max(500, toNumber(options.timeoutMs, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500)))
+  const pollMs = Math.max(50, toNumber(options.pollMs, toNumber(config.advanced?.postPrintChestPollMs, 100)))
+  const interactionDelayMs = Math.max(50, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+  const sortedChests = [...chests].sort((a, b) => horizontalDist2(bot, a.position) - horizontalDist2(bot, b.position))
+  const before = countInventoryByType(bot, itemName)
+  const capacity = inventoryCapacityForItem(bot, itemName)
+  let remaining = Math.min(Math.max(1, toNumber(desiredItems, stackSize)), capacity)
+
+  if (remaining <= 0) return 0
+
+  for (const chest of sortedChests) {
+    assertRuntimeContinue(bot, config, 'stopping-during-xp-chest-withdraw')
+    if (remaining <= 0) break
+    let container = null
+    try {
+      container = await openContainerAt(bot, chest.position, chest.accessPosition)
+      await delay(interactionDelayMs)
+      const moved = await quickMoveChestItemStacks(bot, container, itemId, remaining, stackSize, Math.max(1, Math.ceil(remaining / stackSize)), {
+        onlyFullStacks: false,
+        timeoutMs,
+        pollMs
+      })
+      remaining -= Math.max(0, toNumber(moved?.itemsMoved, moved?.movedEstimate || 0))
+    } catch (err) {
+      console.log(`[POSTPRINT-WARN] Could not withdraw ${itemName} from XP chest at ${chest.position.x} ${chest.position.y} ${chest.position.z}: ${err?.message || err}`)
+    } finally {
+      if (container) {
+        try { container.close() } catch { }
+      }
+    }
+  }
+
+  const targetMin = before + 1
+  const latest = await waitForInventoryCountChangeOrTarget(
+    bot,
+    itemName,
+    before,
+    targetMin,
+    timeoutMs,
+    pollMs,
+    Math.max(50, toNumber(config.advanced?.inventoryActionDelayMs, 100))
+  )
+  return Math.max(0, latest - before)
+}
+
 async function depositToChest(bot, config, chestPos, itemName, amount, accessPosition) {
   const itemId = bot.registry.itemsByName[itemName]?.id
   if (!itemId) return false
@@ -5187,9 +5239,70 @@ async function refillXpForPostPrint(bot, config) {
   const minLevel = Math.max(0, toNumber(advanced.postPrintMinXpLevel, 2))
   const targetLevel = Math.max(minLevel, toNumber(advanced.postPrintTargetXpLevel, 5))
   const currentLevel = toNumber(bot.experience?.level, 0)
+  const machine = config.machine || {}
+  const xpBottleChests = normalizeMachineChestList(
+    machine.xpBottleChests,
+    machine.xpBottleChest?.enabled !== false ? machine.xpBottleChest : null,
+    machine.xpDispenser?.enabled !== false ? machine.xpDispenser : null
+  )
   const xpButtonConfig = config.machine?.xpButton
 
   if (currentLevel >= minLevel) return
+
+  if (xpBottleChests.length) {
+    const beforeBottles = countInventoryByType(bot, 'experience_bottle')
+    const stackSize = Math.max(1, toNumber(bot.registry.itemsByName.experience_bottle?.stackSize, 64))
+    const pullStacks = Math.max(1, toNumber(advanced.postPrintXpBottlePullStacks, 1))
+    const desiredPull = Math.min(stackSize * pullStacks, Math.max(stackSize, inventoryCapacityForItem(bot, 'experience_bottle')))
+    if (beforeBottles <= 0 && desiredPull > 0) {
+      console.log(`[POSTPRINT] XP level=${currentLevel}/${minLevel}; withdrawing XP bottles from chest.`)
+      const pulled = await withdrawItemStacksFromChests(bot, config, xpBottleChests, 'experience_bottle', desiredPull)
+      if (pulled <= 0 && countInventoryByType(bot, 'experience_bottle') <= 0) {
+        reportSupportStockWarning(config, 'XP bottle chest has no withdrawable experience_bottle stack for post-print rename.', {
+          item: 'experience_bottle',
+          minLevel,
+          targetLevel
+        })
+      }
+    }
+
+    const maxThrows = Math.max(1, toNumber(advanced.postPrintXpBottleMaxThrows, 64))
+    const throwDelayMs = Math.max(100, toNumber(advanced.postPrintXpBottleThrowDelayMs, 250))
+    const settleMs = Math.max(250, toNumber(advanced.postPrintXpBottleSettleMs, 750))
+    let throws = 0
+    while (toNumber(bot.experience?.level, 0) < targetLevel && throws < maxThrows) {
+      assertRuntimeContinue(bot, config, 'stopping-during-xp-refill')
+      const bottle = findInventoryItemByType(bot, 'experience_bottle')
+      if (!bottle) break
+      try {
+        await bot.equip(bottle, 'hand')
+        await bot.look(bot.entity.yaw || 0, Math.PI / 2, true)
+        await bot.activateItem()
+        if (typeof bot.deactivateItem === 'function') bot.deactivateItem()
+        throws += 1
+        await delay(throwDelayMs)
+      } catch (err) {
+        console.log(`[POSTPRINT-WARN] XP bottle throw failed: ${err?.message || err}`)
+        break
+      }
+    }
+    if (throws > 0) {
+      await delay(settleMs)
+      console.log(`[POSTPRINT] Threw ${throws} XP bottle(s); level=${toNumber(bot.experience?.level, 0)}/${targetLevel}.`)
+    }
+
+    const finalAfterBottles = toNumber(bot.experience?.level, 0)
+    if (advanced.postPrintReturnUnusedXpBottles !== false && finalAfterBottles >= minLevel && countInventoryByType(bot, 'experience_bottle') > 0) {
+      const returnChest = xpBottleChests[0]
+      const leftover = countInventoryByType(bot, 'experience_bottle')
+      const returned = await depositToChest(bot, config, returnChest.position, 'experience_bottle', leftover, returnChest.accessPosition)
+      if (returned) {
+        console.log(`[POSTPRINT] Returned ${leftover} unused XP bottle(s) to XP chest.`)
+      }
+    }
+
+    if (finalAfterBottles >= minLevel) return
+  }
 
   if (!xpButtonConfig?.enabled || !xpButtonConfig?.position) {
     console.log('[POSTPRINT-WARN] XP button is not configured; skipping XP refill.')
