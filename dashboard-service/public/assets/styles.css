@@ -337,6 +337,28 @@ h1 {
   margin-top: 4px;
 }
 
+.bot-warnings {
+  display: grid;
+  gap: 8px;
+}
+
+.bot-warning {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  padding: 10px 12px;
+  border: 1px solid rgba(209, 154, 42, 0.28);
+  border-radius: 8px;
+  background: rgba(209, 154, 42, 0.12);
+  color: #ffd27a;
+  font-size: 0.88rem;
+}
+
+.bot-warning strong {
+  color: var(--ink);
+}
+
 .bot-actions {
   flex-wrap: wrap;
 }

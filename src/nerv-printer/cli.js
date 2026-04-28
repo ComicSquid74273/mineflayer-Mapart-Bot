@@ -330,6 +330,13 @@ function logThrottled(key, message, options = {}) {
   throttledLogState.set(key, current)
 }
 
+function reportDashboardWarning(config, category, message, details = {}) {
+  const runtime = config?.__dashboardRuntime
+  if (runtime && typeof runtime.reportWarning === 'function') {
+    runtime.reportWarning(category, message, details)
+  }
+}
+
 function getDashboardConfig(config) {
   const raw = config?.dashboard
   const envEnabled = String(process.env.NERV_DASHBOARD_ENABLED || '').toLowerCase()
@@ -594,6 +601,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     currentNbt: null,
     currentNbtStartedAt: null,
     lastError: '',
+    warnings: [],
     lastActivityAt: Date.now(),
     startRequested: false,
     stopRequested: false,
@@ -748,6 +756,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       nodeLogs: listNodeLogFiles(),
       progress: progressPayload,
       lastError: state.lastError || null,
+      warnings: state.warnings.slice(-5),
       assignedInterval,
       staleReason: activeState === 'stale' ? (progress ? 'progress-frozen' : 'heartbeat-missed') : undefined,
       verificationCode: stdinCommandState.status?.verificationCode || null,
@@ -1110,6 +1119,31 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     setLastError(message) {
       state.lastError = String(message || '').trim()
       noteActivity()
+    },
+    reportWarning(category, message, details = {}) {
+      const text = String(message || '').trim()
+      if (!text) return
+      const key = String(category || 'runtime-warning').trim() || 'runtime-warning'
+      const now = new Date().toISOString()
+      const previous = state.warnings.find((entry) => entry.category === key && entry.message === text)
+      if (previous) {
+        previous.lastSeenAt = now
+        previous.count = toNumber(previous.count, 1) + 1
+        previous.details = details && typeof details === 'object' ? details : {}
+      } else {
+        state.warnings.push({
+          category: key,
+          message: text,
+          details: details && typeof details === 'object' ? details : {},
+          firstSeenAt: now,
+          lastSeenAt: now,
+          count: 1
+        })
+      }
+      if (state.warnings.length > 20) state.warnings = state.warnings.slice(-20)
+      state.statusDetail = text
+      noteActivity()
+      void postStatus()
     },
     consumeStartRequest() {
       if (!state.startRequested) return false
@@ -2069,6 +2103,11 @@ function createDefaultConfig() {
       inventoryRefillRows: 2,
       inventoryMaxMaterialTypes: 16,
       inventoryPlanUseWorldState: false,
+      autoEatEnabled: true,
+      autoEatMinHunger: 12,
+      autoEatFoodItem: 'cooked_beef',
+      anvilPillarMinCount: 3,
+      anvilPillarScanLimit: 16,
       sneakOnDispenserOnly: true,
       postPrintWorkflowEnabled: true,
       postPrintFillMapEnabled: true,
@@ -2180,6 +2219,7 @@ function createDefaultConfig() {
       xpButton: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       xpDispenser: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       anvil: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
+      foodChest: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       mapMaterialChests: [],
       materialDict: {}
     },
@@ -2314,7 +2354,7 @@ function applyAnchorTranslation(config) {
     }))
   }
 
-  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpBottleChest', 'xpButton', 'xpDispenser', 'anvil']) {
+  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpBottleChest', 'xpButton', 'xpDispenser', 'anvil', 'foodChest']) {
     const node = machine[key]
     if (!node) continue
     node.position = translatePoint(node.position, delta)
@@ -2474,6 +2514,15 @@ function importNervFolderConfig(imported, baseConfig) {
     }
   }
 
+  const foodChestPos = toBlockPos(imported?.foodChest)
+  if (foodChestPos) {
+    merged.machine.foodChest = {
+      enabled: true,
+      position: foodChestPos,
+      accessPosition: toOpenPos(imported?.foodChest)
+    }
+  }
+
   const mapMaterial = Array.isArray(imported?.mapMaterialChests)
     ? imported.mapMaterialChests.map(toBlockPos).filter(Boolean)
     : []
@@ -2537,7 +2586,8 @@ function mergeUserConfig(base, loaded, options = {}) {
       xpBottleChest: { ...base.machine.xpBottleChest, ...(loaded.machine?.xpBottleChest || {}) },
       xpButton: { ...base.machine.xpButton, ...(loaded.machine?.xpButton || {}) },
       xpDispenser: { ...base.machine.xpDispenser, ...(loaded.machine?.xpDispenser || {}) },
-      anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) }
+      anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) },
+      foodChest: { ...base.machine.foodChest, ...(loaded.machine?.foodChest || {}) }
     }
   } else if (allowMachineNodeOverrides) {
     merged.machine = {
@@ -2549,7 +2599,8 @@ function mergeUserConfig(base, loaded, options = {}) {
       xpBottleChest: { ...base.machine.xpBottleChest, ...(loaded.machine?.xpBottleChest || {}) },
       xpButton: { ...base.machine.xpButton, ...(loaded.machine?.xpButton || {}) },
       xpDispenser: { ...base.machine.xpDispenser, ...(loaded.machine?.xpDispenser || {}) },
-      anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) }
+      anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) },
+      foodChest: { ...base.machine.foodChest, ...(loaded.machine?.foodChest || {}) }
     }
   } else if (allowMapCornerOnly) {
     const mc = loaded.machine?.mapCorner
@@ -3401,12 +3452,14 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
   if (!spots.length) {
     unavailableMaterialCache.add(blockName)
+    reportDashboardWarning(config, 'material-supply', `Mapart material chest is not configured for ${blockName}.`, { item: blockName })
     return false
   }
 
   const itemId = bot.registry.itemsByName[blockName]?.id
   if (!itemId) {
     unavailableMaterialCache.add(blockName)
+    reportDashboardWarning(config, 'material-supply', `Unknown mapart material ${blockName}.`, { item: blockName })
     return false
   }
 
@@ -3494,6 +3547,10 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         }
 
         if (totalInChest <= 0) {
+          reportDashboardWarning(config, 'material-supply', `Mapart material chest is low or empty: no ${blockName} found.`, {
+            item: blockName,
+            chest: { x: spot.x, y: spot.y, z: spot.z }
+          })
           if (config.advanced?.debugPrints) {
             console.log(`[RESTOCK-SKIP] Chest at ${spot.x} ${spot.y} ${spot.z} has 0 of ${blockName}, moving to next.`)
           }
@@ -4206,6 +4263,53 @@ async function openAnvilAt(bot, position, accessPosition) {
   return await bot.openAnvil(block)
 }
 
+function isAnvilBlockName(name) {
+  return name === 'anvil' || name === 'chipped_anvil' || name === 'damaged_anvil'
+}
+
+function countAnvilPillar(bot, position, maxCount = 16) {
+  if (!position) return { count: 0, loaded: false }
+  const Vec3 = bot.entity.position.constructor
+  const limit = Math.max(1, Math.floor(toNumber(maxCount, 16)))
+  let count = 0
+  let loaded = true
+
+  for (let offset = 0; offset < limit; offset += 1) {
+    const block = bot.blockAt(new Vec3(position.x, position.y + offset, position.z))
+    if (!block) {
+      loaded = false
+      break
+    }
+    if (!isAnvilBlockName(block.name)) break
+    count += 1
+  }
+
+  return { count, loaded }
+}
+
+function warnIfAnvilPillarLow(bot, config, anvilConfig, reason = 'anvil-check') {
+  const advanced = config.advanced || {}
+  const required = Math.max(0, Math.floor(toNumber(advanced.anvilPillarMinCount, 3)))
+  if (required <= 0 || !anvilConfig?.enabled || !anvilConfig?.position) return null
+
+  const result = countAnvilPillar(bot, anvilConfig.position, advanced.anvilPillarScanLimit)
+  if (result.count < required) {
+    const message = result.loaded
+      ? `Anvil pillar is low: ${result.count}/${required} anvil(s) available.`
+      : `Anvil pillar could not be fully checked: ${result.count}/${required} anvil(s) visible.`
+    console.log(`[ANVIL-WARN] ${reason}: ${message}`)
+    reportDashboardWarning(config, 'anvil-supply', message, {
+      reason,
+      count: result.count,
+      required,
+      loaded: result.loaded,
+      position: anvilConfig.position
+    })
+  }
+
+  return result
+}
+
 function findWindowInventorySlot(window, bot, itemName) {
   const itemId = bot.registry.itemsByName[itemName]?.id
   const start = Number.isFinite(window.inventoryStart) ? window.inventoryStart : 0
@@ -4729,6 +4833,154 @@ function countInventoryByType(bot, itemName) {
     .reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
 }
 
+function getBotHunger(bot) {
+  const hunger = Number(bot?.food)
+  return Number.isFinite(hunger) ? hunger : null
+}
+
+async function equipFoodItem(bot, foodItem) {
+  const item = bot.inventory.items().find((entry) => entry.name === foodItem)
+  if (!item) return false
+  await bot.equip(item, 'hand')
+  return true
+}
+
+async function eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, reason) {
+  let hunger = getBotHunger(bot)
+  if (hunger == null || hunger >= minHunger) return true
+
+  const maxEats = Math.max(1, toNumber(config.advanced?.autoEatMaxConsumes, 8))
+  const settleMs = Math.max(100, toNumber(config.advanced?.autoEatSettleMs, 500))
+  let previousHunger = hunger
+
+  for (let attempt = 1; attempt <= maxEats; attempt += 1) {
+    if (!await equipFoodItem(bot, foodItem)) return false
+    try {
+      await bot.consume()
+    } catch (err) {
+      console.log(`[AUTO-EAT-WARN] ${reason}: consume failed for ${foodItem}: ${err?.message || err}`)
+      return false
+    }
+
+    await delay(settleMs)
+    hunger = getBotHunger(bot)
+    if (hunger == null) return true
+    if (hunger >= minHunger) {
+      console.log(`[AUTO-EAT] ${reason}: ate ${foodItem}; hunger=${hunger}/${minHunger}.`)
+      return true
+    }
+    if (hunger <= previousHunger && !bot.inventory.items().some((entry) => entry.name === foodItem)) {
+      break
+    }
+    previousHunger = hunger
+  }
+
+  console.log(`[AUTO-EAT-WARN] ${reason}: hunger still low after eating attempts: hunger=${hunger ?? 'unknown'} min=${minHunger}.`)
+  return false
+}
+
+async function pullFoodStackFromChest(bot, config, foodItem, reason) {
+  const foodChest = config.machine?.foodChest
+  if (!foodChest?.enabled || !foodChest?.position) {
+    const message = 'Food chest is not configured; continuing without auto-eat.'
+    console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
+    reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem })
+    return false
+  }
+
+  const itemId = getItemId(bot, foodItem)
+  if (!itemId) {
+    const message = `Unknown configured food item ${foodItem}; continuing without auto-eat.`
+    console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
+    reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem })
+    return false
+  }
+
+  const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[foodItem]?.stackSize, 64))
+  if (inventoryCapacityForItem(bot, foodItem) <= 0) {
+    const message = `No inventory room for ${foodItem}; continuing without auto-eat.`
+    console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
+    reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem })
+    return false
+  }
+
+  const advanced = config.advanced || {}
+  const syncWaitMs = Math.max(200, toNumber(advanced.autoEatChestSyncWaitMs, toNumber(advanced.restockInventorySyncWaitMs, 2000)))
+  const pollMs = Math.max(25, toNumber(advanced.autoEatChestPollMs, 100))
+  const settleMs = Math.max(100, toNumber(advanced.autoEatChestSettleMs, 300))
+  let container = null
+
+  try {
+    container = await openContainerAt(bot, foodChest.position, foodChest.accessPosition)
+    await delay(toNumber(advanced.preRestockDelayMs, 200))
+    const chestHas = getChestWindowSlots(container)
+      .some((entry) => entry.stack?.type === itemId || entry.stack?.name === foodItem)
+    if (!chestHas) {
+      const message = `Food chest is low or empty: no ${foodItem} found.`
+      console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
+      reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem, chest: foodChest.position })
+      return false
+    }
+
+    const before = countInventoryItems(bot, foodItem)
+    const moved = await quickMoveChestItemStacks(bot, container, itemId, stackSize, stackSize, 1, {
+      onlyFullStacks: false,
+      timeoutMs: syncWaitMs,
+      pollMs
+    })
+    await delay(settleMs)
+    const windowCount = countWindowInventoryItems(container, itemId, foodItem)
+    const after = Math.max(countInventoryItems(bot, foodItem), windowCount)
+    if (moved.stacksMoved > 0 || after > before) {
+      console.log(`[AUTO-EAT] ${reason}: pulled ${foodItem} from food chest; have=${after}.`)
+      return true
+    }
+
+    const message = `Food chest transfer did not pull ${foodItem}; continuing.`
+    console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
+    reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem, chest: foodChest.position })
+    return false
+  } catch (err) {
+    const message = `Food chest pull failed: ${err?.message || err}`
+    console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
+    reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem, chest: foodChest.position })
+    return false
+  } finally {
+    if (container) {
+      try { container.close() } catch { }
+    }
+  }
+}
+
+async function ensureFoodBeforeTraversal(bot, config, reason = 'before-traversal') {
+  const advanced = config.advanced || {}
+  if (advanced.autoEatEnabled === false) return true
+
+  const hunger = getBotHunger(bot)
+  if (hunger == null) return true
+
+  const minHunger = Math.max(0, Math.min(20, toNumber(advanced.autoEatMinHunger, 12)))
+  if (hunger >= minHunger) return true
+
+  const foodItem = String(advanced.autoEatFoodItem || 'cooked_beef').replace(/^minecraft:/, '')
+  if (!foodItem) return true
+
+  console.log(`[AUTO-EAT] ${reason}: hunger=${hunger}/${minHunger}; checking ${foodItem}.`)
+  if (!bot.inventory.items().some((entry) => entry.name === foodItem)) {
+    await pullFoodStackFromChest(bot, config, foodItem, reason)
+    await delay(Math.max(100, toNumber(advanced.autoEatSettleMs, 500)))
+  }
+
+  if (!bot.inventory.items().some((entry) => entry.name === foodItem)) {
+    const message = `No ${foodItem} available after food chest check; continuing.`
+    console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
+    reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem })
+    return false
+  }
+
+  return await eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, reason)
+}
+
 async function refillXpForPostPrint(bot, config) {
   const advanced = config.advanced || {}
   if (advanced.postPrintXpRefillEnabled === false) return
@@ -4789,6 +5041,7 @@ async function renameFinishedMap(bot, config, anvilConfig, sourceName) {
     toNumber(advanced.postPrintInteractionDelayMs, 200),
     toNumber(advanced.postPrintMapSettleDelayMs, 200)
   )
+  warnIfAnvilPillarLow(bot, config, anvilConfig, 'postprint-rename')
 
   let filledMaps = findInventoryItemsByType(bot, 'filled_map')
   if (!filledMaps.length) {
@@ -8084,6 +8337,7 @@ async function waitForStartupSupport(bot, config, targets) {
 }
 
 async function runPrint(bot, config, dashboardRuntime = null) {
+  config.__dashboardRuntime = dashboardRuntime || null
   ensureUsableEntityState(bot, config, 'run-print-start', { allowPlatformSeed: true, log: false })
   const files = config.files || {}
   const printer = config.printer || {}
@@ -8576,6 +8830,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       const useLitematicRowMode = isLitematicBandMode
 
       if (useLitematicRowMode) {
+        await ensureFoodBeforeTraversal(bot, config, `litematic-batch cols=${colBatch.join(',')}`)
         const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
         placed += result.placed
         already += result.already
@@ -8617,6 +8872,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         }
         batchStartOnNorthSide = !batchStartOnNorthSide
       } else if (printer.fastTraversalEnabled === true) {
+        await ensureFoodBeforeTraversal(bot, config, `fast-batch cols=${colBatch.join(',')}`)
         const result = scannerWorkloadMode === 'time'
           ? await placementWorkload.runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
           : await placementWorkload.runNervScannerPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
@@ -8646,6 +8902,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           .find(Boolean)
 
         if (firstTarget) {
+          await ensureFoodBeforeTraversal(bot, config, `manual-batch cols=${colBatch.join(',')}`)
           const startGoal = new GoalNear(firstTarget.position.x, firstTarget.position.y, firstTarget.position.z, Math.max(1, placeRange - 1))
           try {
             await bot.pathfinder.goto(startGoal)
@@ -12268,6 +12525,7 @@ function collectSpatialLandmarks(config) {
   addSpatialLandmark(landmarks, 'xpDispenser', machine.xpDispenser, { expected: ['dispenser', 'dropper'], required: machine.xpDispenser?.enabled === true, note: 'XP source; replaces xpBottleChest when configured.' })
   addSpatialLandmark(landmarks, 'xpBottleChest', machine.xpBottleChest, { expected: ['chest', 'trapped_chest', 'barrel'], required: false, note: machine.xpDispenser?.enabled ? 'Ignored because xpDispenser is configured.' : '' })
   addSpatialLandmark(landmarks, 'anvil', machine.anvil, { expected: ['anvil', 'chipped_anvil', 'damaged_anvil'], required: machine.anvil?.enabled === true })
+  addSpatialLandmark(landmarks, 'foodChest', machine.foodChest, { expected: ['chest', 'trapped_chest', 'barrel'], required: machine.foodChest?.enabled === true })
 
   const materialDict = machine.materialDict && typeof machine.materialDict === 'object' ? machine.materialDict : {}
   for (const [material, spots] of Object.entries(materialDict)) {
@@ -13318,7 +13576,7 @@ function logConfiguredCoordinateSummary(config) {
     console.log(`[COORDS] loginPortal enabled=${login.enabled !== false} center=${toNumber(login.x, 0)},${toNumber(login.y, 0)},${toNumber(login.z, 0)} radius=${toNumber(login.radius, 0)}`)
   }
 
-  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpButton', 'xpDispenser', 'anvil']) {
+  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpButton', 'xpDispenser', 'anvil', 'foodChest']) {
     const node = machine[key]
     if (!node) continue
     console.log(`[COORDS] machine ${key} enabled=${node.enabled !== false} position=${formatCoordTriplet(node.position)} access=${formatCoordTriplet(node.accessPosition)}`)

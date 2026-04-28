@@ -282,6 +282,11 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.antiHunger.enabled` | `true` | Enables Meteor-style AntiHunger packet spoofing. | On by default; set `false` only for debugging movement/server issues. |
 | `advanced.antiHunger.sprint` | `true` | Cancels outgoing start-sprinting action packets. | Reduces hunger from sprint packet state. |
 | `advanced.antiHunger.onGround` | `true` | Spoofs movement packet ground flag while safely on ground. | First ground packet after landing is preserved so fall damage is not suppressed incorrectly. |
+| `advanced.autoEatEnabled` | `true` | Enables pre-traversal food checks. | Disable only if food should be handled manually. |
+| `advanced.autoEatMinHunger` | `12` | Eat before a traversal batch when hunger is below this value. | Raise for more buffer; lower to visit the food chest less often. |
+| `advanced.autoEatFoodItem` | `cooked_beef` | Item pulled from `machine.foodChest` and consumed. | `cooked_beef` is Minecraft steak. |
+| `advanced.anvilPillarMinCount` | `3` | Minimum anvils expected in the vertical pillar at `machine.anvil`. | Dashboard warns when visible anvils drop below this. |
+| `advanced.anvilPillarScanLimit` | `16` | Max vertical blocks to scan upward from `machine.anvil`. | Raise only if the pillar is taller than 16 anvils. |
 | `advanced.platformWatchdogEnabled` | `true` | Pauses pathing/placing if the bot leaves platform bounds or enters limbo coords. | Keep enabled on public servers/restarts. |
 | `advanced.platformWatchdogPollMs` | `1000` | How often the runtime platform watchdog checks position. | Lower reacts faster; higher is calmer. |
 | `advanced.platformHoldLogMs` | `5000` | Log interval while waiting in platform hold. | Raise if logs are too noisy during restarts. |

@@ -563,6 +563,14 @@ function renderBotCard(bot) {
   const healthClass = botHealthClass(bot)
   const pingText = typeof bot.latencyMs === 'number' ? `${bot.latencyMs}ms` : 'n/a'
   const canOperate = hasPermission('canOperate')
+  const warningList = Array.isArray(bot.warnings) ? bot.warnings.slice(-3) : []
+  const warningsHtml = warningList.length
+    ? `<div class="bot-warnings">${warningList.map((warning) => `
+        <div class="bot-warning">
+          <strong>${escapeHtml(warning.category || 'warning')}</strong>
+          <span>${escapeHtml(warning.message || '')}${Number(warning.count) > 1 ? ` (${escapeHtml(warning.count)}x)` : ''}</span>
+        </div>`).join('')}</div>`
+    : ''
   return `
     <article class="bot-card${showVerify ? ' bot-card-verify' : ''}">
       ${verifyBanner}
@@ -594,6 +602,7 @@ function renderBotCard(bot) {
         <div class="metric">Reconnect<strong>${escapeHtml(bot.reconnectState || 'idle')}</strong></div>
       </div>
       ${bot.lastError ? `<p class="hint">Last error: ${escapeHtml(bot.lastError)}</p>` : ''}
+      ${warningsHtml}
       <div class="bot-actions">
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
         <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Stop Print</button>

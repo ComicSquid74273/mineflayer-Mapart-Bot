@@ -346,6 +346,7 @@ function summarizeBot(bot) {
     currentNbt: bot.currentNbt,
     lastStatusAt: bot.lastStatusAt,
     lastError: bot.lastError || null,
+    warnings: Array.isArray(bot.warnings) ? bot.warnings.slice(-5) : [],
     progress: bot.progress || null,
     verificationCode: bot.verificationCode || null,
     tokenWaiting: bot.tokenWaiting === true,
