@@ -2117,6 +2117,11 @@ function createDefaultConfig() {
       scannerPlaceConfirmMs: 80,
       scannerPlaceConfirmPollMs: 15,
       placementStallTimeoutMs: 5000,
+      placementStallRecoveryMs: 2000,
+      placementStallRecoveryAttempts: 3,
+      placementStallRecoveryConfirmMs: 180,
+      placementStallRecoverySettleMs: 120,
+      placementStallRecoveryCooldownMs: 750,
       placementStallSkipRadiusBlocks: 5,
       litematicRowSettleMs: 150,
       litematicRowVerifyEveryRows: 2,
@@ -7413,9 +7418,15 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const alertPollMs = Math.max(10, toNumber(advanced.scannerAlertPollMs, Math.max(pollMs, 25)))
   const alertReach = Math.max(1, toNumber(advanced.scannerAlertReach, Math.max(printer.placeRange, 4) + 0.75))
   const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
+  const stallTimeoutMs = Math.max(0, toNumber(advanced.placementStallTimeoutMs, 5000))
 
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
   const stallSkipRadiusBlocks = Math.max(1, toNumber(advanced.placementStallSkipRadiusBlocks, placeRange + 1))
+  const stallRecoveryMs = Math.max(0, toNumber(advanced.placementStallRecoveryMs, stallTimeoutMs > 0 ? Math.min(2000, Math.max(1500, Math.floor(stallTimeoutMs * 0.4))) : 0))
+  const stallRecoveryAttempts = Math.max(0, toNumber(advanced.placementStallRecoveryAttempts, 3))
+  const stallRecoveryConfirmMs = Math.max(20, toNumber(advanced.placementStallRecoveryConfirmMs, Math.max(160, toNumber(advanced.scannerPlaceConfirmMs, 80) * 2)))
+  const stallRecoverySettleMs = Math.max(0, toNumber(advanced.placementStallRecoverySettleMs, 120))
+  const stallRecoveryCooldownMs = Math.max(0, toNumber(advanced.placementStallRecoveryCooldownMs, 750))
   const inlineSegmentBlocks = Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, Math.max(2, placeRange - 1)))
   const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks)
 
@@ -7444,12 +7455,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let lastAlertScanAt = 0
   const maxInventoryDesyncHits = Math.max(1, toNumber(advanced.scannerInventoryDesyncMaxHits, 3))
   const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
-  const stallTimeoutMs = Math.max(0, toNumber(advanced.placementStallTimeoutMs, 5000))
   const stall = {
     lastWorldProgressAt: Date.now(),
     attemptsSinceWorldProgress: 0,
     optimisticPlacementsSinceWorldProgress: 0,
-    lastTarget: null
+    lastTarget: null,
+    recoveryAttemptsSinceWorldProgress: 0,
+    lastRecoveryAt: 0,
+    recovering: false
   }
 
   const getTargetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
@@ -7461,6 +7474,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     stall.lastWorldProgressAt = Date.now()
     stall.attemptsSinceWorldProgress = 0
     stall.optimisticPlacementsSinceWorldProgress = 0
+    stall.recoveryAttemptsSinceWorldProgress = 0
     stall.lastTarget = null
   }
   const noteOptimisticPlacement = () => {
@@ -7470,9 +7484,21 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     stall.attemptsSinceWorldProgress += 1
     stall.lastTarget = target
   }
-  const handlePlacementStall = () => {
+  const handlePlacementStall = async () => {
+    if (emergencyRestockBlock) return []
     if (!stallTimeoutMs || stall.attemptsSinceWorldProgress <= 0) return []
     const stalledMs = Date.now() - stall.lastWorldProgressAt
+    if (
+      stallRecoveryMs > 0 &&
+      stallRecoveryAttempts > 0 &&
+      stalledMs >= stallRecoveryMs &&
+      stall.recoveryAttemptsSinceWorldProgress < stallRecoveryAttempts &&
+      !stall.recovering &&
+      Date.now() - stall.lastRecoveryAt >= stallRecoveryCooldownMs
+    ) {
+      const recovered = await recoverPlacementStall(stalledMs)
+      if (recovered || emergencyRestockBlock || stall.attemptsSinceWorldProgress <= 0) return []
+    }
     if (stalledMs < stallTimeoutMs) return []
     const target = stall.lastTarget
     const pos = target?.position
@@ -7506,6 +7532,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     stall.lastWorldProgressAt = Date.now()
     stall.attemptsSinceWorldProgress = 0
     stall.optimisticPlacementsSinceWorldProgress = 0
+    stall.recoveryAttemptsSinceWorldProgress = 0
     stall.lastTarget = null
     return skippedKeys
   }
@@ -7532,6 +7559,154 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     inventoryDesyncHits.delete(`${target.blockName}:${key}`)
     clearRepairAlert(key)
     noteWorldPlacementProgress()
+  }
+  const getTargetWorldBlock = (target) => {
+    const Vec3Target = bot.entity.position.constructor
+    return bot.blockAt(new Vec3Target(target.position.x, target.position.y, target.position.z))
+  }
+  const formatTargetLabel = (target) => target?.position
+    ? `${target.position.x} ${target.position.y} ${target.position.z}`
+    : 'unknown'
+  const getSelectedHotbarName = () => {
+    const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+    const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
+    return selectedStack?.name || 'empty'
+  }
+  const chooseStallRecoveryTargets = () => {
+    const selected = []
+    const selectedKeys = new Set()
+    const addCandidate = (target) => {
+      if (!target) return
+      const key = getTargetKey(target)
+      if (selectedKeys.has(key) || seen.has(key) || stallSkipped.has(key)) return
+      if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) return
+      const actual = getTargetWorldBlock(target)
+      if (actual?.name === target.blockName) {
+        markTargetPlacedInWorld(target, key)
+        return
+      }
+      if (actual && actual.name !== 'air' && !String(actual.name).endsWith('_carpet')) return
+      selected.push(target)
+      selectedKeys.add(key)
+    }
+
+    addCandidate(stall.lastTarget)
+
+    const botPos = bot.entity.position
+    const candidates = batchTargets
+      .filter((target) => {
+        if (selectedKeys.has(getTargetKey(target))) return false
+        if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) return false
+        if (seen.has(getTargetKey(target)) || stallSkipped.has(getTargetKey(target))) return false
+        const dx = botPos.x - (target.position.x + 0.5)
+        const dy = botPos.y - (target.position.y + 0.5)
+        const dz = botPos.z - (target.position.z + 0.5)
+        return dx * dx + dy * dy + dz * dz <= placeRange * placeRange
+      })
+      .sort((a, b) => {
+        const adx = botPos.x - (a.position.x + 0.5)
+        const ady = botPos.y - (a.position.y + 0.5)
+        const adz = botPos.z - (a.position.z + 0.5)
+        const bdx = botPos.x - (b.position.x + 0.5)
+        const bdy = botPos.y - (b.position.y + 0.5)
+        const bdz = botPos.z - (b.position.z + 0.5)
+        return (adx * adx + ady * ady + adz * adz) - (bdx * bdx + bdy * bdy + bdz * bdz)
+      })
+
+    for (const candidate of candidates) {
+      if (selected.length >= stallRecoveryAttempts) break
+      addCandidate(candidate)
+    }
+
+    return selected.slice(0, stallRecoveryAttempts)
+  }
+  const recoverPlacementStall = async (stalledMs) => {
+    const targets = chooseStallRecoveryTargets()
+    if (!targets.length) return false
+
+    stall.recovering = true
+    stall.lastRecoveryAt = Date.now()
+    stall.recoveryAttemptsSinceWorldProgress += 1
+
+    const wasSprinting = bot.controlState?.sprint === true
+    const wasSneaking = bot.controlState?.sneak === true
+    const primary = targets[0]
+    const botPos = bot.entity.position
+    const recoveryConfig = {
+      ...config,
+      printer: { ...printer, rotate: true },
+      advanced: { ...advanced, scannerPlaceConfirmMs: stallRecoveryConfirmMs }
+    }
+    console.log(`[NERV-WORKLOAD-STALL-RECOVER] start recovery=${stall.recoveryAttemptsSinceWorldProgress}/${stallRecoveryAttempts} stalledMs=${stalledMs} attempts=${stall.attemptsSinceWorldProgress} optimistic=${stall.optimisticPlacementsSinceWorldProgress} target=${formatTargetLabel(primary)} confirmMs=${stallRecoveryConfirmMs} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()} pos=${botPos.x.toFixed(2)} ${botPos.y.toFixed(2)} ${botPos.z.toFixed(2)}`)
+
+    try {
+      bot.setControlState('sprint', false)
+      bot.setControlState('forward', false)
+      bot.setControlState('back', false)
+      bot.setControlState('left', false)
+      bot.setControlState('right', false)
+      if (advanced.placementStallRecoverySneak !== false) bot.setControlState('sneak', true)
+      if (stallRecoverySettleMs > 0) await delay(stallRecoverySettleMs)
+
+      for (let index = 0; index < targets.length; index += 1) {
+        const target = targets[index]
+        const key = getTargetKey(target)
+        const before = getTargetWorldBlock(target)
+        if (before?.name === target.blockName) {
+          markTargetPlacedInWorld(target, key)
+          console.log(`[NERV-WORKLOAD-STALL-RECOVER] success attempt=${index + 1}/${targets.length} target=${formatTargetLabel(target)} already=true held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+          return true
+        }
+
+        const have = countInventoryItems(bot, target.blockName)
+        if (have <= 0) {
+          console.log(`[NERV-WORKLOAD-STALL-RECOVER] missing-inventory target=${formatTargetLabel(target)} block=${target.blockName} have=0 held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+          if (allowEmergencyRestock) {
+            hardStops += 1
+            emergencyRestockBlock = target.blockName
+            active = false
+          }
+          return false
+        }
+
+        const selected = await selectHotbarMaterial(bot, config, target.blockName, { fastSwap: false })
+        if (!selected) {
+          pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
+          retryPriority.add(key)
+          console.log(`[NERV-WORKLOAD-STALL-RECOVER] select-failed attempt=${index + 1}/${targets.length} target=${formatTargetLabel(target)} block=${target.blockName} have=${have} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+          continue
+        }
+
+        let result = null
+        let errorMessage = ''
+        try {
+          result = await placeTarget(bot, recoveryConfig, target, false)
+        } catch (err) {
+          errorMessage = err?.message || String(err)
+        }
+
+        const after = getTargetWorldBlock(target)
+        const confirmed = after?.name === target.blockName
+        const resultLabel = result ? `${result.state}${result.reason ? `:${result.reason}` : ''}` : `error:${errorMessage}`
+        console.log(`[NERV-WORKLOAD-STALL-RECOVER] attempt=${index + 1}/${targets.length} target=${formatTargetLabel(target)} result=${resultLabel} confirmed=${confirmed} before=${before?.name || 'unloaded'} after=${after?.name || 'unloaded'} block=${target.blockName} have=${have} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+
+        if (confirmed) {
+          markTargetPlacedInWorld(target, key)
+          return true
+        }
+
+        pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
+        retryPriority.add(key)
+      }
+
+      console.log(`[NERV-WORKLOAD-STALL-RECOVER] failed recovery=${stall.recoveryAttemptsSinceWorldProgress}/${stallRecoveryAttempts} tried=${targets.length} stalledMs=${Date.now() - stall.lastWorldProgressAt} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+      return false
+    } finally {
+      if (advanced.placementStallRecoverySneak !== false && !wasSneaking) bot.setControlState('sneak', false)
+      bot.setControlState('sprint', wasSprinting)
+      stall.recovering = false
+      lastTickTime = Date.now()
+    }
   }
   const getUnresolvedTargetsForActiveCols = (activeCols) => {
     const Vec3Current = bot.entity.position.constructor
@@ -7678,7 +7853,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             break
           }
 
-          const stallSkippedNow = handlePlacementStall()
+          const stallSkippedNow = await handlePlacementStall()
           for (const skippedKey of stallSkippedNow) burstExcluded.add(skippedKey)
           if (stallSkippedNow.length > 0) {
             break
@@ -7686,7 +7861,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         }
       }
 
-      handlePlacementStall()
+      await handlePlacementStall()
 
       if (pollMs > 0) await delay(pollMs)
       else await delay(1)
