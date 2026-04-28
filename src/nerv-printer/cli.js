@@ -2178,6 +2178,7 @@ function createDefaultConfig() {
       postPrintCenterWaitMs: 15000,
       postPrintInteractionDelayMs: 100,
       postPrintMapSettleDelayMs: 100,
+      postPrintCartographyAccessRange: 0.85,
       dumpAimSettleMs: 0,
       dumpYawInvert: false,
       dumpPitchInvert: false,
@@ -2237,6 +2238,8 @@ function createDefaultConfig() {
       repairMoveTimeoutMs: 30000,
       repairProgressLogMs: 5000,
       repairFallbackToStopPlace: true,
+      repairStallEmergencyRestock: true,
+      repairEmergencyRestockTransientHits: 3,
       repairVerifySettleMs: 120,
       repairMaxMismatchRatio: 0.25,
       repairMaxMismatchCount: 512,
@@ -3564,13 +3567,21 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const fastBurstMinItems = Math.max(stackSize * 2, toNumber(advanced.restockFastMinItems, stackSize * 2))
   const haveBeforeRestock = countInventoryItems(bot, blockName)
   const exactDesiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
-    ? Math.max(haveBeforeRestock + 1, toNumber(neededByBlock.get(blockName), haveBeforeRestock + requestedStackCount * stackSize))
+    ? Math.max(0, toNumber(neededByBlock.get(blockName), haveBeforeRestock + requestedStackCount * stackSize))
     : Math.max(stackSize, haveBeforeRestock + (requestedStackCount * stackSize))
   const initialRoundedDeficit = Math.max(0, exactDesiredItemCount - haveBeforeRestock)
   const desiredItemCount = initialRoundedDeficit > 0
-    ? haveBeforeRestock + (Math.ceil(initialRoundedDeficit / stackSize) * stackSize)
+    ? haveBeforeRestock + Math.max(stackSize, Math.ceil(initialRoundedDeficit / stackSize) * stackSize)
     : exactDesiredItemCount
   const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
+
+  if (neededByBlock instanceof Map && haveBeforeRestock >= exactDesiredItemCount) {
+    restockFailureCache.delete(blockName)
+    unavailableMaterialCache.delete(blockName)
+    const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
+    if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
+    return true
+  }
 
   const needsStackPull = desiredItemCount > haveBeforeRestock
   const hasStackPullRoom = inventoryCapacityForItem(bot, blockName) >= stackSize
@@ -3667,7 +3678,8 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         const fullStackChestTotal = chestSlots
           .filter((entry) => toNumber(entry.count, 0) >= stackSize)
           .reduce((sum, entry) => sum + stackSize, 0)
-        const willPullTotal = Math.min(fullStackChestTotal, stillNeedTotal, fullStackCapacityBeforePull)
+        const fullStackPullNeed = stillNeedTotal > 0 ? Math.ceil(stillNeedTotal / stackSize) * stackSize : 0
+        const willPullTotal = Math.min(fullStackChestTotal, fullStackPullNeed, fullStackCapacityBeforePull)
         retryTargetCount = haveAtStart + willPullTotal
 
         if (willPullTotal <= 0) {
@@ -4823,7 +4835,7 @@ async function lockMapWithCartographyApi(bot, config, cartographyConfig, advance
   const outputSettleTicks = Math.max(10, toNumber(options.outputSettleTicks, toNumber(advanced?.postPrintCartographyOutputSettleTicks, 20)))
   const outputWaitMs = Math.max(1000, toNumber(options.outputWaitMs, toNumber(advanced?.postPrintCartographyOutputWaitMs, 4000)))
   const pollMs = Math.max(50, toNumber(options.pollMs, toNumber(advanced?.postPrintCartographyPollMs, 100)))
-  const accessRange = Math.max(0.35, toNumber(advanced?.postPrintCartographyAccessRange, 0.6))
+  const accessRange = Math.max(0.35, toNumber(advanced?.postPrintCartographyAccessRange, 0.85))
   let table = null
 
   try {
@@ -5671,7 +5683,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       const pollMs = Math.max(50, toNumber(advanced.postPrintCartographyPollMs, 100))
       const clickTicks = Math.max(2, toNumber(advanced.postPrintCartographyClickWaitTicks, 4))
       const outputSettleTicks = Math.max(10, toNumber(advanced.postPrintCartographyOutputSettleTicks, 20))
-      const cartographyAccessRange = Math.max(0.35, toNumber(advanced.postPrintCartographyAccessRange, 0.6))
+      const cartographyAccessRange = Math.max(0.35, toNumber(advanced.postPrintCartographyAccessRange, 0.85))
       const maxAttempts = Math.max(1, toNumber(advanced.postPrintCartographyAttempts, 1))
       let lastWindowState = ''
       let lockedMapTaken = false
@@ -7393,7 +7405,7 @@ function shouldSprintDuringRepair(config) {
   return mode !== 'off' && mode !== 'false' && mode !== 'never'
 }
 
-async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRange, label = 'REPAIR-MIXED') {
+async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRange, label = 'REPAIR-MIXED', allowEmergencyRestock = true) {
   if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
   assertRuntimeContinue(bot, config, 'stopping-during-repair')
 
@@ -7415,7 +7427,11 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   let lastLogAt = 0
   let fallbackNeeded = false
   let stopRepairActive = false
+  let emergencyRestockBlock = null
+  let emergencyRestockReason = ''
   const moveFailures = new Map()
+  const transientRepairFailures = new Map()
+  const transientRestockHits = Math.max(1, toNumber(advanced.repairEmergencyRestockTransientHits, 3))
 
   const targetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
   const targetPosition = (target) => new Vec3(target.position.x, target.position.y, target.position.z)
@@ -7427,11 +7443,28 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   }
 
   const markResult = (target, result, prefix) => {
-    lastProgressAt = Date.now()
-    if (result.state === 'placed') placed += 1
-    else if (result.state === 'already') already += 1
-    else {
+    if (result.state === 'placed') {
+      lastProgressAt = Date.now()
+      placed += 1
+      transientRepairFailures.delete(target.blockName)
+    } else if (result.state === 'already') {
+      lastProgressAt = Date.now()
+      already += 1
+      transientRepairFailures.delete(target.blockName)
+    } else {
       skipped += 1
+      const reason = String(result.reason || '')
+      if (allowEmergencyRestock && advanced.repairStallEmergencyRestock !== false && (reason === 'unconfirmed-place' || reason.startsWith('held-item-desync-'))) {
+        const hits = (transientRepairFailures.get(target.blockName) || 0) + 1
+        transientRepairFailures.set(target.blockName, hits)
+        if (hits >= transientRestockHits && !emergencyRestockBlock) {
+          emergencyRestockBlock = target.blockName
+          emergencyRestockReason = `${hits} transient repair placement failure(s), latest=${reason}`
+          active = false
+          stopRepairActive = false
+          console.log(`[${label}-STALL-RESTOCK] block=${emergencyRestockBlock} reason="${emergencyRestockReason}"; forcing emergency restock/refresh before retry.`)
+        }
+      }
       if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
         console.log(`[${prefix}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
       }
@@ -7579,8 +7612,15 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
       }
 
       if (Date.now() - lastProgressAt > Math.max(moveTimeoutMs, progressLogMs * 2)) {
-        console.log(`[${label}-PROGRESS-WARN] no repair placement progress for ${Date.now() - lastProgressAt}ms; falling back to stop-place.`)
-        fallbackNeeded = true
+        const stalledMs = Date.now() - lastProgressAt
+        if (allowEmergencyRestock && advanced.repairStallEmergencyRestock !== false) {
+          emergencyRestockBlock = target.blockName
+          emergencyRestockReason = `no repair placement progress for ${stalledMs}ms`
+          console.log(`[${label}-STALL-RESTOCK] block=${emergencyRestockBlock} reason="${emergencyRestockReason}"; forcing emergency restock/refresh before retry.`)
+        } else {
+          console.log(`[${label}-PROGRESS-WARN] no repair placement progress for ${stalledMs}ms; falling back to stop-place.`)
+          fallbackNeeded = true
+        }
         break
       }
     }
@@ -7591,6 +7631,26 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   } finally {
     active = false
     await fastAirLoop
+  }
+
+  if (allowEmergencyRestock && emergencyRestockBlock) {
+    console.log(`[${label}-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; refilling and retrying unresolved repair targets once.`)
+    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, null)
+    const remainingTargets = scanPlacementErrors(bot, targets, {
+      config,
+      logPrefix: `${label}-RESTOCK-VERIFY`,
+      logErrors: false,
+      maxLogs: 0
+    }).map((entry) => entry.target)
+    if ((restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) && remainingTargets.length > 0) {
+      const retry = await repairTargetsWhileMovingWithStops(bot, config, remainingTargets, placeRange, `${label}-RESTOCK-RETRY`, false)
+      placed += retry.placed
+      already += retry.already
+      skipped += retry.skipped
+    } else if (remainingTargets.length > 0) {
+      skipped += remainingTargets.length
+    }
+    return { placed, already, skipped }
   }
 
   if (fallbackNeeded && fallbackToStopPlace) {

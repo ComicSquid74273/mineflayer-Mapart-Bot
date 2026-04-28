@@ -345,6 +345,7 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.postPrintCenterWaitMs` | `20000` | Wait at center during map fill. | Increase if map fill is incomplete. |
 | `advanced.postPrintInteractionDelayMs` | `200` | Delay around post-print clicks. | Increase for laggy servers. |
 | `advanced.postPrintMapSettleDelayMs` | `200` | Wait after map actions. | Increase if map item updates late. |
+| `advanced.postPrintCartographyAccessRange` | `0.85` | Max distance from cartography access point before opening the table. | Keep slightly above pathfinder settle drift; `0.6` was too strict on 6b6t. |
 
 #### 3.4.3 Dump Station
 
@@ -433,6 +434,8 @@ Important workload logs:
 | `advanced.repairMoveTimeoutMs` | `30000` | Max movement time during repair before warning/fallback. | Increase for long paths from chests. |
 | `advanced.repairProgressLogMs` | `5000` | Progress log interval during repair. | Lower for more visibility. |
 | `advanced.repairFallbackToStopPlace` | `true` | If moving repair stalls, fallback to stop-place. | Keep `true`; prevents idle repair. |
+| `advanced.repairStallEmergencyRestock` | `true` | Trigger emergency restock/refresh if repair has no confirmed progress or repeated transient placement failures. | Experimental recovery for stale inventory/server refusal during repair. |
+| `advanced.repairEmergencyRestockTransientHits` | `3` | Transient repair failures before emergency restock/refresh. | Lower reacts faster; higher avoids restocking on brief lag. |
 | `advanced.repairVerifySettleMs` | `180` | Wait before verifying repaired batch. | Increase if server updates blocks late. |
 | `advanced.repairMaxMismatchRatio` | `0.25` | Warning threshold only; no hard abort. | Logs warning above 25 percent mismatches. |
 | `advanced.repairMaxMismatchCount` | `512` | Warning count threshold only; no hard abort. | Logs warning when both count and ratio are high. |
