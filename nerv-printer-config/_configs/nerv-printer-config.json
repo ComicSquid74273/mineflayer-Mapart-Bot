@@ -302,6 +302,7 @@
     "autoEatEnabled": true,
     "autoEatMinHunger": 18,
     "autoEatFoodItem": "cooked_beef",
+    "autoEatReturnUnusedFood": true,
     "anvilPillarMinCount": 3,
     "anvilPillarScanLimit": 16,
     "supportStockDashboardWarningsEnabled": true,

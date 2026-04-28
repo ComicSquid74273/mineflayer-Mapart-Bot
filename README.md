@@ -285,6 +285,7 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.autoEatEnabled` | `true` | Enables pre-traversal food checks. | Disable only if food should be handled manually. |
 | `advanced.autoEatMinHunger` | `12` | Eat before a traversal batch when hunger is below this value. | Raise for more buffer; lower to visit the food chest less often. |
 | `advanced.autoEatFoodItem` | `cooked_beef` | Item pulled from `machine.foodChest` and consumed. | `cooked_beef` is Minecraft steak. |
+| `advanced.autoEatReturnUnusedFood` | `true` | Return leftover pulled food to `machine.foodChest` after hunger is sufficient. | Set `false` to keep spare food in inventory. |
 | `advanced.supportStockDashboardWarningsEnabled` | `true` | Sends once-per-map-run dashboard warnings for support stock only. | Checks food, XP bottles, empty maps, and glass panes; carpet stock warnings are not sent. |
 | `advanced.supportStockFoodMinStacks` | `5` | Minimum food stacks expected in `machine.foodChest`. | Dashboard warns if the combined count is lower. |
 | `advanced.supportStockXpBottleMinStacks` | `5` | Minimum XP bottle stacks expected across XP bottle chests/dispenser. | Supports legacy `xpBottleChests`, `machine.xpBottleChest`, and `machine.xpDispenser`. |

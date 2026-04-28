@@ -5130,6 +5130,23 @@ async function eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, rea
   return false
 }
 
+async function returnUnusedFoodToChest(bot, config, foodItem, reason) {
+  const advanced = config.advanced || {}
+  if (advanced.autoEatReturnUnusedFood === false) return false
+
+  const foodChest = config.machine?.foodChest
+  const leftover = countInventoryByType(bot, foodItem)
+  if (leftover <= 0 || !foodChest?.enabled || !foodChest?.position) return false
+
+  const returned = await depositToChest(bot, config, foodChest.position, foodItem, leftover, foodChest.accessPosition)
+  if (returned) {
+    console.log(`[AUTO-EAT] ${reason}: returned ${leftover} unused ${foodItem} to food chest.`)
+  } else {
+    console.log(`[AUTO-EAT-WARN] ${reason}: could not return ${leftover} unused ${foodItem} to food chest.`)
+  }
+  return returned
+}
+
 async function pullFoodStackFromChest(bot, config, foodItem, reason) {
   const foodChest = config.machine?.foodChest
   if (!foodChest?.enabled || !foodChest?.position) {
@@ -5217,6 +5234,7 @@ async function ensureFoodBeforeTraversal(bot, config, reason = 'before-traversal
   if (!foodItem) return true
 
   console.log(`[AUTO-EAT] ${reason}: hunger=${hunger}/${minHunger}; checking ${foodItem}.`)
+  const hadFoodBeforePull = bot.inventory.items().some((entry) => entry.name === foodItem)
   if (!bot.inventory.items().some((entry) => entry.name === foodItem)) {
     await pullFoodStackFromChest(bot, config, foodItem, reason)
     await delay(Math.max(100, toNumber(advanced.autoEatSettleMs, 500)))
@@ -5229,7 +5247,11 @@ async function ensureFoodBeforeTraversal(bot, config, reason = 'before-traversal
     return false
   }
 
-  return await eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, reason)
+  const ok = await eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, reason)
+  if (ok && !hadFoodBeforePull) {
+    await returnUnusedFoodToChest(bot, config, foodItem, reason)
+  }
+  return ok
 }
 
 async function refillXpForPostPrint(bot, config) {
