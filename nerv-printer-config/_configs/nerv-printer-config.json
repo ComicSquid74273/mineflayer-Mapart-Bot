@@ -281,7 +281,7 @@
         "printer-platform": "platform"
       }
     },
-    "inlineRepairSegmentBlocks": 256,
+    "inlineRepairSegmentBlocks": 1,
     "platformWatchdogEnabled": true,
     "platformWatchdogPollMs": 1000,
     "platformHoldLogMs": 5000,
