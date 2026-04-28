@@ -281,7 +281,7 @@
         "printer-platform": "platform"
       }
     },
-    "inlineRepairSegmentBlocks": 8,
+    "inlineRepairSegmentBlocks": 3,
     "platformWatchdogEnabled": true,
     "platformWatchdogPollMs": 1000,
     "platformHoldLogMs": 5000,
@@ -356,8 +356,7 @@
     "scannerPlaceConfirmMs": 80,
     "scannerPlaceConfirmPollMs": 15,
     "placementStallTimeoutMs": 5000,
-    "placementStallRecoveryAttempts": 5,
-    "placementStallRecoveryDelayMs": 1000,
+    "placementStallSkipRadiusBlocks": 5,
     "scannerMissRecoveryEnabled": false,
     "scannerMissRecoveryThreshold": 1,
     "scannerMissRecoveryBacktrackBlocks": 3,
@@ -386,7 +385,7 @@
     "repairRestockMode": "fast",
     "postBuildDelayMs": 10,
     "retryInteractTimeoutMs": 800,
-    "checkpointBuffer": 2.5,
+    "checkpointBuffer": 0.8,
     "breakCarpetAboveReset": false,
     "debugPrints": false
   },

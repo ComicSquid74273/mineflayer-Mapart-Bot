@@ -384,11 +384,10 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.scannerAdaptiveMaxPlaceDelayMs` | `18` | Max adaptive placement delay. | Raise if server is dropping many packets. |
 | `advanced.scannerAdaptiveMinPlaceDelayMs` | `6` | Min adaptive placement delay. | Keep at least `6` on servers with lag. |
 | `advanced.scannerRetryCooldownMs` | `35` | Delay before retrying an unconfirmed placement. | Increase if duplicate/too-fast retries happen. |
-| `advanced.scannerPlaceConfirmMs` | `80` | Short confirmation window after fast placement before counting a block as placed. | Increase if server block updates arrive late; lower for speed after stable runs. |
-| `advanced.scannerPlaceConfirmPollMs` | `15` | Poll interval while waiting for placement confirmation. | Keep small; this is only used while confirming a recent place. |
-| `advanced.placementStallTimeoutMs` | `5000` | Abort a fast placement batch after this long without confirmed placement progress. | Set `0` to disable; increase only if the server confirms very slowly. |
-| `advanced.placementStallRecoveryAttempts` | `5` | Same-session stalled-batch recovery attempts before reconnect fallback. | A successful confirmed placement resets this counter. |
-| `advanced.placementStallRecoveryDelayMs` | `1000` | Pause before retrying remaining targets after a stall. | Increase if server needs a moment after rejected placements. |
+| `advanced.scannerPlaceConfirmMs` | `80` | Confirmation window used by non-optimistic placement paths. | Litematic workload stays optimistic for smooth movement. |
+| `advanced.scannerPlaceConfirmPollMs` | `15` | Poll interval while waiting for placement confirmation. | Keep small; this is only used by confirming placement paths. |
+| `advanced.placementStallTimeoutMs` | `5000` | Marks a local stuck area after this long without optimistic placement progress. | Set `0` to disable; skipped areas are left for final repair. |
+| `advanced.placementStallSkipRadiusBlocks` | `5` | Radius around the stalled target to skip in the main print pass. | Keep near `placeRange + 1`; final repair handles skipped blocks. |
 | `advanced.scannerPreSwapDelayMs` | `25` | Delay before item swap in scanner placement. | Increase if held item updates late. |
 | `advanced.scannerPostSwapDelayMs` | `45` | Delay after item swap in scanner placement. | Increase if `missing-item-*` appears despite inventory. |
 | `advanced.scannerWorkloadMode` | `time` | `time` or `fixed`. | Use `time` for lag-aware workload; `fixed` is older scanner tick mode. |
@@ -397,7 +396,7 @@ Important workload logs:
 
 ```text
 [NERV-WORKLOAD-BATCH] placed=... seen=... missing=... hardStops=... rawAllowed=... capped=...
-[NERV-WORKLOAD-UNCONFIRMED] x y z (block) retryAfter=...ms
+[NERV-WORKLOAD-STALL-SKIP] buffer=... skipped=... lastTarget=x y z
 [NERV-WORKLOAD-ADAPT-SLOW] missing=... placeDelayMs=... lineEndSettleMs=...
 [NERV-WORKLOAD-ADAPT-RECOVER] missing=... placeDelayMs=... lineEndSettleMs=...
 ```
