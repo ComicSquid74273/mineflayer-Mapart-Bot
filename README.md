@@ -404,6 +404,7 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.placementStallRecoveryMs` | `2000` | Starts a local slow confirmed recovery after this long without real block-world progress. | Runs before stall skip. |
 | `advanced.placementStallRecoveryAttempts` | `3` | Slow confirmed placements to try during local stall recovery. | Set `0` to skip straight to stall skip. |
 | `advanced.placementStallRecoveryConfirmMs` | `180` | Confirmation window for stall recovery placement attempts. | Raise if recovery logs show late confirmations. |
+| `advanced.placementStallEmergencyRestock` | `true` | Trigger emergency restock/refresh if slow stall recovery cannot confirm placement. | Experimental recovery for 6b6t placement refusal windows. |
 | `advanced.placementStallSkipRadiusBlocks` | `5` | Radius around the stalled target to skip in the main print pass. | Keep near `placeRange + 1`; final repair handles skipped blocks. |
 | `advanced.scannerPreSwapDelayMs` | `25` | Delay before item swap in scanner placement. | Increase if held item updates late. |
 | `advanced.scannerPostSwapDelayMs` | `45` | Delay after item swap in scanner placement. | Increase if `missing-item-*` appears despite inventory. |

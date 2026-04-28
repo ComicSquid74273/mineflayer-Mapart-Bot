@@ -2213,6 +2213,7 @@ function createDefaultConfig() {
       placementStallRecoveryConfirmMs: 180,
       placementStallRecoverySettleMs: 120,
       placementStallRecoveryCooldownMs: 750,
+      placementStallEmergencyRestock: true,
       placementStallSkipRadiusBlocks: 5,
       litematicRowSettleMs: 150,
       litematicRowVerifyEveryRows: 2,
@@ -8069,6 +8070,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let cappedTotal = 0
   let maxAllowedSeen = 0
   let emergencyRestockBlock = null
+  let emergencyRestockReason = 'unavailable during placement'
   let prevCheckpointPos = null
   const seen = new Set()
   const stallSkipped = new Set()
@@ -8288,6 +8290,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (allowEmergencyRestock) {
             hardStops += 1
             emergencyRestockBlock = target.blockName
+            emergencyRestockReason = 'missing inventory during stall recovery'
             active = false
           }
           return false
@@ -8323,7 +8326,15 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         retryPriority.add(key)
       }
 
-      console.log(`[NERV-WORKLOAD-STALL-RECOVER] failed recovery=${stall.recoveryAttemptsSinceWorldProgress}/${stallRecoveryAttempts} tried=${targets.length} stalledMs=${Date.now() - stall.lastWorldProgressAt} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+      const failedStalledMs = Date.now() - stall.lastWorldProgressAt
+      console.log(`[NERV-WORKLOAD-STALL-RECOVER] failed recovery=${stall.recoveryAttemptsSinceWorldProgress}/${stallRecoveryAttempts} tried=${targets.length} stalledMs=${failedStalledMs} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+      if (allowEmergencyRestock && advanced.placementStallEmergencyRestock !== false && primary?.blockName) {
+        hardStops += 1
+        emergencyRestockBlock = primary.blockName
+        emergencyRestockReason = `stall recovery failed after ${failedStalledMs}ms without confirmed placement`
+        active = false
+        console.log(`[NERV-WORKLOAD-STALL-RESTOCK] block=${emergencyRestockBlock} reason="${emergencyRestockReason}"; forcing emergency restock/refresh before retry.`)
+      }
       return false
     } finally {
       if (advanced.placementStallRecoverySneak !== false && !wasSneaking) bot.setControlState('sneak', false)
@@ -8454,6 +8465,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 if (allowEmergencyRestock && haveNow <= 0) {
                   hardStops += 1
                   emergencyRestockBlock = target.blockName
+                  emergencyRestockReason = 'missing item during placement'
                   active = false
                   lastTickTime = Date.now()
                   break
@@ -8617,7 +8629,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
 
   if (allowEmergencyRestock && emergencyRestockBlock) {
-    console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; stopping movement, refilling, and retrying remaining targets once.`)
+    console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; stopping movement, refilling, and retrying remaining targets once.`)
     const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
     if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
       const Vec3Retry = bot.entity.position.constructor

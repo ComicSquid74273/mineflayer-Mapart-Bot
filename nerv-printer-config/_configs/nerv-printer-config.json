@@ -298,6 +298,7 @@
     "dumpUnneededBeforeRefill": true,
     "inventoryRefillRows": 2,
     "inventoryMaxMaterialTypes": 16,
+    "placementStallEmergencyRestock": true,
     "inventoryPlanUseWorldState": false,
     "autoEatEnabled": true,
     "autoEatMinHunger": 12,
