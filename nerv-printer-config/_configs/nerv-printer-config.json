@@ -300,7 +300,7 @@
     "inventoryMaxMaterialTypes": 16,
     "inventoryPlanUseWorldState": false,
     "autoEatEnabled": true,
-    "autoEatMinHunger": 12,
+    "autoEatMinHunger": 18,
     "autoEatFoodItem": "cooked_beef",
     "anvilPillarMinCount": 3,
     "anvilPillarScanLimit": 16,

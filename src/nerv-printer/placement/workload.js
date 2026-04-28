@@ -8,8 +8,15 @@ function createPlacementWorkload(deps) {
     countInventoryItems,
     recoverMissingItemInventoryDesync,
     findNervScannerCandidate,
-    placeNervScannerTarget
+    placeNervScannerTarget,
+    assertRuntimeContinue
   } = deps
+
+  function checkRuntimeStop(bot, config, detail = 'stopping-during-placement') {
+    if (typeof assertRuntimeContinue === 'function') {
+      assertRuntimeContinue(bot, config, detail)
+    }
+  }
 
   function buildNervUCheckpoints(batchTargets, startOnNorthSide) {
     const orderedCols = [...new Set(batchTargets.map((target) => target.col))]
@@ -194,6 +201,7 @@ function createPlacementWorkload(deps) {
 
     const placementLoop = (async () => {
       while (active) {
+        checkRuntimeStop(bot, config)
         const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
         if (allowPlacement) {
           const now = Date.now()
@@ -258,6 +266,7 @@ function createPlacementWorkload(deps) {
                 }
               }
             } catch (err) {
+              if (err?.code === 'RUNTIME_STOP_REQUESTED') throw err
               skipped += 1
               pendingUntil.set(key, Date.now() + retryCooldownMs)
               if (config.errorHandling?.logErrors !== false) {
@@ -283,6 +292,7 @@ function createPlacementWorkload(deps) {
 
     try {
       for (const checkpoint of checkpoints) {
+        checkRuntimeStop(bot, config)
         if (emergencyRestockBlock) break
         currentGoal = checkpoint.position
         currentAction = checkpoint.action
@@ -385,6 +395,7 @@ function createPlacementWorkload(deps) {
 
     const placementLoop = (async () => {
       while (active) {
+        checkRuntimeStop(bot, config)
         const now = Date.now()
         const rawAllowed = Math.floor((now - lastTickTime) / placeDelayMs)
 
@@ -467,6 +478,7 @@ function createPlacementWorkload(deps) {
                 }
               }
             } catch (err) {
+              if (err?.code === 'RUNTIME_STOP_REQUESTED') throw err
               skipped += 1
               hardStops += 1
               if (config.errorHandling?.logErrors !== false) {
@@ -501,6 +513,7 @@ function createPlacementWorkload(deps) {
 
     try {
       for (const checkpoint of checkpoints) {
+        checkRuntimeStop(bot, config)
         if (emergencyRestockBlock) break
         currentGoal = checkpoint.position
         currentAction = checkpoint.action

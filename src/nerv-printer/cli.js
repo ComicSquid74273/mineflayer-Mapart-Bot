@@ -32,7 +32,8 @@ const placementWorkload = createPlacementWorkload({
   countInventoryItems,
   recoverMissingItemInventoryDesync,
   findNervScannerCandidate,
-  placeNervScannerTarget
+  placeNervScannerTarget,
+  assertRuntimeContinue
 })
 
 const CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'nerv-printer-config.json')
@@ -283,6 +284,37 @@ function toNumber(value, fallback) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+class RuntimeStopRequestedError extends Error {
+  constructor(detail = 'stopping-after-current-step') {
+    super('runtime stop requested; returning to idle')
+    this.name = 'RuntimeStopRequestedError'
+    this.code = 'RUNTIME_STOP_REQUESTED'
+    this.detail = detail
+  }
+}
+
+function isRuntimeStopRequested(config) {
+  return config?.__runtimeControl?.isStopRequested?.() === true ||
+    config?.__dashboardRuntime?.isStopRequested?.() === true
+}
+
+function isRuntimeStopError(err) {
+  return err?.code === 'RUNTIME_STOP_REQUESTED' || err instanceof RuntimeStopRequestedError
+}
+
+function assertRuntimeContinue(bot, config, detail = 'stopping-after-current-step') {
+  if (!isRuntimeStopRequested(config)) return
+  const dashboardRuntime = config?.__dashboardRuntime
+  dashboardRuntime?.setStatusDetail?.(detail)
+  try {
+    config?.__runtimeStopHandler?.(detail)
+  } catch (err) {
+    console.log(`[CONTROL-WARN] stop progress snapshot failed: ${err?.message || err}`)
+  }
+  stopBotMovement(bot)
+  throw new RuntimeStopRequestedError(detail)
 }
 
 function placementNoiseLogsEnabled(config) {
@@ -989,7 +1021,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         runtimeControl?.requestStop('dashboard')
         state.stopRequested = true
         state.startRequested = false
-        state.phase = 'idle'
+        state.statusDetail = 'stopping-after-current-step'
         noteActivity()
         await reportCommandResult(claimed.commandId, 'succeeded', claimed.reason || 'stop requested; bot will remain connected idle')
         break
@@ -1153,6 +1185,12 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     },
     isStopRequested() {
       return state.stopRequested === true
+    },
+    markRunStopped(detail = 'idle') {
+      state.stopRequested = false
+      state.phase = 'idle'
+      state.statusDetail = String(detail || 'idle').trim() || 'idle'
+      noteActivity()
     }
   }
 }
@@ -1161,7 +1199,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
   let pendingStart = initialStartRequested
   while (isBotSessionLive(bot) && bot.__nervSessionActive !== false) {
     if (runtimeControl?.isStopRequested()) {
-      dashboardRuntime?.setPhase('idle')
+      dashboardRuntime?.markRunStopped?.('stopped')
       await delay(1000)
       continue
     }
@@ -1180,6 +1218,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
     dashboardRuntime?.setCurrentNbt(nextNbt ? path.basename(nextNbt) : null)
     dashboardRuntime?.setPhase('printing')
     try {
+      config.__runtimeControl = runtimeControl || null
       const runInfo = await runPrint(bot, config, dashboardRuntime)
       dashboardRuntime?.setCurrentNbt(runInfo?.sourceName || null)
 
@@ -1200,6 +1239,12 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
         await delay(1000)
       }
     } catch (err) {
+      if (isRuntimeStopError(err)) {
+        console.log('[CONTROL] Stop requested; paused current work and returned to dashboard idle.')
+        dashboardRuntime?.markRunStopped?.('stopped')
+        await delay(1000)
+        continue
+      }
       const text = String(err?.message || err)
       dashboardRuntime?.setLastError(text)
       const noMoreInput = text.includes('No NBT files found in folder:') || text.includes('No input found.')
@@ -1212,6 +1257,8 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       throw err
     } finally {
       runtimeControl?.markRunCompleted()
+      config.__runtimeControl = null
+      config.__runtimeStopHandler = null
     }
   }
 }
@@ -3439,6 +3486,7 @@ async function openContainerAt(bot, position, accessPosition) {
 }
 
 async function restockMaterial(bot, config, blockName, requestedPulls = 1, neededByBlock = null) {
+  assertRuntimeContinue(bot, config, 'stopping-during-restock')
   const advanced = config.advanced || {}
   const failureCooldownMs = Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))
   const syncWaitMs = Math.max(200, toNumber(advanced.restockInventorySyncWaitMs, 2000))
@@ -3504,13 +3552,16 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   }
 
   for (let groupIndex = 0; groupIndex < spotGroups.length; groupIndex += 1) {
+    assertRuntimeContinue(bot, config, 'stopping-during-restock')
     const group = spotGroups[groupIndex]
 
     for (let spotIndex = 0; spotIndex < group.length; spotIndex += 1) {
+      assertRuntimeContinue(bot, config, 'stopping-during-restock')
       const spot = group[spotIndex]
       let sameChestAttempt = 0
 
       while (sameChestAttempt <= sameChestSyncRetries) {
+        assertRuntimeContinue(bot, config, 'stopping-during-restock')
         let container = null
         let retrySameChest = false
         let retryStartHave = 0
@@ -5171,6 +5222,14 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     savePostPrintStep(step, `blocked-${step}`)
     return { completed: false, failedStep: step, message: message || '' }
   }
+  const checkPostPrintStop = (step) => {
+    if (!isRuntimeStopRequested(config)) return
+    if (typeof context.setStatusDetail === 'function') {
+      context.setStatusDetail('stopping-after-current-step')
+    }
+    savePostPrintStep(step, 'dashboard-stop')
+    assertRuntimeContinue(bot, config, 'stopping-after-current-step')
+  }
 
   if (resumeStep !== 'withdraw') {
     console.log(`[POSTPRINT-RESUME] Resuming post-print at step=${resumeStep}.`)
@@ -5199,10 +5258,12 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   savePostPrintStep(resumeStep, 'post-print-active')
 
   if (shouldRunStep('withdraw')) {
+    checkPostPrintStop('withdraw')
     setPostPrintStatus('withdraw')
     if (finishedChestPos) {
       const leftoverMaps = findInventoryItemsByType(bot, 'filled_map')
       for (const stack of leftoverMaps) {
+        checkPostPrintStop('withdraw')
         if (stack && stack.count > 0) {
           console.log(`[POSTPRINT] Dumping ${stack.count} leftover filled_map(s) before withdrawing new empty map.`)
           await depositToChest(bot, config, finishedChestPos, 'filled_map', stack.count, machine.finishedMapChest?.accessPosition)
@@ -5220,6 +5281,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   }
 
   if (shouldRunStep('fill_map') && advanced.postPrintFillMapEnabled !== false) {
+    checkPostPrintStop('fill_map')
     setPostPrintStatus('fill_map')
     const mapItem = findInventoryItemByType(bot, 'map')
     if (!mapItem) {
@@ -5265,6 +5327,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
         ]
 
         for (const p of walkPoints) {
+          checkPostPrintStop('fill_map')
           const currentMap = findInventoryItemByType(bot, 'filled_map')
           if (currentMap && bot.heldItem?.type !== currentMap.type) {
             await bot.equip(currentMap, 'hand')
@@ -5294,6 +5357,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   const hasFilledMap = countInventoryByType(bot, 'filled_map') > 0
 
   if (shouldRunStep('cartography') && advanced.postPrintUseCartographyEnabled !== false && cartographyConfig?.position && hasFilledMap) {
+    checkPostPrintStop('cartography')
     setPostPrintStatus('cartography')
     try {
       await waitForPlatformReady(bot, config, 'postprint-cartography')
@@ -5356,6 +5420,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       }
 
       for (let attempt = 1; attempt <= maxAttempts && !lockedMapTaken; attempt += 1) {
+        checkPostPrintStop('cartography')
         let window = null
         try {
           console.log(`[CARTO-MANUAL] attempt=${attempt}/${maxAttempts} begin ${formatCartographyBotState(bot, config)}`)
@@ -5509,6 +5574,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   }
 
   if (shouldRunStep('rename_store') && cartographySucceeded) {
+    checkPostPrintStop('rename_store')
     setPostPrintStatus('rename_store')
     await waitForPlatformReady(bot, config, 'postprint-rename-store')
 
@@ -5562,6 +5628,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       }
 
       for (const stack of mapsToStore) {
+        checkPostPrintStop('rename_store')
         if (stack.count <= 0) continue
         const hints = getItemNameHints(stack)
         if (hints.length) {
@@ -5586,6 +5653,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     && advanced.postPrintSkipResetInteraction !== true
 
   if (shouldRunStep('reset') && shouldInteractReset) {
+    checkPostPrintStop('reset')
     setPostPrintStatus('reset')
     try {
       await interactWithConfiguredBlock(bot, config, resetConfig, 'reset-block')
@@ -5601,6 +5669,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   }
 
   if (shouldRunStep('center') && advanced.postPrintWalkToCenter !== false) {
+    checkPostPrintStop('center')
     setPostPrintStatus('center')
     const center = getMapCenterPosition(config)
 
@@ -6310,6 +6379,7 @@ function estimateNeededFromLookahead(targets) {
 async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   const advanced = config.advanced || {}
   if (advanced.predictiveRestock === false || !targets.length) return true
+  assertRuntimeContinue(bot, config, 'stopping-during-inventory-plan')
 
   const planning = options.windowed === true
     ? {
@@ -6356,6 +6426,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   let didRestockThisWindow = false
 
   while (safetyCounter < maxIterations) {
+    assertRuntimeContinue(bot, config, 'stopping-during-inventory-plan')
     safetyCounter++
     const plan = buildNervInventoryPlanFromRequired(bot, config, planningTargets, stableNeededByBlock, stableRequired)
     const neededByBlock = plan.requiredItems
@@ -6397,6 +6468,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
         ? plan.dumpSlots.length
         : Math.min(plan.dumpSlots.length, estimateDumpSlotsNeededForRestock(bot, restockList))
       if (dumpsNeeded > 0) {
+        assertRuntimeContinue(bot, config, 'stopping-before-inventory-dump')
         const dumpSlots = plan.dumpSlots.slice(0, dumpsNeeded)
         console.log(`[NERV-DUMP] Dumping ${dumpSlots.length}/${plan.dumpSlots.length} slot(s) before restock: ${formatDumpSlots(dumpSlots)}`)
         const dumped = await dumpNervInventorySlots(bot, config, dumpSlots, 'nervPredumpBeforeRefill')
@@ -6435,6 +6507,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
 
     console.log(`[NERV-RESTOCK] Closest material=${closestItem.blockName} dist=${Math.round(Math.sqrt(closestDist))} pullsRequested=${pullsNeeded} rawAmount=${closestItem.rawAmount}`)
 
+    assertRuntimeContinue(bot, config, 'stopping-before-restock')
     const restocked = await restockMaterial(bot, config, closestItem.blockName, pullsNeeded, neededByBlock)
 
     if (!restocked) {
@@ -6510,11 +6583,13 @@ function getRepairRestockPlan(bot, targets) {
 async function ensureRepairMaterialsForTargets(bot, config, targets) {
   const advanced = config.advanced || {}
   if (advanced.predictiveRestock === false || !targets.length) return
+  assertRuntimeContinue(bot, config, 'stopping-during-repair-restock')
 
   const maxIterations = Math.max(10, toNumber(advanced.repairRestockMaxIterations, 24))
   let safetyCounter = 0
 
   while (safetyCounter < maxIterations) {
+    assertRuntimeContinue(bot, config, 'stopping-during-repair-restock')
     safetyCounter += 1
     const plan = getRepairRestockPlan(bot, targets)
 
@@ -6557,6 +6632,7 @@ async function ensureRepairMaterialsForTargets(bot, config, targets) {
     if (!inventoryHasRoomForItem(bot, closestItem.blockName)) {
       const dumpable = getDumpableCarpetStacks(bot, plan.neededByBlock).slice(0, 1)
       if (dumpable.length > 0) {
+        assertRuntimeContinue(bot, config, 'stopping-before-repair-dump')
         console.log(`[REPAIR-DUMP] Freeing 1 slot before repair restock: ${dumpable[0].name}x${dumpable[0].count}`)
         await dumpCarpetStacks(bot, config, dumpable, 'repairPredumpBeforeRefill')
         await delay(toNumber(advanced.inventoryActionDelayMs, 100))
@@ -6568,6 +6644,7 @@ async function ensureRepairMaterialsForTargets(bot, config, targets) {
     }
 
     console.log(`[REPAIR-RESTOCK] material=${closestItem.blockName} have=${closestItem.have} need=${closestItem.needed} deficit=${closestItem.deficit} dist=${Math.round(Math.sqrt(closestDist))}`)
+    assertRuntimeContinue(bot, config, 'stopping-before-repair-restock')
     const restocked = await restockMaterial(bot, config, closestItem.blockName, closestItem.stacks, plan.neededByBlock)
 
     if (!restocked) {
@@ -6825,6 +6902,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
 
 async function repairTargets(bot, config, targets, placeRange) {
   if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
+  assertRuntimeContinue(bot, config, 'stopping-during-repair')
 
   const printer = config.printer || {}
   const repairGoalRange = Math.max(0.5, toNumber(config.advanced?.repairGoalRange, Math.max(0.75, placeRange - 1.5)))
@@ -6837,6 +6915,7 @@ async function repairTargets(bot, config, targets, placeRange) {
   bot.setControlState('sprint', shouldSprintDuringRepair(config))
 
   while (remaining.length > 0) {
+    assertRuntimeContinue(bot, config, 'stopping-during-repair')
     const botPos = bot.entity.position
     let bestIndex = 0
     let bestDist = Number.POSITIVE_INFINITY
@@ -7032,6 +7111,7 @@ function shouldSprintDuringRepair(config) {
 
 async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRange, label = 'REPAIR-MIXED') {
   if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
+  assertRuntimeContinue(bot, config, 'stopping-during-repair')
 
   const printer = config.printer || {}
   const advanced = config.advanced || {}
@@ -7076,6 +7156,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
 
   const fastAirLoop = (async () => {
     while (active) {
+      assertRuntimeContinue(bot, config, 'stopping-during-repair')
       if (stopRepairActive) {
         await delay(tickMs)
         continue
@@ -7126,6 +7207,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
     bot.setControlState('sprint', shouldSprintDuringRepair(config))
 
     while (processed.size < targets.length) {
+      assertRuntimeContinue(bot, config, 'stopping-during-repair')
       if (Date.now() - lastLogAt >= progressLogMs) {
         lastLogAt = Date.now()
         console.log(`[${label}-PROGRESS] processed=${processed.size}/${targets.length} placed=${placed} already=${already} skipped=${skipped} pos=${bot.entity.position.x.toFixed(1)},${bot.entity.position.y.toFixed(1)},${bot.entity.position.z.toFixed(1)}`)
@@ -7257,6 +7339,7 @@ async function repairTargetsInBatches(bot, config, targets, placeRange, label = 
   )
 
   while (remaining.length > 0 && batchNumber < maxBatches) {
+    assertRuntimeContinue(bot, config, 'stopping-during-repair')
     batchNumber += 1
     const selection = takeNearestRepairBatch(bot, remaining, batchSize)
     const batch = selection.batch
@@ -7349,6 +7432,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 
   const placementLoop = (async () => {
     while (active) {
+      assertRuntimeContinue(bot, config, 'stopping-during-placement')
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
       if (allowPlacement) {
         const now = Date.now()
@@ -7418,6 +7502,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
               }
             }
           } catch (err) {
+            if (isRuntimeStopError(err)) throw err
             pendingUntil.set(key, Date.now() + retryCooldownMs)
             retryPriority.add(key)
             skipped += 1
@@ -7434,6 +7519,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 
   try {
     for (const checkpoint of checkpoints) {
+      assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (emergencyRestockBlock) break
 
       currentGoal = checkpoint.position
@@ -7545,6 +7631,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
 
   const placementLoop = (async () => {
     while (active) {
+      assertRuntimeContinue(bot, config, 'stopping-during-placement')
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
       if (allowPlacement) {
         for (let i = 0; i < maxPerTick; i += 1) {
@@ -7595,6 +7682,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
               }
             }
           } catch (err) {
+            if (isRuntimeStopError(err)) throw err
             skipped += 1
             retryPriority.add(key)
             if (config.errorHandling?.logErrors !== false) {
@@ -8012,6 +8100,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   const placementLoop = (async () => {
     while (active) {
+      assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (inlineRepairEnabled) {
         scanNearbyRepairAlerts()
       }
@@ -8096,6 +8185,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
             }
           } catch (err) {
+            if (isRuntimeStopError(err)) throw err
             skipped += 1
             hardStops += 1
             pendingUntil.set(key, 0)
@@ -8123,6 +8213,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   try {
     for (const checkpoint of checkpoints) {
+      assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (emergencyRestockBlock) break
       currentGoal = checkpoint.position
       currentAction = checkpoint.action
@@ -8138,6 +8229,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         const placeRangeSq = placeRange * placeRange
         const Vec3Drain = bot.entity.position.constructor
         while (Date.now() - drainStart < drainTimeoutMs) {
+          assertRuntimeContinue(bot, config, 'stopping-during-placement')
           const botPos = bot.entity.position
           const hasNearbyPending = batchTargets.some((t) => {
             const key = getTargetKey(t)
@@ -8183,7 +8275,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           const backX = botPos.x + (dx / dist) * missRecoveryBacktrackBlocks
           const backZ = botPos.z + (dz / dist) * missRecoveryBacktrackBlocks
 
+          assertRuntimeContinue(bot, config, 'stopping-during-placement')
           await bot.pathfinder.goto(new GoalNear(backX, checkpoint.position.y, backZ, checkpointBuffer))
+          assertRuntimeContinue(bot, config, 'stopping-during-placement')
           await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
 
           bot.setControlState('sneak', false)
@@ -8390,6 +8484,17 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   let resumePhase = 'printing'  // tracks which bot phase to resume after crash
   let resumePostPrintStep = 'withdraw'
   let resumePostPrintCartographyComplete = false
+  let runtimeStopPhase = 'printing'
+  let runtimeStopAction = 'dashboard-stop'
+  let runtimeStopMeta = {}
+  const setRuntimeStopCheckpoint = (phase = 'printing', action = 'dashboard-stop', meta = {}) => {
+    runtimeStopPhase = phase
+    runtimeStopAction = action
+    runtimeStopMeta = meta && typeof meta === 'object' ? meta : {}
+  }
+  const checkRuntimeStop = (detail = 'stopping-after-current-step') => {
+    assertRuntimeContinue(bot, config, detail)
+  }
 
   if (progressEnabled) {
     const previous = readProgressState(progressFile)
@@ -8451,6 +8556,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   if (pending.length) {
     const probe = await waitForStartupSupport(bot, config, pending)
     console.log(`[PROBE] support=${probe.supportCount}/${probe.sampleSize} at startup.`)
+    checkRuntimeStop()
   }
 
   if (!pending.length) {
@@ -8465,6 +8571,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     const errorList = []
 
     for (const target of orderedTargets) {
+      setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-verification')
+      checkRuntimeStop()
       const actual = bot.blockAt(new Vec3Verify(target.position.x, target.position.y, target.position.z))
       if (actual?.name !== target.blockName) {
         errorList.push(target)
@@ -8491,6 +8599,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     const Vec3_Final = bot.entity.position.constructor
     const fullMapErrors = []
     for (const target of orderedTargets) {
+      setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-final-scan')
+      checkRuntimeStop()
       const actual = bot.blockAt(new Vec3_Final(target.position.x, target.position.y, target.position.z))
       if (!actual || actual.name !== target.blockName) fullMapErrors.push(target)
     }
@@ -8513,6 +8623,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       logRepairMismatchWarningForTargets(bot, config, errorList, orderedTargets.length, 'REPAIR')
       const maxRepairPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
       for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
+        setRuntimeStopCheckpoint('repair', 'dashboard-stop-during-repair', { pass, maxPasses: maxRepairPasses, errorCount: errorList.length })
+        checkRuntimeStop()
         console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
         if (progressEnabled) {
           writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
@@ -8591,6 +8703,11 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     })
   }
 
+  setRuntimeStopCheckpoint('post_print', 'dashboard-stop-before-post-print', {
+    postPrintStep: resumePostPrintStep,
+    postPrintCartographyComplete: resumePostPrintCartographyComplete
+  })
+  checkRuntimeStop()
   const postPrintResult = await runPostPrintWorkflowWithRecovery(bot, config, makePostPrintContext, resumePostPrintStep, { label: 'main-run' })
   if (!postPrintResult?.completed) {
     console.log(`[POSTPRINT-WARN] Post-print workflow stopped at step=${postPrintResult?.failedStep || 'unknown'}. Job will remain pending until post-print completes.`)
@@ -8654,6 +8771,11 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     })
   }
 
+  setRuntimeStopCheckpoint('post_print', 'dashboard-stop-before-post-print-test', {
+    postPrintStep: resumePostPrintStep,
+    postPrintCartographyComplete: false
+  })
+  checkRuntimeStop()
   const postPrintOnlyResult = await runPostPrintWorkflowWithRecovery(bot, config, makePostPrintContext, resumePostPrintStep, { label: 'test-only' })
   if (!postPrintOnlyResult?.completed) {
     console.log(`[POSTPRINT-WARN] Post-print test-only workflow stopped at step=${postPrintOnlyResult?.failedStep || 'unknown'}.`)
@@ -8754,10 +8876,19 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       }
     }
   }
+  config.__runtimeStopHandler = (detail = 'stopping-after-current-step') => {
+    saveProgress(runtimeStopPhase, {
+      state: 'dashboard_stop_requested',
+      action: runtimeStopAction,
+      detail,
+      ...runtimeStopMeta
+    })
+  }
 
   if (progressEnabled) {
     saveProgress('printing', { state: 'printing_start', action: 'resume-ready' })
   }
+  checkRuntimeStop()
 
   // Pre-print cleanup: dump any leftover filled maps from previous runs before starting
   {
@@ -8766,6 +8897,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     if (finishedChestPos) {
       const leftoverMaps = findInventoryItemsByType(bot, 'filled_map')
       for (const stack of leftoverMaps) {
+        setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-preprint-cleanup')
+        checkRuntimeStop()
         if (stack && stack.count > 0) {
           console.log(`[PREPRINT] Dumping ${stack.count} leftover filled_map(s) from previous run before starting print.`)
           await depositToChest(bot, config, finishedChestPos, 'filled_map', stack.count, machine.finishedMapChest?.accessPosition)
@@ -8775,6 +8908,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   }
 
   for (let i = 0; i < colTraversal.length; i += printChunkLines) {
+    setRuntimeStopCheckpoint('printing', 'dashboard-stop-before-inventory-window', { colIndex: i })
+    checkRuntimeStop()
     const inventoryCols = colTraversal.slice(i, i + printChunkLines)
     const inventoryRowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
     const inventoryTargets = []
@@ -8806,9 +8941,12 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     if (!materialsReady) {
       console.log('[NERV-INVENTORY-WARN] Could not fully clean/refill inventory for this window; continuing with current inventory. Emergency restocks will handle any shortfalls.')
     }
+    checkRuntimeStop()
 
     let batchStartOnNorthSide = startOnNorthSide
     for (let j = 0; j < inventoryCols.length; j += Math.max(1, toNumber(linesPerRun, 1))) {
+      setRuntimeStopCheckpoint('printing', 'dashboard-stop-before-placement-batch', { colBatch: inventoryCols.slice(j, j + Math.max(1, toNumber(linesPerRun, 1))).join(',') })
+      checkRuntimeStop()
       const colBatch = inventoryCols.slice(j, j + Math.max(1, toNumber(linesPerRun, 1)))
       const rowOrder = batchStartOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
       const batchTargets = []
@@ -8836,6 +8974,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         already += result.already
         skipped += result.skipped
         processedInRun += batchTargets.length
+        checkRuntimeStop()
         if (placementNoiseLogsEnabled(config)) {
           console.log(`[LITEMATIC-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
         }
@@ -8880,6 +9019,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         already += result.already
         skipped += result.skipped
         processedInRun += batchTargets.length
+        checkRuntimeStop()
         if (placementNoiseLogsEnabled(config) && scannerWorkloadMode === 'time') {
           console.log(`[NERV-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
         } else if (placementNoiseLogsEnabled(config)) {
@@ -8902,6 +9042,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           .find(Boolean)
 
         if (firstTarget) {
+          setRuntimeStopCheckpoint('printing', 'dashboard-stop-before-manual-batch', { colBatch: colBatch.join(',') })
+          checkRuntimeStop()
           await ensureFoodBeforeTraversal(bot, config, `manual-batch cols=${colBatch.join(',')}`)
           const startGoal = new GoalNear(firstTarget.position.x, firstTarget.position.y, firstTarget.position.z, Math.max(1, placeRange - 1))
           try {
@@ -8914,6 +9056,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         }
 
         for (let rowIndex = 0; rowIndex < rowOrder.length; rowIndex++) {
+          setRuntimeStopCheckpoint('printing', 'dashboard-stop-before-manual-row', { colBatch: colBatch.join(','), rowIndex })
+          checkRuntimeStop()
           const row = rowOrder[rowIndex]
           const rowTargets = colBatch
             .map((col) => byColRow.get(`${col}:${row}`))
@@ -8945,6 +9089,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           }
 
           for (const target of rowTargets) {
+            setRuntimeStopCheckpoint('printing', 'dashboard-stop-before-manual-target', { colBatch: colBatch.join(','), rowIndex })
+            checkRuntimeStop()
             try {
               const result = await placeTarget(bot, config, target)
               if (result.state === 'placed') {
@@ -8993,6 +9139,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         const errorListKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
         for (const col of colBatch) {
           for (const row of rowOrder) {
+            setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-lineend-check', { colBatch: colBatch.join(',') })
+            checkRuntimeStop()
             const target = byColRow.get(`${col}:${row}`)
             if (!target) continue
             const key = `${target.position.x}:${target.position.y}:${target.position.z}`
@@ -9015,6 +9163,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
 
   if (isLitematicBandMode) {
     const existingErrorKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
+    setRuntimeStopCheckpoint('printing', 'dashboard-stop-before-litematic-sweep')
+    checkRuntimeStop()
     const sweepErrors = scanPlacementErrors(bot, orderedTargets, {
       config,
       logPrefix: 'LITEMATIC-SWEEP',
@@ -9040,6 +9190,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
 
     const maxRepairPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
     for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
+      setRuntimeStopCheckpoint('repair', 'dashboard-stop-during-repair', { pass, maxPasses: maxRepairPasses, errorCount: errorList.length })
+      checkRuntimeStop()
       console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
       if (progressEnabled) {
         writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
@@ -9104,6 +9256,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   if (multiRuntime && multiRole === 'master') {
     await waitForMultiSlavesFinished(config, multiRuntime.plan || buildMultiUserPlan(config))
   }
+  checkRuntimeStop()
 
   // Persist phase=post_print so crash here resumes post-print, not repair again
   if (progressEnabled) {
@@ -9115,6 +9268,11 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     })
   }
 
+  setRuntimeStopCheckpoint('post_print', 'dashboard-stop-before-post-print', {
+    postPrintStep: resumePostPrintStep,
+    postPrintCartographyComplete: resumePostPrintCartographyComplete
+  })
+  checkRuntimeStop()
   const postPrintResult = await runPostPrintWorkflowWithRecovery(bot, config, makePostPrintContext, resumePostPrintStep, { label: 'resume-run' })
   if (!postPrintResult?.completed) {
     console.log(`[POSTPRINT-WARN] Post-print workflow stopped at step=${postPrintResult?.failedStep || 'unknown'}. Job will remain pending until post-print completes.`)
