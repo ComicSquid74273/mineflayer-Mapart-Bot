@@ -386,7 +386,7 @@
     "repairRestockMode": "fast",
     "postBuildDelayMs": 10,
     "retryInteractTimeoutMs": 800,
-    "checkpointBuffer": 0.8,
+    "checkpointBuffer": 0.2,
     "breakCarpetAboveReset": false,
     "debugPrints": false
   },
