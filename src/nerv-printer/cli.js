@@ -2264,6 +2264,7 @@ function createDefaultConfig() {
       scannerRetryCooldownMs: 30,
       scannerPlaceConfirmMs: 80,
       scannerPlaceConfirmPollMs: 15,
+      workloadCheckpointMoveTimeoutMs: 30000,
       placementStallTimeoutMs: 5000,
       placementStallRecoveryMs: 2000,
       placementStallRecoveryAttempts: 3,
@@ -4158,6 +4159,28 @@ async function gotoWithTemporaryThinkTimeout(bot, goal, timeoutMs) {
     if (Number.isFinite(previous)) {
       pathfinderApi.thinkTimeout = previous
     }
+  }
+}
+
+async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path') {
+  const limitMs = Math.max(1000, toNumber(timeoutMs, 30000))
+  let timedOut = false
+  try {
+    await Promise.race([
+      bot.pathfinder.goto(goal),
+      (async () => {
+        await delay(limitMs)
+        timedOut = true
+        try { bot.pathfinder?.stop?.() } catch { }
+        try { bot.pathfinder?.setGoal?.(null) } catch { }
+        throw new Error(`${label}-timeout-${limitMs}ms`)
+      })()
+    ])
+  } catch (err) {
+    if (timedOut) {
+      throw err
+    }
+    throw err
   }
 }
 
@@ -8289,6 +8312,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const alertPollMs = Math.max(10, toNumber(advanced.scannerAlertPollMs, Math.max(pollMs, 25)))
   const alertReach = Math.max(1, toNumber(advanced.scannerAlertReach, Math.max(printer.placeRange, 4) + 0.75))
   const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
+  const checkpointMoveTimeoutMs = Math.max(1000, toNumber(advanced.workloadCheckpointMoveTimeoutMs, 30000))
   const stallTimeoutMs = Math.max(0, toNumber(advanced.placementStallTimeoutMs, 5000))
 
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
@@ -8843,7 +8867,22 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
       const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
       bot.setControlState('sprint', shouldSprint)
-      await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+      const beforeMove = bot.entity.position
+      console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs}`)
+      try {
+        await gotoGoalWithHardTimeout(
+          bot,
+          new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer),
+          checkpointMoveTimeoutMs,
+          'nerv-workload-checkpoint'
+        )
+        const afterMove = bot.entity.position
+        console.log(`[NERV-WORKLOAD-CHECKPOINT-OK] action=${currentAction || 'place'} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)}`)
+      } catch (err) {
+        const afterMove = bot.entity.position
+        console.log(`[NERV-WORKLOAD-CHECKPOINT-WARN] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)} -> ${err?.message || err}`)
+        throw err
+      }
 
       if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
         const drainTimeoutMs = Math.max(50, toNumber(advanced.inlineRepairDrainMs, Math.max(200, retryCooldownMs * 4)))

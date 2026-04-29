@@ -403,6 +403,7 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.scannerRetryCooldownMs` | `35` | Delay before retrying an unconfirmed placement. | Increase if duplicate/too-fast retries happen. |
 | `advanced.scannerPlaceConfirmMs` | `80` | Confirmation window used by non-optimistic placement paths. | Litematic workload stays optimistic for smooth movement. |
 | `advanced.scannerPlaceConfirmPollMs` | `15` | Poll interval while waiting for placement confirmation. | Keep small; this is only used by confirming placement paths. |
+| `advanced.workloadCheckpointMoveTimeoutMs` | `30000` | Hard timeout for moving to the next workload checkpoint. | Prevents silent standing forever after refill/pathfinder stalls. |
 | `advanced.placementStallTimeoutMs` | `5000` | Marks a local stuck area after this long without real block-world placement progress. | Set `0` to disable; skipped areas are left for final repair. |
 | `advanced.placementStallRecoveryMs` | `2000` | Starts a local slow confirmed recovery after this long without real block-world progress. | Runs before stall skip. |
 | `advanced.placementStallRecoveryAttempts` | `3` | Slow confirmed placements to try during local stall recovery. | Set `0` to skip straight to stall skip. |
