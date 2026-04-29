@@ -2161,7 +2161,7 @@ function createDefaultConfig() {
       anvilPillarMinCount: 3,
       anvilPillarScanLimit: 16,
       resetChestWaitMs: 500,
-      resetChestCloseSettleMs: 1500,
+      resetChestCloseSettleMs: 0,
       sneakOnDispenserOnly: true,
       postPrintWorkflowEnabled: true,
       postPrintFillMapEnabled: true,
@@ -5076,7 +5076,7 @@ async function interactWithConfiguredBlock(bot, config, node, label = 'configure
       }
     }
     if (isResetBlock) {
-      const closeSettleMs = Math.max(0, toNumber(config.advanced?.resetChestCloseSettleMs, 1500))
+      const closeSettleMs = Math.max(0, toNumber(config.advanced?.resetChestCloseSettleMs, 0))
       if (closeSettleMs > 0) {
         console.log(`[POSTPRINT-RESET] Waiting ${closeSettleMs}ms after reset container close.`)
         await delay(closeSettleMs)
@@ -8969,10 +8969,10 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         postPrintResetEnabled: true,
         postPrintSkipResetInteraction: false,
         postPrintWalkToCenter: true,
-        resetChestWaitMs: 500,
-        resetChestCloseSettleMs: 1500
+        resetChestWaitMs: 2000,
+        resetChestCloseSettleMs: 0
       }
-      console.log('[TEST] --test-post-print-full keeps reset and final center walk enabled; reset chest stays open for 500ms.')
+      console.log('[TEST] --test-post-print-full keeps reset and final center walk enabled; reset chest stays open for 2000ms.')
     }
     resumePostPrintStep = 'withdraw'
     if (progressEnabled) {
@@ -16206,10 +16206,10 @@ async function start() {
         postPrintResetEnabled: true,
         postPrintSkipResetInteraction: false,
         postPrintWalkToCenter: true,
-        resetChestWaitMs: 500,
-        resetChestCloseSettleMs: 1500
+        resetChestWaitMs: 2000,
+        resetChestCloseSettleMs: 0
       }
-      console.log('[TEST-POSTPRINT] Running post-print workflow only. Reset and final center walk are enabled; reset chest stays open for 500ms.')
+      console.log('[TEST-POSTPRINT] Running post-print workflow only. Reset and final center walk are enabled; reset chest stays open for 2000ms.')
     }
   }
   const reconnect = getReconnectConfig(config)
