@@ -8350,6 +8350,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const repairAlerts = new Map()
   const inventoryDesyncHits = new Map()
   let lastAlertScanAt = 0
+  let checkpointMoveInProgress = false
   const maxInventoryDesyncHits = Math.max(1, toNumber(advanced.scannerInventoryDesyncMaxHits, 3))
   const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
   const stall = {
@@ -8415,6 +8416,16 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
   const handlePlacementStall = async () => {
     if (emergencyRestockBlock) return []
+    if (checkpointMoveInProgress) {
+      // Foreground checkpoint movement owns pathfinder.goto. Do not let background
+      // stall recovery change the goal and abort traversal with GoalChanged.
+      stall.lastWorldProgressAt = Date.now()
+      stall.attemptsSinceWorldProgress = 0
+      stall.optimisticPlacementsSinceWorldProgress = 0
+      stall.recoveryAttemptsSinceWorldProgress = 0
+      stall.lastTarget = null
+      return []
+    }
     if (!stallTimeoutMs || stall.attemptsSinceWorldProgress <= 0) return []
     const stalledMs = Date.now() - stall.lastWorldProgressAt
     if (
@@ -8869,6 +8880,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       bot.setControlState('sprint', shouldSprint)
       const beforeMove = bot.entity.position
       console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs}`)
+      checkpointMoveInProgress = true
       try {
         await gotoGoalWithHardTimeout(
           bot,
@@ -8882,6 +8894,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         const afterMove = bot.entity.position
         console.log(`[NERV-WORKLOAD-CHECKPOINT-WARN] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)} -> ${err?.message || err}`)
         throw err
+      } finally {
+        checkpointMoveInProgress = false
       }
 
       if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
