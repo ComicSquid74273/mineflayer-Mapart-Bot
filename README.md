@@ -458,6 +458,9 @@ Repair behavior:
 | `advanced.retryInteractTimeoutMs` | `800` | Timeout for retrying interactions. | Increase if chest/block interactions are delayed. |
 | `advanced.checkpointBuffer` | `0.35` | Goal radius around print checkpoints. | Higher reaches line end faster; lower is more exact. |
 | `advanced.breakCarpetAboveReset` | `false` | Break carpet above reset area if configured. | Leave `false` unless reset needs clearing. |
+| `advanced.pingDiagnosticsEnabled` | `true` | Logs ping breadcrumbs around desync/stall events and high-ping placement loops. | Set `false` only if the logs get too noisy. |
+| `advanced.pingDiagnosticsThresholdMs` | `30` | Ping warning threshold in milliseconds. | `30` catches small 6b6t latency spikes during placement. |
+| `advanced.pingDiagnosticsLogEveryMs` | `5000` | Throttle for live high-ping placement-loop logs. | Event-specific desync/stall ping logs are still printed immediately. |
 | `advanced.debugPrints` | `false` | Extra verbose logs. | Use briefly; logs get noisy. |
 
 ### 3.5 `errorHandling`

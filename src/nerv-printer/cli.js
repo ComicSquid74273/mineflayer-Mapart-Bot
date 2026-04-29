@@ -328,6 +328,47 @@ function placementNoiseLogsEnabled(config) {
   return config?.advanced?.placementNoiseLogs !== false
 }
 
+function getBotLatencyMs(bot) {
+  const playerPing = bot?.players?.[bot?.username]?.ping
+  if (typeof playerPing === 'number' && playerPing > 0) return Math.round(playerPing)
+  const namedPlayer = bot?.username ? Object.values(bot?.players || {}).find((player) => player?.username === bot.username) : null
+  if (typeof namedPlayer?.ping === 'number' && namedPlayer.ping > 0) return Math.round(namedPlayer.ping)
+  const clientLatency = bot?._client?.latency
+  if (typeof clientLatency === 'number' && clientLatency > 0) return Math.round(clientLatency)
+  return null
+}
+
+function logPingDiagnostic(bot, config, reason, details = {}, options = {}) {
+  const advanced = config?.advanced || {}
+  if (advanced.pingDiagnosticsEnabled === false) return
+
+  const pingMs = getBotLatencyMs(bot)
+  const thresholdMs = Math.max(0, toNumber(advanced.pingDiagnosticsThresholdMs, 30))
+  const force = options.force === true
+  if (!force && (pingMs == null || pingMs <= thresholdMs)) return
+
+  const fields = [
+    options.tag || (pingMs != null && pingMs > thresholdMs ? '[PING-WARN]' : '[PING]'),
+    `reason=${reason}`,
+    `ping=${pingMs == null ? 'unknown' : `${pingMs}ms`}`,
+    `threshold=${thresholdMs}ms`
+  ]
+
+  for (const [key, value] of Object.entries(details || {})) {
+    if (value == null || value === '') continue
+    fields.push(`${key}=${String(value).replace(/\s+/g, '_')}`)
+  }
+
+  if (force) {
+    console.log(fields.join(' '))
+    return
+  }
+
+  logThrottled(options.throttleKey || `ping-${reason}`, fields.join(' '), {
+    intervalMs: toNumber(advanced.pingDiagnosticsLogEveryMs, 5000)
+  })
+}
+
 function readOptionalJson(filePath) {
   if (!fs.existsSync(filePath)) return null
   try {
@@ -807,13 +848,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       tokenWaiting: stdinCommandState.status?.tokenWaiting === true,
       currentNbtStartedAt: state.currentNbtStartedAt || null,
       recentChat: chatBuffer.slice(),
-      latencyMs: (() => {
-        const playerPing = bot.players?.[botName]?.ping ?? bot.players?.[bot.username]?.ping
-        if (typeof playerPing === 'number' && playerPing > 0) return Math.round(playerPing)
-        const clientLatency = bot._client?.latency
-        if (typeof clientLatency === 'number' && clientLatency > 0) return Math.round(clientLatency)
-        return null
-      })(),
+      latencyMs: getBotLatencyMs(bot),
       tpaTarget: getTpaTarget(config)
     }
   }
@@ -2242,6 +2277,9 @@ function createDefaultConfig() {
       scannerPreSwapDelayMs: 0,
       scannerPostSwapDelayMs: 0,
       placementNoiseLogs: true,
+      pingDiagnosticsEnabled: true,
+      pingDiagnosticsThresholdMs: 30,
+      pingDiagnosticsLogEveryMs: 5000,
       scannerWorkloadMode: 'litematic',
       inventoryCycleTestWaitAfterMs: 5000,
       inventoryCycleTestRows: 2,
@@ -3650,6 +3688,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             const navMsg = String(navErr?.message || navErr || '').toLowerCase()
             if (navMsg.includes('goal was changed') || navMsg.includes('goalchanged')) {
               console.log(`[RESTOCK-WARN] Navigation interrupted (GoalChanged) going to chest for ${blockName}; skipping this chest.`)
+              logPingDiagnostic(bot, config, 'restock-navigation-goalchanged', {
+                block: blockName,
+                chest: `${spot.x},${spot.y},${spot.z}`,
+                pos: formatBotPosition(bot)
+              }, { force: true })
               break
             }
             throw navErr
@@ -7503,6 +7546,13 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
       skipped += 1
       const reason = String(result.reason || '')
       if (allowEmergencyRestock && advanced.repairStallEmergencyRestock !== false && (reason === 'unconfirmed-place' || reason.startsWith('held-item-desync-'))) {
+        logPingDiagnostic(bot, config, `repair-${reason}`, {
+          label,
+          target: `${target.position.x},${target.position.y},${target.position.z}`,
+          block: target.blockName,
+          held: bot.heldItem?.name || 'empty',
+          pos: formatBotPosition(bot)
+        }, { force: true })
         const hits = (transientRepairFailures.get(target.blockName) || 0) + 1
         transientRepairFailures.set(target.blockName, hits)
         if (hits >= transientRestockHits && !emergencyRestockBlock) {
@@ -7511,6 +7561,13 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
           active = false
           stopRepairActive = false
           console.log(`[${label}-STALL-RESTOCK] block=${emergencyRestockBlock} reason="${emergencyRestockReason}"; forcing emergency restock/refresh before retry.`)
+          logPingDiagnostic(bot, config, 'repair-stall-restock-requested', {
+            label,
+            block: emergencyRestockBlock,
+            target: `${target.position.x},${target.position.y},${target.position.z}`,
+            pos: formatBotPosition(bot),
+            reason: emergencyRestockReason
+          }, { force: true })
         }
       }
       if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
@@ -8372,6 +8429,15 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       advanced: { ...advanced, scannerPlaceConfirmMs: stallRecoveryConfirmMs }
     }
     console.log(`[NERV-WORKLOAD-STALL-RECOVER] start recovery=${stall.recoveryAttemptsSinceWorldProgress}/${stallRecoveryAttempts} stalledMs=${stalledMs} attempts=${stall.attemptsSinceWorldProgress} optimistic=${stall.optimisticPlacementsSinceWorldProgress} target=${formatTargetLabel(primary)} confirmMs=${stallRecoveryConfirmMs} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()} pos=${botPos.x.toFixed(2)} ${botPos.y.toFixed(2)} ${botPos.z.toFixed(2)}`)
+    logPingDiagnostic(bot, config, 'workload-stall-recover-start', {
+      target: formatTargetLabel(primary),
+      stalledMs,
+      attempts: stall.attemptsSinceWorldProgress,
+      optimistic: stall.optimisticPlacementsSinceWorldProgress,
+      held: bot.heldItem?.name || 'empty',
+      selected: getSelectedHotbarName(),
+      pos: `${botPos.x.toFixed(2)},${botPos.y.toFixed(2)},${botPos.z.toFixed(2)}`
+    }, { force: true })
 
     try {
       bot.setControlState('sprint', false)
@@ -8409,6 +8475,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           pendingUntil.set(key, Date.now() + inventoryDesyncCooldownMs)
           retryPriority.add(key)
           console.log(`[NERV-WORKLOAD-STALL-RECOVER] select-failed attempt=${index + 1}/${targets.length} target=${formatTargetLabel(target)} block=${target.blockName} have=${have} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+          logPingDiagnostic(bot, config, 'workload-stall-select-failed', {
+            target: formatTargetLabel(target),
+            block: target.blockName,
+            have,
+            held: bot.heldItem?.name || 'empty',
+            selected: getSelectedHotbarName(),
+            pos: formatBotPosition(bot)
+          }, { force: true })
           continue
         }
 
@@ -8436,12 +8510,26 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       const failedStalledMs = Date.now() - stall.lastWorldProgressAt
       console.log(`[NERV-WORKLOAD-STALL-RECOVER] failed recovery=${stall.recoveryAttemptsSinceWorldProgress}/${stallRecoveryAttempts} tried=${targets.length} stalledMs=${failedStalledMs} held=${bot.heldItem?.name || 'empty'} selected=${getSelectedHotbarName()}`)
+      logPingDiagnostic(bot, config, 'workload-stall-recover-failed', {
+        target: formatTargetLabel(primary),
+        tried: targets.length,
+        stalledMs: failedStalledMs,
+        held: bot.heldItem?.name || 'empty',
+        selected: getSelectedHotbarName(),
+        pos: formatBotPosition(bot)
+      }, { force: true })
       if (allowEmergencyRestock && advanced.placementStallEmergencyRestock !== false && primary?.blockName) {
         hardStops += 1
         emergencyRestockBlock = primary.blockName
         emergencyRestockReason = `stall recovery failed after ${failedStalledMs}ms without confirmed placement`
         active = false
         console.log(`[NERV-WORKLOAD-STALL-RESTOCK] block=${emergencyRestockBlock} reason="${emergencyRestockReason}"; forcing emergency restock/refresh before retry.`)
+        logPingDiagnostic(bot, config, 'workload-stall-restock-requested', {
+          block: emergencyRestockBlock,
+          target: formatTargetLabel(primary),
+          pos: formatBotPosition(bot),
+          reason: emergencyRestockReason
+        }, { force: true })
       }
       return false
     } finally {
@@ -8508,6 +8596,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       }
 
       const now = Date.now()
+      logPingDiagnostic(bot, config, 'placement-loop', {
+        action: currentAction || 'place',
+        goal: currentGoal ? `${currentGoal.x},${currentGoal.y},${currentGoal.z}` : 'none',
+        pos: formatBotPosition(bot)
+      }, { throttleKey: 'ping-placement-loop' })
       const rawAllowed = placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : maxCatchup
 
       if (rawAllowed <= 0) {
@@ -8563,6 +8656,15 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
               if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
+              }
+              if (isTransientPlacementReason(result.reason)) {
+                logPingDiagnostic(bot, config, `workload-${result.reason}`, {
+                  target: `${target.position.x},${target.position.y},${target.position.z}`,
+                  block: target.blockName,
+                  held: bot.heldItem?.name || 'empty',
+                  selected: getSelectedHotbarName(),
+                  pos: formatBotPosition(bot)
+                }, { force: true })
               }
 
               if (!String(result.reason || '').startsWith('missing-item-')) {
