@@ -2161,6 +2161,7 @@ function createDefaultConfig() {
       anvilPillarMinCount: 3,
       anvilPillarScanLimit: 16,
       resetChestWaitMs: 500,
+      resetChestCloseSettleMs: 1500,
       sneakOnDispenserOnly: true,
       postPrintWorkflowEnabled: true,
       postPrintFillMapEnabled: true,
@@ -5051,12 +5052,37 @@ async function interactWithConfiguredBlock(bot, config, node, label = 'configure
     name.endsWith('shulker_box')
 
   if (isContainer) {
+    const isResetBlock = label === 'reset-block'
+    if (isResetBlock) {
+      console.log(`[POSTPRINT-RESET] Opening reset container ${name} at ${pos.x},${pos.y},${pos.z}.`)
+    }
     const container = await bot.openContainer(block)
-    const openDelayMs = label === 'reset-block'
+    const openDelayMs = isResetBlock
       ? toNumber(config.advanced?.resetChestWaitMs, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
       : toNumber(config.advanced?.postPrintInteractionDelayMs, 200)
+    if (isResetBlock) {
+      console.log(`[POSTPRINT-RESET] Reset container opened; holding open for ${openDelayMs}ms.`)
+    }
     await delay(openDelayMs)
-    try { container.close() } catch { }
+    try {
+      await Promise.resolve(container.close())
+      if (isResetBlock) {
+        console.log('[POSTPRINT-RESET] Reset container close sent.')
+      }
+    } catch (err) {
+      if (isResetBlock) {
+        console.log(`[POSTPRINT-RESET-WARN] Reset container close failed: ${err?.message || err}`)
+        throw err
+      }
+    }
+    if (isResetBlock) {
+      const closeSettleMs = Math.max(0, toNumber(config.advanced?.resetChestCloseSettleMs, 1500))
+      if (closeSettleMs > 0) {
+        console.log(`[POSTPRINT-RESET] Waiting ${closeSettleMs}ms after reset container close.`)
+        await delay(closeSettleMs)
+      }
+      console.log('[POSTPRINT-RESET] Reset container interaction complete.')
+    }
     return name
   }
 
@@ -8943,7 +8969,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         postPrintResetEnabled: true,
         postPrintSkipResetInteraction: false,
         postPrintWalkToCenter: true,
-        resetChestWaitMs: 500
+        resetChestWaitMs: 500,
+        resetChestCloseSettleMs: 1500
       }
       console.log('[TEST] --test-post-print-full keeps reset and final center walk enabled; reset chest stays open for 500ms.')
     }
@@ -16179,7 +16206,8 @@ async function start() {
         postPrintResetEnabled: true,
         postPrintSkipResetInteraction: false,
         postPrintWalkToCenter: true,
-        resetChestWaitMs: 500
+        resetChestWaitMs: 500,
+        resetChestCloseSettleMs: 1500
       }
       console.log('[TEST-POSTPRINT] Running post-print workflow only. Reset and final center walk are enabled; reset chest stays open for 500ms.')
     }

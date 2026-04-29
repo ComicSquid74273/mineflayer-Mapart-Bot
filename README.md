@@ -321,6 +321,7 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | Key | Current | Options / Meaning | Tuning hint |
 |---|---:|---|---|
 | `advanced.resetChestWaitMs` | `500` | Wait around reset chest interaction. | Increase if reset interaction is flaky. |
+| `advanced.resetChestCloseSettleMs` | `1500` | Wait after closing the reset chest before moving to center. | Lets reset water/redstone settle before the bot walks onto the platform. |
 | `advanced.rescanEnabled` | `true` | Enables rescan/repair support features. | Keep `true` for autonomous accuracy. |
 | `advanced.rescanAfterPrinting` | `true` | Scan after printing. | Keep `true`; finds skipped blocks. |
 | `advanced.rescanRepairMissingBlocks` | `true` | Repair air/missing blocks. | Keep `true`. |
