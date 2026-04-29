@@ -4164,23 +4164,20 @@ async function gotoWithTemporaryThinkTimeout(bot, goal, timeoutMs) {
 
 async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path') {
   const limitMs = Math.max(1000, toNumber(timeoutMs, 30000))
-  let timedOut = false
+  let timeoutId = null
   try {
     await Promise.race([
       bot.pathfinder.goto(goal),
-      (async () => {
-        await delay(limitMs)
-        timedOut = true
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
         try { bot.pathfinder?.stop?.() } catch { }
         try { bot.pathfinder?.setGoal?.(null) } catch { }
-        throw new Error(`${label}-timeout-${limitMs}ms`)
-      })()
+          reject(new Error(`${label}-timeout-${limitMs}ms`))
+        }, limitMs)
+      })
     ])
-  } catch (err) {
-    if (timedOut) {
-      throw err
-    }
-    throw err
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
   }
 }
 
