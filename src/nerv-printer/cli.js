@@ -2160,7 +2160,7 @@ function createDefaultConfig() {
       autoEatFoodItem: 'cooked_beef',
       anvilPillarMinCount: 3,
       anvilPillarScanLimit: 16,
-      resetChestWaitMs: 500,
+      resetChestWaitMs: 2000,
       resetChestCloseSettleMs: 0,
       sneakOnDispenserOnly: true,
       postPrintWorkflowEnabled: true,

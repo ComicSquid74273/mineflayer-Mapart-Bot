@@ -312,7 +312,7 @@
     "anvilPillarMinCount": 3,
     "anvilPillarScanLimit": 16,
     "sneakOnDispenserOnly": true,
-    "resetChestWaitMs": 500,
+    "resetChestWaitMs": 2000,
     "rescanEnabled": true,
     "rescanAfterPrinting": true,
     "rescanRepairMissingBlocks": true,

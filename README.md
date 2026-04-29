@@ -320,7 +320,7 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 
 | Key | Current | Options / Meaning | Tuning hint |
 |---|---:|---|---|
-| `advanced.resetChestWaitMs` | `500` | Wait around reset chest interaction. | Increase if reset interaction is flaky. |
+| `advanced.resetChestWaitMs` | `2000` | How long the reset chest stays open. | Keep `2000` for reset circuits that need a longer trapped-chest pulse. |
 | `advanced.resetChestCloseSettleMs` | `0` | Wait after closing the reset chest before moving to center. | Usually `0`; raise only if redstone needs time after close. |
 | `advanced.rescanEnabled` | `true` | Enables rescan/repair support features. | Keep `true` for autonomous accuracy. |
 | `advanced.rescanAfterPrinting` | `true` | Scan after printing. | Keep `true`; finds skipped blocks. |
