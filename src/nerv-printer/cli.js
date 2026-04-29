@@ -2275,7 +2275,7 @@ function createDefaultConfig() {
       litematicRowVerifyEveryRows: 2,
       litematicRowRepairThreshold: 2,
       scannerPreSwapDelayMs: 0,
-      scannerPostSwapDelayMs: 250,
+      scannerPostSwapDelayMs: 50,
       placementNoiseLogs: true,
       pingDiagnosticsEnabled: true,
       pingDiagnosticsThresholdMs: 30,
@@ -3397,7 +3397,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   const pollMs = Math.max(25, toNumber(advanced.inventoryDesyncEquipPollMs, 75))
   const hotbarIndex = chooseMaterialHotbarIndex(bot, blockName)
   const preSwapDelayMs = fastSwap ? toNumber(advanced.scannerPreSwapDelayMs, 0) : toNumber(advanced.preSwapDelayMs, 100)
-  const postSwapDelayMs = fastSwap ? toNumber(advanced.scannerPostSwapDelayMs, 250) : toNumber(advanced.postSwapDelayMs, 100)
+  const postSwapDelayMs = fastSwap ? toNumber(advanced.scannerPostSwapDelayMs, 50) : toNumber(advanced.postSwapDelayMs, 100)
 
   if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
 

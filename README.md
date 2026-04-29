@@ -409,7 +409,7 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.placementStallEmergencyRestock` | `true` | Trigger emergency restock/refresh if slow stall recovery cannot confirm placement. | Experimental recovery for 6b6t placement refusal windows. |
 | `advanced.placementStallSkipRadiusBlocks` | `5` | Radius around the stalled target to skip in the main print pass. | Keep near `placeRange + 1`; final repair handles skipped blocks. |
 | `advanced.scannerPreSwapDelayMs` | `10` | Delay before item swap in scanner placement. | Increase if held item updates late. |
-| `advanced.scannerPostSwapDelayMs` | `250` | Required stable selected-material window after scanner item swap. | Keep near one server tick window or higher if `held-item-desync-*` appears despite inventory. |
+| `advanced.scannerPostSwapDelayMs` | `50` | Required stable selected-material window after scanner item swap. | Increase only if `held-item-desync-*` appears despite inventory. |
 | `advanced.scannerWorkloadMode` | `time` | `time` or `fixed`. | Use `time` for lag-aware workload; `fixed` is older scanner tick mode. |
 
 Important workload logs:
