@@ -3306,6 +3306,21 @@ function chooseMaterialHotbarIndex(bot, blockName) {
     if (!slots[getHotbarWindowSlot(index)]) return index
   }
 
+  const byName = new Map()
+  for (let index = 0; index < 9; index += 1) {
+    const stack = slots[getHotbarWindowSlot(index)]
+    if (!stack?.name) continue
+    const entry = byName.get(stack.name) || { name: stack.name, count: 0, index }
+    entry.count += 1
+    byName.set(stack.name, entry)
+  }
+
+  let replacement = null
+  for (const entry of byName.values()) {
+    if (!replacement || entry.count > replacement.count) replacement = entry
+  }
+
+  if (replacement) return Math.max(0, Math.min(8, replacement.index))
   const current = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0
   return Math.max(0, Math.min(8, current))
 }
@@ -3398,44 +3413,58 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   const fastSwap = options.fastSwap === true
   const timeoutMs = Math.max(100, toNumber(advanced.inventoryDesyncEquipTimeoutMs, 900))
   const pollMs = Math.max(25, toNumber(advanced.inventoryDesyncEquipPollMs, 75))
+  const setSelectedHotbar = (index) => {
+    if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(index)
+    else bot.quickBarSlot = index
+  }
+  const hotbarSelectStableMs = Math.max(0, toNumber(
+    fastSwap ? advanced.scannerPostHotbarSelectDelayMs : advanced.postHotbarSelectDelayMs,
+    0
+  ))
+  const inventorySwapStableMs = Math.max(0, toNumber(
+    fastSwap ? advanced.scannerPostInventorySwapDelayMs : advanced.postInventorySwapDelayMs,
+    fastSwap ? toNumber(advanced.scannerPostSwapDelayMs, 50) : toNumber(advanced.postSwapDelayMs, 100)
+  ))
+
+  const existingHotbar = findHotbarIndexForItem(bot, blockName)
+  if (existingHotbar >= 0) {
+    setSelectedHotbar(existingHotbar)
+    return await waitForSelectedMaterialReady(bot, blockName, timeoutMs + hotbarSelectStableMs, pollMs, hotbarSelectStableMs)
+  }
+
+  const source = findBestInventorySlotForItem(bot, blockName)
+  if (!source) return false
+
+  if (source.slot >= 36 && source.slot <= 44) {
+    setSelectedHotbar(source.slot - 36)
+    return await waitForSelectedMaterialReady(bot, blockName, timeoutMs + hotbarSelectStableMs, pollMs, hotbarSelectStableMs)
+  }
+
   const hotbarIndex = chooseMaterialHotbarIndex(bot, blockName)
-  const preSwapDelayMs = fastSwap ? toNumber(advanced.scannerPreSwapDelayMs, 0) : toNumber(advanced.preSwapDelayMs, 100)
-  const postSwapDelayMs = fastSwap ? toNumber(advanced.scannerPostSwapDelayMs, 50) : toNumber(advanced.postSwapDelayMs, 100)
+  const preSwapDelayMs = Math.max(0, toNumber(fastSwap ? advanced.scannerPreSwapDelayMs : advanced.preSwapDelayMs, fastSwap ? 0 : 100))
+  const wasMoving = {
+    sprint: bot.controlState?.sprint === true,
+    forward: bot.controlState?.forward === true,
+    back: bot.controlState?.back === true,
+    left: bot.controlState?.left === true,
+    right: bot.controlState?.right === true
+  }
 
   if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
 
-  const wasSprinting = bot.controlState?.sprint === true
-  if (fastSwap || wasSprinting) bot.setControlState('sprint', false)
-
   try {
-    const existingHotbar = findHotbarIndexForItem(bot, blockName)
-    if (existingHotbar >= 0) {
-      if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(existingHotbar)
-      else bot.quickBarSlot = existingHotbar
-      if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs + postSwapDelayMs, pollMs, postSwapDelayMs)) return false
-      return true
+    for (const control of ['sprint', 'forward', 'back', 'left', 'right']) {
+      bot.setControlState(control, false)
     }
-
-    const source = findBestInventorySlotForItem(bot, blockName)
-    if (!source) return false
-
-    if (source.slot >= 36 && source.slot <= 44) {
-      const sourceHotbarIndex = source.slot - 36
-      if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(sourceHotbarIndex)
-      else bot.quickBarSlot = sourceHotbarIndex
-      if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs + postSwapDelayMs, pollMs, postSwapDelayMs)) return false
-      return true
-    }
-
     await bot.clickWindow(source.slot, hotbarIndex, 2)
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
     if (!swapped) return false
-    if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(hotbarIndex)
-    else bot.quickBarSlot = hotbarIndex
-    if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs + postSwapDelayMs, pollMs, postSwapDelayMs)) return false
-    return true
+    setSelectedHotbar(hotbarIndex)
+    return await waitForSelectedMaterialReady(bot, blockName, timeoutMs + inventorySwapStableMs, pollMs, inventorySwapStableMs)
   } finally {
-    if (wasSprinting) bot.setControlState('sprint', true)
+    for (const [control, value] of Object.entries(wasMoving)) {
+      if (value) bot.setControlState(control, true)
+    }
   }
 }
 
@@ -9706,8 +9735,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       } else if (printer.fastTraversalEnabled === true) {
         await ensureFoodBeforeTraversal(bot, config, `fast-batch cols=${colBatch.join(',')}`)
         const result = scannerWorkloadMode === 'time'
-          ? await placementWorkload.runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
-          : await placementWorkload.runNervScannerPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
+          ? await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
+          : await runNervScannerPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
         placed += result.placed
         already += result.already
         skipped += result.skipped

@@ -140,13 +140,13 @@ function createPlacementWorkload(deps) {
     if (!isBad && !isGood) return false
 
     const oldSettle = Math.max(0, toNumber(advanced.scannerLineEndSettleMs, 0))
-    const oldDelay = Math.max(1, toNumber(advanced.scannerPlaceDelayMs, 8))
+    const oldDelay = Math.max(0, toNumber(advanced.scannerPlaceDelayMs, 8))
     const settleStep = Math.max(0, toNumber(advanced.scannerAdaptiveSettleStepMs, 1000))
     const delayStep = Math.max(0, toNumber(advanced.scannerAdaptivePlaceDelayStepMs, 2))
     const maxSettle = Math.max(oldSettle, toNumber(advanced.scannerAdaptiveMaxSettleMs, 7000))
     const maxDelay = Math.max(oldDelay, toNumber(advanced.scannerAdaptiveMaxPlaceDelayMs, 16))
     const minSettle = Math.max(0, toNumber(advanced.scannerAdaptiveMinSettleMs, 1500))
-    const minDelay = Math.max(1, toNumber(advanced.scannerAdaptiveMinPlaceDelayMs, 6))
+    const minDelay = Math.max(0, toNumber(advanced.scannerAdaptiveMinPlaceDelayMs, 6))
 
     if (isBad) {
       const nextSettle = Math.min(maxSettle, oldSettle + settleStep)
@@ -334,6 +334,7 @@ function createPlacementWorkload(deps) {
 
     if (allowEmergencyRestock && emergencyRestockBlock) {
       console.log(`[NERV-SCANNER-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; stopping movement, refilling, and retrying remaining targets once.`)
+      stopPlacementMotion(bot)
       const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
       if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
         const Vec3Retry = bot.entity.position.constructor
@@ -362,9 +363,9 @@ function createPlacementWorkload(deps) {
 
     const printer = config.printer || {}
     const advanced = config.advanced || {}
-    const placeDelayMs = Math.max(1, toNumber(advanced.scannerPlaceDelayMs, toNumber(printer.placeDelayMs, 10)))
+    const placeDelayMs = Math.max(0, toNumber(advanced.scannerPlaceDelayMs, toNumber(printer.placeDelayMs, 10)))
     const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 12))
-    const pollMs = Math.max(1, toNumber(advanced.scannerWorkloadPollMs, Math.min(10, placeDelayMs)))
+    const pollMs = Math.max(0, toNumber(advanced.scannerWorkloadPollMs, placeDelayMs > 0 ? Math.min(10, placeDelayMs) : 1))
     const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
     const lineEndSettleMs = Math.max(0, toNumber(advanced.scannerLineEndSettleMs, toNumber(printer.fastTraversalCatchupStallMs, 0)))
     const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
@@ -385,6 +386,7 @@ function createPlacementWorkload(deps) {
     let cappedTotal = 0
     let maxAllowedSeen = 0
     let emergencyRestockBlock = null
+    let emergencyRestockAnchor = null
     const seen = new Set()
     const pendingUntil = new Map()
     const inventoryDesyncHits = new Map()
@@ -392,19 +394,46 @@ function createPlacementWorkload(deps) {
     const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
     const stall = createPlacementStallState(config, 'NERV-WORKLOAD', stallRecoveryState)
     let stallRecoveryRequested = false
+    const captureEmergencyRestockAnchor = (target, reason = 'missing item during placement') => {
+      if (!target?.position) return
+      const botPos = bot?.entity?.position
+      emergencyRestockAnchor = {
+        target,
+        reason,
+        botPos: botPos ? { x: botPos.x, y: botPos.y, z: botPos.z } : null
+      }
+    }
+    const returnToEmergencyRestockAnchor = async () => {
+      const target = emergencyRestockAnchor?.target
+      if (!target?.position) return false
+      const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+      const anchorRange = Math.max(0.75, toNumber(advanced.emergencyRestockReturnRange, Math.max(1.25, placeRange - 1)))
+      const pos = target.position
+      const botPos = bot?.entity?.position
+      const beforeLabel = botPos ? `${botPos.x.toFixed(2)} ${botPos.y.toFixed(2)} ${botPos.z.toFixed(2)}` : 'unknown'
+      console.log(`[NERV-WORKLOAD-RESTOCK-RETURN] block=${emergencyRestockBlock || target.blockName} target=${pos.x} ${pos.y} ${pos.z} range=${anchorRange} reason=${emergencyRestockAnchor.reason || 'restock'} from=${beforeLabel}`)
+      try {
+        stopPlacementMotion(bot)
+        await bot.pathfinder.goto(new GoalNear(pos.x, pos.y, pos.z, anchorRange))
+        return true
+      } catch (err) {
+        console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] target=${pos.x} ${pos.y} ${pos.z} -> ${err?.message || err}`)
+        return false
+      }
+    }
 
     const placementLoop = (async () => {
       while (active) {
         checkRuntimeStop(bot, config)
         const now = Date.now()
-        const rawAllowed = Math.floor((now - lastTickTime) / placeDelayMs)
+        const rawAllowed = placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : maxCatchup
 
         if (rawAllowed <= 0) {
-          await delay(pollMs)
+          await delay(pollMs > 0 ? pollMs : 1)
           continue
         }
 
-        lastTickTime += rawAllowed * placeDelayMs
+        lastTickTime = placeDelayMs > 0 ? lastTickTime + rawAllowed * placeDelayMs : now
         rawAllowedTotal += rawAllowed
         const allowed = Math.min(rawAllowed, maxCatchup)
         cappedTotal += Math.max(0, rawAllowed - allowed)
@@ -465,6 +494,7 @@ function createPlacementWorkload(deps) {
                   if (allowEmergencyRestock && haveNow <= 0) {
                     hardStops += 1
                     emergencyRestockBlock = target.blockName
+                    captureEmergencyRestockAnchor(target)
                     active = false
                     lastTickTime = Date.now()
                     break
@@ -507,7 +537,7 @@ function createPlacementWorkload(deps) {
           active = false
           break
         }
-        await delay(pollMs)
+        await delay(pollMs > 0 ? pollMs : 1)
       }
     })()
 
@@ -571,8 +601,10 @@ function createPlacementWorkload(deps) {
 
     if (allowEmergencyRestock && emergencyRestockBlock) {
       console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; stopping movement, refilling, and retrying remaining targets once.`)
+      stopPlacementMotion(bot)
       const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
       if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
+        await returnToEmergencyRestockAnchor()
         const Vec3Retry = bot.entity.position.constructor
         const remainingTargets = batchTargets.filter((target) => {
           const actual = bot.blockAt(new Vec3Retry(target.position.x, target.position.y, target.position.z))
