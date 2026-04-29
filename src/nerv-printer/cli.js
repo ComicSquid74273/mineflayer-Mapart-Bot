@@ -286,6 +286,13 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function observeBackgroundTask(promise) {
+  if (promise && typeof promise.catch === 'function') {
+    promise.catch(() => {})
+  }
+  return promise
+}
+
 class RuntimeStopRequestedError extends Error {
   constructor(detail = 'stopping-after-current-step') {
     super('runtime stop requested; returning to idle')
@@ -1219,7 +1226,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
     }
 
     const nextNbt = getNextNbtFile(config)
-  runtimeControl?.markRunStarted('runtime')
+    runtimeControl?.markRunStarted('runtime')
     dashboardRuntime?.setCurrentNbt(nextNbt ? path.basename(nextNbt) : null)
     dashboardRuntime?.setPhase('printing')
     try {
@@ -1239,8 +1246,19 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
         continue
       }
 
+      const nextQueuedNbt = config.files?.moveToFinishedFolder === true ? getNextNbtFile(config) : null
+      if (nextQueuedNbt && !isRuntimeStopRequested(config)) {
+        console.log(`[STATE] Continuing with next map: ${path.basename(nextQueuedNbt)}`)
+        dashboardRuntime?.setCurrentNbt(path.basename(nextQueuedNbt))
+        pendingStart = true
+        await delay(250)
+        continue
+      }
+
       dashboardRuntime?.setPhase('idle')
-      if (config.files?.moveToFinishedFolder !== true) {
+      if (config.files?.moveToFinishedFolder === true) {
+        console.log('[STATE] No queued NBT files found. Waiting idle.')
+      } else {
         await delay(1000)
       }
     } catch (err) {
@@ -7804,7 +7822,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
     maxLogs: 0
   }).map((entry) => entry.target))
 
-  const placementLoop = (async () => {
+  const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
@@ -7889,7 +7907,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 
       await delay(tickMs)
     }
-  })()
+  })())
 
   try {
     for (const checkpoint of checkpoints) {
@@ -8003,7 +8021,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   const maxInventoryDesyncHits = Math.max(1, toNumber(config.advanced?.scannerInventoryDesyncMaxHits, 3))
   const inventoryDesyncCooldownMs = Math.max(tickMs, toNumber(config.advanced?.scannerInventoryDesyncCooldownMs, 250))
 
-  const placementLoop = (async () => {
+  const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
@@ -8068,7 +8086,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
 
       await delay(tickMs)
     }
-  })()
+  })())
 
   try {
     for (const checkpoint of checkpoints) {
@@ -8482,7 +8500,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
   }
 
-  const placementLoop = (async () => {
+  const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (inlineRepairEnabled) {
@@ -8594,7 +8612,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       if (pollMs > 0) await delay(pollMs)
       else await delay(1)
     }
-  })()
+  })())
 
   try {
     for (const checkpoint of checkpoints) {
@@ -10692,7 +10710,7 @@ async function runMovingPlaceTest(bot, config) {
   let skipped = 0
   const processed = new Set()
 
-  const placementLoop = (async () => {
+  const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       const botPos = bot.entity.position
       let placementsThisTick = 0
@@ -10731,7 +10749,7 @@ async function runMovingPlaceTest(bot, config) {
 
       await delay(tickMs)
     }
-  })()
+  })())
 
   try {
     bot.setControlState('sprint', String(printer.sprintMode || 'always').toLowerCase() !== 'off')
@@ -10980,7 +10998,7 @@ async function runNervScannerTest(bot, config) {
   let skipped = 0
   const processed = new Set()
 
-  const placementLoop = (async () => {
+  const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
       if (allowPlacement) {
@@ -11012,7 +11030,7 @@ async function runNervScannerTest(bot, config) {
 
       await delay(tickMs)
     }
-  })()
+  })())
 
   try {
     for (let i = 0; i < checkpoints.length; i += 1) {
@@ -11091,7 +11109,7 @@ async function runNervWorkloadTest(bot, config) {
 
   const targetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
 
-  const placementLoop = (async () => {
+  const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       const now = Date.now()
       const elapsed = now - lastTickTime
@@ -11190,7 +11208,7 @@ async function runNervWorkloadTest(bot, config) {
 
       await delay(pollMs)
     }
-  })()
+  })())
 
   try {
     for (let i = 0; i < checkpoints.length; i += 1) {
@@ -14073,6 +14091,10 @@ function installPlatformSafety(bot, config) {
   if (bot.pathfinder?.goto && !bot.pathfinder.__nervPlatformGotoWrapped) {
     const originalGoto = bot.pathfinder.goto.bind(bot.pathfinder)
     bot.pathfinder.goto = async (goal) => {
+      if (isRuntimeStopRequested(config)) {
+        stopBotMovement(bot)
+        throw new RuntimeStopRequestedError('stopping-during-navigation')
+      }
       if (!bot.__nervAllowOffPlatformNavigation) {
         await waitForPlatformReady(bot, config, 'before-path')
       }
@@ -14080,6 +14102,10 @@ function installPlatformSafety(bot, config) {
         try {
           return await originalGoto(goal)
         } catch (err) {
+          if (isRuntimeStopRequested(config)) {
+            stopBotMovement(bot)
+            throw new RuntimeStopRequestedError('stopping-during-navigation')
+          }
           const message = String(err?.message || err || '')
           const goalChanged = message.toLowerCase().includes('goal was changed')
           const offPlatform = !bot.__nervAllowOffPlatformNavigation &&
