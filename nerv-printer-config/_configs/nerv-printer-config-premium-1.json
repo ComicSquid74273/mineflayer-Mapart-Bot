@@ -382,7 +382,7 @@
     "litematicRowVerifyEveryRows": 1,
     "litematicRowRepairThreshold": 1,
     "scannerPreSwapDelayMs": 10,
-    "scannerPostSwapDelayMs": 10,
+    "scannerPostSwapDelayMs": 250,
     "placementNoiseLogs": true,
     "scannerWorkloadMode": "litematic",
     "inventoryCycleTestWaitAfterMs": 5000,

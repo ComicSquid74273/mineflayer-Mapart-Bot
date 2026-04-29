@@ -2275,7 +2275,7 @@ function createDefaultConfig() {
       litematicRowVerifyEveryRows: 2,
       litematicRowRepairThreshold: 2,
       scannerPreSwapDelayMs: 0,
-      scannerPostSwapDelayMs: 0,
+      scannerPostSwapDelayMs: 250,
       placementNoiseLogs: true,
       pingDiagnosticsEnabled: true,
       pingDiagnosticsThresholdMs: 30,
@@ -3361,17 +3361,33 @@ async function waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs = 900, p
   return stack?.name === blockName && toNumber(stack.count, 0) > 0
 }
 
-async function waitForSelectedMaterialReady(bot, blockName, timeoutMs = 900, pollMs = 75) {
+function getSelectedHotbarStack(bot) {
+  const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+  return selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
+}
+
+function selectedMaterialMatches(bot, blockName) {
+  const selectedStack = getSelectedHotbarStack(bot)
+  const selectedMatches = selectedStack?.name === blockName && toNumber(selectedStack.count, 0) > 0
+  const heldMatches = String(bot.heldItem?.name || '') === blockName && toNumber(bot.heldItem?.count, 0) > 0
+  return selectedMatches && heldMatches
+}
+
+async function waitForSelectedMaterialReady(bot, blockName, timeoutMs = 900, pollMs = 75, stableMs = 0) {
   const deadline = Date.now() + Math.max(0, timeoutMs)
+  const requiredStableMs = Math.max(0, toNumber(stableMs, 0))
+  let stableSince = 0
   while (Date.now() <= deadline) {
-    const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
-    const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
-    if (String(bot.heldItem?.name || '') === blockName || selectedStack?.name === blockName) return true
+    if (selectedMaterialMatches(bot, blockName)) {
+      if (requiredStableMs <= 0) return true
+      if (!stableSince) stableSince = Date.now()
+      if (Date.now() - stableSince >= requiredStableMs) return true
+    } else {
+      stableSince = 0
+    }
     await delay(Math.max(25, pollMs))
   }
-  const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
-  const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
-  return String(bot.heldItem?.name || '') === blockName || selectedStack?.name === blockName
+  return requiredStableMs <= 0 && selectedMaterialMatches(bot, blockName)
 }
 
 async function selectHotbarMaterial(bot, config, blockName, options = {}) {
@@ -3381,7 +3397,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   const pollMs = Math.max(25, toNumber(advanced.inventoryDesyncEquipPollMs, 75))
   const hotbarIndex = chooseMaterialHotbarIndex(bot, blockName)
   const preSwapDelayMs = fastSwap ? toNumber(advanced.scannerPreSwapDelayMs, 0) : toNumber(advanced.preSwapDelayMs, 100)
-  const postSwapDelayMs = fastSwap ? toNumber(advanced.scannerPostSwapDelayMs, 0) : toNumber(advanced.postSwapDelayMs, 100)
+  const postSwapDelayMs = fastSwap ? toNumber(advanced.scannerPostSwapDelayMs, 250) : toNumber(advanced.postSwapDelayMs, 100)
 
   if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
 
@@ -3393,8 +3409,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
     if (existingHotbar >= 0) {
       if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(existingHotbar)
       else bot.quickBarSlot = existingHotbar
-      if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs, pollMs)) return false
-      if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
+      if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs + postSwapDelayMs, pollMs, postSwapDelayMs)) return false
       return true
     }
 
@@ -3405,8 +3420,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
       const sourceHotbarIndex = source.slot - 36
       if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(sourceHotbarIndex)
       else bot.quickBarSlot = sourceHotbarIndex
-      if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs, pollMs)) return false
-      if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
+      if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs + postSwapDelayMs, pollMs, postSwapDelayMs)) return false
       return true
     }
 
@@ -3415,8 +3429,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
     if (!swapped) return false
     if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(hotbarIndex)
     else bot.quickBarSlot = hotbarIndex
-    if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs, pollMs)) return false
-    if (postSwapDelayMs > 0) await delay(postSwapDelayMs)
+    if (!await waitForSelectedMaterialReady(bot, blockName, timeoutMs + postSwapDelayMs, pollMs, postSwapDelayMs)) return false
     return true
   } finally {
     if (wasSprinting) bot.setControlState('sprint', true)
@@ -3446,7 +3459,7 @@ async function recoverMissingItemInventoryDesync(bot, config, blockName, label =
   const advanced = config.advanced || {}
   const have = countInventoryItems(bot, blockName)
   if (have <= 0) return false
-  if (String(bot.heldItem?.name || '') === blockName || findHotbarIndexForItem(bot, blockName) === bot.quickBarSlot) return true
+  if (selectedMaterialMatches(bot, blockName)) return true
 
   const attempts = Math.max(1, toNumber(advanced.inventoryDesyncEquipAttempts, 2))
   const timeoutMs = Math.max(100, toNumber(advanced.inventoryDesyncEquipTimeoutMs, 900))
@@ -3464,9 +3477,7 @@ async function recoverMissingItemInventoryDesync(bot, config, blockName, label =
 
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
-      const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
-      if (String(bot.heldItem?.name || '') === blockName || selectedStack?.name === blockName) {
+      if (selectedMaterialMatches(bot, blockName)) {
         if (config.errorHandling?.logErrors !== false) {
           console.log(`[INVENTORY-DESYNC-RECOVER] ${label}: selected ${blockName}; inventory=${countInventoryItems(bot, blockName)}.`)
         }
@@ -7192,9 +7203,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
 
   if (String(bot.heldItem?.name || '') !== target.blockName) {
     const equipped = await equipMaterial(bot, config, target.blockName, { fastSwap: isFastNoWaitPlacement })
-    const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
-    const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
-    const selectedMaterialReady = selectedStack?.name === target.blockName || String(bot.heldItem?.name || '') === target.blockName
+    const selectedMaterialReady = selectedMaterialMatches(bot, target.blockName)
     if (!equipped || !selectedMaterialReady) {
       if (countInventoryItems(bot, target.blockName) > 0) {
         return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
@@ -7234,6 +7243,12 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       ? requiresSneakPlacementSupport(attempt?.block)
       : (sneakOnDispenserOnly ? requiresSneakPlacementSupport(attempt?.block) : true)
     try {
+      if (!selectedMaterialMatches(bot, target.blockName)) {
+        if (countInventoryItems(bot, target.blockName) > 0) {
+          return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
+        }
+        return { state: 'skip', reason: `missing-item-${target.blockName}` }
+      }
       if (shouldSneak) {
         bot.setControlState('sneak', true)
         await new Promise(r => setTimeout(r, 60))
