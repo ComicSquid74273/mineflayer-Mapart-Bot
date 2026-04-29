@@ -308,6 +308,7 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.preRestockDelayMs` | `80` | Delay before restock interaction. | Increase if chest opens before bot is ready. |
 | `advanced.inventoryActionDelayMs` | `35` | Delay between inventory clicks/actions. | Increase if item transfers are unreliable. |
 | `advanced.postRestockDelayMs` | `120` | Delay after restock. | Increase if inventory update arrives late. |
+| `advanced.restockPostCloseInventorySyncMs` | `2000` | Max wait after closing a restock chest for local inventory/hotbar to show the moved stack. | Prevents printing from resuming from chest-window state before the bot can actually select the item. |
 | `advanced.restockFailureCooldownMs` | `250` | Cooldown after failed material restock. | Increase if bot loops too fast on empty chests. |
 | `advanced.predictiveRestock` | `true` | Plan inventory before placement window. | Keep `true`; prevents mid-row emergency refill. |
 | `advanced.dumpUnneededBeforeRefill` | `true` | Dump residue/unneeded carpets before refill. | Keep `true` for map changes and residue cleanup. |
@@ -407,6 +408,7 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.placementStallRecoveryAttempts` | `3` | Slow confirmed placements to try during local stall recovery. | Set `0` to skip straight to stall skip. |
 | `advanced.placementStallRecoveryConfirmMs` | `180` | Confirmation window for stall recovery placement attempts. | Raise if recovery logs show late confirmations. |
 | `advanced.placementStallEmergencyRestock` | `true` | Trigger emergency restock/refresh if slow stall recovery cannot confirm placement. | Experimental recovery for 6b6t placement refusal windows. |
+| `advanced.emergencyRestockReturnRange` | `3` | Range used when returning to the stalled print target after emergency restock. | Keep near `placeRange - 1`; lower is more exact but can path more. |
 | `advanced.placementStallSkipRadiusBlocks` | `5` | Radius around the stalled target to skip in the main print pass. | Keep near `placeRange + 1`; final repair handles skipped blocks. |
 | `advanced.scannerPreSwapDelayMs` | `10` | Delay before item swap in scanner placement. | Increase if held item updates late. |
 | `advanced.scannerPostSwapDelayMs` | `50` | Required stable selected-material window after scanner item swap. | Increase only if `held-item-desync-*` appears despite inventory. |

@@ -2202,6 +2202,7 @@ function createDefaultConfig() {
       preRestockDelayMs: 500,
       inventoryActionDelayMs: 100,
       postRestockDelayMs: 500,
+      restockPostCloseInventorySyncMs: 2000,
       restockFailureCooldownMs: 8000,
       predictiveRestock: true,
       dumpUnneededBeforeRefill: true,
@@ -2270,6 +2271,7 @@ function createDefaultConfig() {
       placementStallRecoverySettleMs: 120,
       placementStallRecoveryCooldownMs: 750,
       placementStallEmergencyRestock: true,
+      emergencyRestockReturnRange: 3,
       placementStallSkipRadiusBlocks: 5,
       litematicRowSettleMs: 150,
       litematicRowVerifyEveryRows: 2,
@@ -3779,6 +3781,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         // Avoid high-level withdraw helpers: on busy servers they can report stale inventory and make
         // us abandon a chest that already accepted the click.
         let observedHave = haveAtStart
+        let maxWindowHave = haveAtStart
         const targetCount = haveAtStart + willPullTotal
         let stoppedForInventoryFull = false
         let stoppedForInventorySync = false
@@ -3832,6 +3835,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               sameChestRetrySettleMs
             )
             observedHave = Math.max(observedHave, haveAfterWait, windowHave)
+            maxWindowHave = Math.max(maxWindowHave, windowHave)
 
             if (config.errorHandling?.logErrors !== false) {
               console.log(`[RESTOCK-BURST] ${blockName}: quickMovedStacks=${burst.stacksMoved} windowHave=${windowHave} invHave=${haveAfterWait} target=${targetCount}`)
@@ -3905,9 +3909,18 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           if (haveNow >= haveAtStart + willPullTotal || haveNow >= desiredItemCount) {
             restockFailureCache.delete(blockName)
             unavailableMaterialCache.delete(blockName)
-            const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
-            if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
-            return true
+            if (container) {
+              try { container.close() } catch { }
+              container = null
+            }
+            return await waitForRestockInventoryReady(
+              bot,
+              config,
+              blockName,
+              haveAtStart,
+              Math.min(desiredItemCount, haveAtStart + willPullTotal),
+              'inventory-full-success'
+            )
           }
           restockFailureCache.set(blockName, Date.now())
           console.log(`[RESTOCK-WARN] Stopping ${blockName} restock because inventory is full: have=${haveNow} target=${desiredItemCount}.`)
@@ -3917,20 +3930,25 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         if (observedHave >= haveAtStart + willPullTotal || observedHave >= desiredItemCount ||
           countInventoryItems(bot, blockName) >= haveAtStart + willPullTotal ||
           countInventoryItems(bot, blockName) >= desiredItemCount) {
-          await waitForInventoryCountChangeOrTarget(
-            bot,
-            blockName,
-            haveAtStart,
-            Math.min(desiredItemCount, haveAtStart + willPullTotal),
-            Math.max(250, sameChestRetrySettleMs),
-            sameChestRetryPollMs,
-            sameChestRetrySettleMs
-          )
-          const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
-          if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
           restockFailureCache.delete(blockName)
           unavailableMaterialCache.delete(blockName)
-          return true
+          if (container) {
+            try { container.close() } catch { }
+            container = null
+          }
+          const expectedReadyCount = Math.min(
+            desiredItemCount,
+            haveAtStart + willPullTotal,
+            Math.max(maxWindowHave, countInventoryItems(bot, blockName))
+          )
+          return await waitForRestockInventoryReady(
+            bot,
+            config,
+            blockName,
+            haveAtStart,
+            expectedReadyCount,
+            maxWindowHave > countInventoryItems(bot, blockName) ? 'window-confirmed' : 'inventory-confirmed'
+          )
         }
 
           if (stoppedForInventorySync) {
@@ -3967,11 +3985,16 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           sameChestRetrySettleMs
         )
         if (haveAfterRetryWait >= desiredItemCount || haveAfterRetryWait >= retryTargetCount) {
-          const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
-          if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
           restockFailureCache.delete(blockName)
           unavailableMaterialCache.delete(blockName)
-          return true
+          return await waitForRestockInventoryReady(
+            bot,
+            config,
+            blockName,
+            retryStartHave,
+            Math.min(desiredItemCount, retryTargetCount || desiredItemCount),
+            'same-chest-retry'
+          )
         }
         if (haveAfterRetryWait > retryStartHave && config.errorHandling?.logErrors !== false) {
           console.log(`[RESTOCK-WARN] ${blockName} inventory caught up after chest retry wait: have=${haveAfterRetryWait} target=${desiredItemCount}. Reopening same chest to finish remaining deficit.`)
@@ -6645,6 +6668,49 @@ function inventoryCapacityForItem(bot, itemName) {
   return capacity
 }
 
+async function waitForRestockInventoryReady(bot, config, blockName, beforeCount, targetCount, reason = 'restock') {
+  const advanced = config.advanced || {}
+  const expectedCount = Math.max(0, toNumber(targetCount, 0))
+  const before = Math.max(0, toNumber(beforeCount, 0))
+  const timeoutMs = Math.max(250, toNumber(advanced.restockPostCloseInventorySyncMs, toNumber(advanced.restockInventorySyncWaitMs, 2000)))
+  const pollMs = Math.max(25, toNumber(advanced.restockSameChestRetryPollMs, 100))
+  const settleMs = Math.max(0, toNumber(advanced.restockSameChestRetrySettleMs, 150))
+  let haveNow = countInventoryItems(bot, blockName)
+
+  if (haveNow < expectedCount && config.errorHandling?.logErrors !== false) {
+    console.log(`[RESTOCK-SYNC-WAIT] ${blockName} reason=${reason} invHave=${haveNow} target=${expectedCount} before=${before} timeoutMs=${timeoutMs}`)
+  }
+
+  haveNow = await waitForInventoryCountChangeOrTarget(
+    bot,
+    blockName,
+    Math.min(before, haveNow),
+    expectedCount,
+    timeoutMs,
+    pollMs,
+    settleMs
+  )
+
+  const inventoryItem = findBestInventorySlotForItem(bot, blockName)
+  const selected = inventoryItem
+    ? await selectHotbarMaterial(bot, config, blockName, { fastSwap: false })
+    : false
+  const ready = haveNow >= expectedCount && selectedMaterialMatches(bot, blockName)
+
+  if (ready) {
+    if (config.errorHandling?.logErrors !== false && haveNow > before) {
+      console.log(`[RESTOCK-SYNC-OK] ${blockName} reason=${reason} invHave=${haveNow} target=${expectedCount} selected=${bot.heldItem?.name || 'empty'}`)
+    }
+    return true
+  }
+
+  if (config.errorHandling?.logErrors !== false) {
+    const selectedName = getSelectedHotbarStack(bot)?.name || 'empty'
+    console.log(`[RESTOCK-SYNC-WARN] ${blockName} reason=${reason} invHave=${haveNow} target=${expectedCount} selected=${selectedName} held=${bot.heldItem?.name || 'empty'} selectable=${Boolean(inventoryItem)}.`)
+  }
+  return false
+}
+
 function countEmptyInventorySlots(bot) {
   const inventory = bot.inventory || {}
   const slots = Array.isArray(inventory.slots) ? inventory.slots : []
@@ -8251,6 +8317,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let maxAllowedSeen = 0
   let emergencyRestockBlock = null
   let emergencyRestockReason = 'unavailable during placement'
+  let emergencyRestockAnchor = null
   let prevCheckpointPos = null
   const seen = new Set()
   const stallSkipped = new Set()
@@ -8272,6 +8339,38 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
 
   const getTargetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
+  const captureEmergencyRestockAnchor = (target, reason) => {
+    if (!target?.position) return
+    const botPos = bot?.entity?.position
+    emergencyRestockAnchor = {
+      target,
+      reason,
+      botPos: botPos ? { x: botPos.x, y: botPos.y, z: botPos.z } : null,
+      goal: currentGoal ? { x: currentGoal.x, y: currentGoal.y, z: currentGoal.z } : null,
+      action: currentAction || ''
+    }
+  }
+  const returnToEmergencyRestockAnchor = async () => {
+    const target = emergencyRestockAnchor?.target
+    if (!target?.position) return false
+    const anchorRange = Math.max(0.75, toNumber(advanced.emergencyRestockReturnRange, Math.max(1.25, placeRange - 1)))
+    const pos = target.position
+    const botPos = bot?.entity?.position
+    const beforeLabel = botPos ? `${botPos.x.toFixed(2)} ${botPos.y.toFixed(2)} ${botPos.z.toFixed(2)}` : 'unknown'
+    console.log(`[NERV-WORKLOAD-RESTOCK-RETURN] block=${emergencyRestockBlock || target.blockName} target=${pos.x} ${pos.y} ${pos.z} range=${anchorRange} reason=${emergencyRestockAnchor.reason || 'restock'} from=${beforeLabel}`)
+    try {
+      bot.setControlState('sprint', false)
+      bot.setControlState('forward', false)
+      bot.setControlState('back', false)
+      bot.setControlState('left', false)
+      bot.setControlState('right', false)
+      await bot.pathfinder.goto(new GoalNear(pos.x, pos.y, pos.z, anchorRange))
+      return true
+    } catch (err) {
+      console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] target=${pos.x} ${pos.y} ${pos.z} -> ${err?.message || err}`)
+      return false
+    }
+  }
   const isTransientPlacementReason = (reason) => {
     const text = String(reason || '')
     return text === 'unconfirmed-place' || text.startsWith('held-item-desync-')
@@ -8480,6 +8579,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             hardStops += 1
             emergencyRestockBlock = target.blockName
             emergencyRestockReason = 'missing inventory during stall recovery'
+            captureEmergencyRestockAnchor(target, emergencyRestockReason)
             active = false
           }
           return false
@@ -8537,6 +8637,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         hardStops += 1
         emergencyRestockBlock = primary.blockName
         emergencyRestockReason = `stall recovery failed after ${failedStalledMs}ms without confirmed placement`
+        captureEmergencyRestockAnchor(primary, emergencyRestockReason)
         active = false
         console.log(`[NERV-WORKLOAD-STALL-RESTOCK] block=${emergencyRestockBlock} reason="${emergencyRestockReason}"; forcing emergency restock/refresh before retry.`)
         logPingDiagnostic(bot, config, 'workload-stall-restock-requested', {
@@ -8691,6 +8792,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                   hardStops += 1
                   emergencyRestockBlock = target.blockName
                   emergencyRestockReason = 'missing item during placement'
+                  captureEmergencyRestockAnchor(target, emergencyRestockReason)
                   active = false
                   lastTickTime = Date.now()
                   break
@@ -8857,6 +8959,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; stopping movement, refilling, and retrying remaining targets once.`)
     const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
     if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
+      await returnToEmergencyRestockAnchor()
       const Vec3Retry = bot.entity.position.constructor
       const remainingTargets = batchTargets.filter((target) => {
         const actual = bot.blockAt(new Vec3Retry(target.position.x, target.position.y, target.position.z))
