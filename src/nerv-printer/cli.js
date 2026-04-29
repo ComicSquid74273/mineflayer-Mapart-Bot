@@ -2160,6 +2160,7 @@ function createDefaultConfig() {
       autoEatFoodItem: 'cooked_beef',
       anvilPillarMinCount: 3,
       anvilPillarScanLimit: 16,
+      resetChestWaitMs: 500,
       sneakOnDispenserOnly: true,
       postPrintWorkflowEnabled: true,
       postPrintFillMapEnabled: true,
@@ -5051,7 +5052,10 @@ async function interactWithConfiguredBlock(bot, config, node, label = 'configure
 
   if (isContainer) {
     const container = await bot.openContainer(block)
-    await delay(toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+    const openDelayMs = label === 'reset-block'
+      ? toNumber(config.advanced?.resetChestWaitMs, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+      : toNumber(config.advanced?.postPrintInteractionDelayMs, 200)
+    await delay(openDelayMs)
     try { container.close() } catch { }
     return name
   }
@@ -8917,7 +8921,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
 
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
   const cliPostPrintTestOnly = hasCliFlag('--test-post-print') || hasCliFlag('--post-print-test-only')
-  const postPrintTestOnly = printer.postPrintTestOnly === true || cliPostPrintTestOnly
+  const cliPostPrintFullTest = hasCliFlag('--test-post-print-full') || hasCliFlag('--post-print-test-full')
+  const postPrintTestOnly = printer.postPrintTestOnly === true || cliPostPrintTestOnly || cliPostPrintFullTest
   const scannerWorkloadMode = String(config.advanced?.scannerWorkloadMode || 'litematic').toLowerCase()
   const isLitematicBandMode = scannerWorkloadMode === 'litematic' || scannerWorkloadMode === 'reactive'
 
@@ -8932,6 +8937,15 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         postPrintWalkToCenter: false
       }
       console.log('[TEST] --test-post-print disables reset and final center walk for isolated post-print testing.')
+    } else if (cliPostPrintFullTest) {
+      config.advanced = {
+        ...(config.advanced || {}),
+        postPrintResetEnabled: true,
+        postPrintSkipResetInteraction: false,
+        postPrintWalkToCenter: true,
+        resetChestWaitMs: 500
+      }
+      console.log('[TEST] --test-post-print-full keeps reset and final center walk enabled; reset chest stays open for 500ms.')
     }
     resumePostPrintStep = 'withdraw'
     if (progressEnabled) {
@@ -16144,18 +16158,31 @@ async function start() {
     }
     console.log('[CONTROL] wait-for-command mode enabled. The bot will connect and remain idle until a dashboard or terminal start command is issued.')
   }
-  if (hasCliFlag('--test-post-print') || hasCliFlag('--post-print-test-only')) {
+  const cliPostPrintTestOnly = hasCliFlag('--test-post-print') || hasCliFlag('--post-print-test-only')
+  const cliPostPrintFullTest = hasCliFlag('--test-post-print-full') || hasCliFlag('--post-print-test-full')
+  if (cliPostPrintTestOnly || cliPostPrintFullTest) {
     config.printer = {
       ...(config.printer || {}),
       startOnSpawn: true,
       postPrintTestOnly: true
     }
-    config.advanced = {
-      ...(config.advanced || {}),
-      postPrintResetEnabled: false,
-      postPrintWalkToCenter: false
+    if (cliPostPrintTestOnly) {
+      config.advanced = {
+        ...(config.advanced || {}),
+        postPrintResetEnabled: false,
+        postPrintWalkToCenter: false
+      }
+      console.log('[TEST-POSTPRINT] Running post-print workflow only. Printing, reset, and final center walk are disabled.')
+    } else {
+      config.advanced = {
+        ...(config.advanced || {}),
+        postPrintResetEnabled: true,
+        postPrintSkipResetInteraction: false,
+        postPrintWalkToCenter: true,
+        resetChestWaitMs: 500
+      }
+      console.log('[TEST-POSTPRINT] Running post-print workflow only. Reset and final center walk are enabled; reset chest stays open for 500ms.')
     }
-    console.log('[TEST-POSTPRINT] Running post-print workflow only. Printing, reset, and final center walk are disabled.')
   }
   const reconnect = getReconnectConfig(config)
   logStartupSummary(config, reconnect)

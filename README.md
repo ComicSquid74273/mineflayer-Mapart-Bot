@@ -253,7 +253,7 @@ Print movement, placement, and row/batch behavior.
 | `printer.startDelayMs` | `1500` | Wait after spawn before starting. | Increase if chunks/login are slow. |
 | `printer.allowJump` | `false` | Enables jump/parkour pathing if `true`. | Keep `false` on flat printer platforms. |
 | `printer.placeWhileSprinting` | `true` | Allows placing during movement. | Keep `true` for NERV-style continuous placement. |
-| `printer.postPrintTestOnly` | `false` | Skip printing and run post-print workflow only. | For CLI testing, `npm run test:post-print` also disables reset and final center walk. |
+| `printer.postPrintTestOnly` | `false` | Skip printing and run post-print workflow only. | For CLI testing, `npm run test:post-print` disables reset/center; `npm run test:post-print:full:6b6t` includes reset and center on 6b6t. |
 | `printer.printOffset.x/y/z` | `0,0,-1` | Shift all print targets. | Wrong offset causes full-map misalignment. |
 | `printer.linesPerRun` | `3` | Width of one print run in map columns/lines. | Higher is faster but can skip more; `3` is stable. |
 | `printer.placeRange` | `5` | Placement scan/range radius. | Higher sees more targets; too high can pick awkward targets. |
