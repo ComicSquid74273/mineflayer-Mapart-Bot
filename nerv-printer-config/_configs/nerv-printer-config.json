@@ -340,7 +340,7 @@
     "dumpTestStationWaitMs": 7000,
     "dumpTestTossAtEachStation": true,
     "dumpPathThinkTimeoutMs": 5000,
-    "dumpAlreadyNearRange": 4,
+    "dumpAlreadyNearRange": 2,
     "dumpGoalRange": 1,
     "multiDumpLockStaleMs": 45000,
     "dumpReaimEveryStacks": 2,
