@@ -1325,9 +1325,10 @@ async function onUpload(event) {
   state.uploadBusy = true
   let completed = 0
   let failed = 0
+  let firstError = ''
 
   try {
-    for (const { file, target } of fileAssignments) {
+    for (const { file, target, hostLabel } of fileAssignments) {
       elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name} -> ${target}`
       try {
         const base64 = await fileToBase64(file)
@@ -1339,6 +1340,7 @@ async function onUpload(event) {
         completed += 1
       } catch (error) {
         failed += 1
+        if (!firstError) firstError = error.message
         pushEvent('error', `Upload failed for ${file.name} -> ${target}: ${error.message}`)
       }
     }
@@ -1346,13 +1348,13 @@ async function onUpload(event) {
     if (distribute) {
       const targets = [...new Set(fileAssignments.map((a) => a.target))]
       elements.uploadStatus.textContent = failed > 0
-        ? `Upload finished: ${completed} succeeded, ${failed} failed across ${targets.length} ${targetType}(s).`
+        ? `Upload finished: ${completed} succeeded, ${failed} failed across ${targets.length} ${targetType}(s). First error: ${firstError || 'unknown'}`
         : `${completed} file(s) distributed across ${targets.length} ${targetType}(s).`
       pushEvent('info', `Distributed ${completed}/${files.length} files across ${targetType}s: ${targets.join(', ')}${failed ? ` (${failed} failed)` : ''}`)
     } else {
       const target = fileAssignments[0]?.target || ''
       elements.uploadStatus.textContent = failed > 0
-        ? `Upload finished: ${completed} succeeded, ${failed} failed.`
+        ? `Upload finished: ${completed} succeeded, ${failed} failed. First error: ${firstError || 'unknown'}`
         : `${completed} file(s) uploaded and assigned to ${targetType} ${target}.`
       pushEvent('info', `Uploaded -> ${target}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
     }

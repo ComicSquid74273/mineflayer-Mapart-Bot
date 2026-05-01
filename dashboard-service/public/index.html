@@ -64,7 +64,7 @@
         <div class="panel-header">
           <div>
             <p class="panel-kicker">Delivery</p>
-            <h2>Upload NBT To Node</h2>
+            <h2>Upload NBT</h2>
           </div>
         </div>
         <form id="uploadForm" class="stack-form">
@@ -75,18 +75,18 @@
           <label>
             <span>Target type</span>
             <select id="uploadTargetType">
-              <option value="node">Nodes / shared folders</option>
               <option value="bot">Individual bots</option>
+              <option value="node">Nodes / shared folders</option>
             </select>
           </label>
           <label class="checkbox-row">
             <input id="distributeCheckbox" type="checkbox">
-            <span id="distributeLabel">Distribute equally across all nodes</span>
+            <span id="distributeLabel">Distribute equally across all online bots</span>
           </label>
           <label id="uploadTargetSelectLabel">
-            <span id="uploadTargetSelectText">Target node</span>
+            <span id="uploadTargetSelectText">Target bot</span>
             <select id="uploadNodeSelect" required>
-              <option value="">Select node</option>
+              <option value="">Select bot</option>
             </select>
           </label>
           <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload NBT</button>

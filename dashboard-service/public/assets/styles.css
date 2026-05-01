@@ -450,6 +450,10 @@ h1 {
   gap: 8px;
 }
 
+.stack-form label.checkbox-row {
+  flex-direction: row;
+}
+
 .checkbox-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

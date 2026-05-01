@@ -12,7 +12,7 @@ Version 1 is intentionally narrow:
 
 - start and stop print-work commands for already running bots
 - compact per-bot status
-- NBT upload with node/shared-folder assignment or individual bot assignment
+- NBT upload with individual bot assignment or node/shared-folder assignment
 - bot command polling and result reporting
 - browser UI for operators
 
@@ -26,7 +26,7 @@ The service stores JSON metadata under `data/` and uploaded NBT files under `dat
 
 Operator accounts live in `data/operators.json` as plain JSON records so you can inspect and edit them directly when needed.
 
-Uploaded NBTs can be assigned to nodes by `hostLabel` or to individual bots. Node assignment is best when bots on that node share the same `nbtFolder`; one bot claims the file and downloads it into that shared folder. Bot assignment is best when multiple bot runtimes on the same IP should receive separate files.
+Uploaded NBTs can be assigned to individual bots or to nodes by `hostLabel`. Bot assignment is the default and is best when multiple bot runtimes on the same IP should receive separate files. Node assignment is best when bots on that node share the same `nbtFolder`; one bot claims the file and downloads it into that shared folder.
 
 ## Run
 

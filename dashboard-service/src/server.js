@@ -58,7 +58,7 @@ function sendFile(res, filePath) {
   const extension = path.extname(filePath).toLowerCase()
   const contentType = STATIC_TYPES[extension] || 'application/octet-stream'
   const headers = { 'content-type': contentType }
-  if (extension === '.html') headers['cache-control'] = 'no-store'
+  if (['.html', '.js', '.css'].includes(extension)) headers['cache-control'] = 'no-store'
   res.writeHead(200, headers)
   fs.createReadStream(filePath).pipe(res)
 }
