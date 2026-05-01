@@ -140,7 +140,8 @@ function createStore(baseDir) {
       segmentLastSeenAt: String(input.segmentLastSeenAt || '').trim() || null,
       botNames: Array.isArray(input.botNames)
         ? input.botNames.map((item) => String(item || '').trim()).filter(Boolean)
-        : []
+        : [],
+      maxProgressPercent: Math.min(100, Math.max(0, toNumber(input.maxProgressPercent, 0)))
     }
   }
 
@@ -240,10 +241,13 @@ function createStore(baseDir) {
         countedLastSeenAtMs: 0,
         lastSeenAt: statusAt || nowIso(),
         lastSeenAtMs: statusAtMs || Date.now(),
-        botNames: []
+        botNames: [],
+        maxProgressPercent: 0
       }
 
       current.botCount += 1
+      const botProgressPercent = toNumber(bot?.progress?.percent, 0)
+      if (botProgressPercent > current.maxProgressPercent) current.maxProgressPercent = botProgressPercent
       if (countedPhase) {
         current.activeBotCount += 1
         if (statusAtMs && (!current.countedStartedAtCandidateMs || statusAtMs < current.countedStartedAtCandidateMs)) {
@@ -277,7 +281,7 @@ function createStore(baseDir) {
     }
   }
 
-  function recordCompletedNodeRun(record, completedRun) {
+  function recordCompletedNodeRun(record, completedRun, wasCompleted = false) {
     const startedAtMs = toTimestamp(completedRun.startedAt)
     const completedAtMs = Math.max(startedAtMs, toTimestamp(completedRun.completedAt))
     const durationMs = Math.max(0, toNumber(completedRun.durationMs, Math.max(0, completedAtMs - startedAtMs)))
@@ -292,11 +296,13 @@ function createStore(baseDir) {
     if (!historyEntry) return record
 
     const next = createNodeTimingRecord(record)
-    next.totalCompletedMaps += 1
-    next.totalDurationMs += historyEntry.durationMs
-    next.averageDurationMs = next.totalCompletedMaps > 0
-      ? Math.round(next.totalDurationMs / next.totalCompletedMaps)
-      : 0
+    if (wasCompleted) {
+      next.totalCompletedMaps += 1
+      next.totalDurationMs += historyEntry.durationMs
+      next.averageDurationMs = next.totalCompletedMaps > 0
+        ? Math.round(next.totalDurationMs / next.totalCompletedMaps)
+        : 0
+    }
     next.recentRuns = [...next.recentRuns, historyEntry].slice(-12)
     next.updatedAt = historyEntry.completedAt
     return next
@@ -335,13 +341,14 @@ function createStore(baseDir) {
 
     if (previousActiveRun && (!snapshotActiveRun || snapshotActiveRun.fileName !== previousActiveRun.fileName)) {
       const closedRun = closeTimingSegment(previousActiveRun, previousActiveRun.segmentLastSeenAt || snapshot.lastHostStatusAt || nowIso())
+      const wasCompleted = (previousActiveRun.maxProgressPercent || 0) >= 100
       nextRecord = recordCompletedNodeRun(nextRecord, {
         fileName: closedRun?.fileName || previousActiveRun.fileName,
         startedAt: closedRun?.startedAt || previousActiveRun.startedAt,
         completedAt: snapshotActiveRun?.countedStartedAtCandidate || snapshot.lastHostStatusAt || previousActiveRun.lastSeenAt || nowIso(),
         durationMs: closedRun?.accumulatedActiveMs || 0,
         botNames: closedRun?.botNames || previousActiveRun.botNames
-      })
+      }, wasCompleted)
       nextRecord.activeRun = null
     }
 
@@ -359,14 +366,16 @@ function createStore(baseDir) {
           segmentLastSeenAt: snapshotActiveRun.activeBotCount > 0
             ? (snapshotActiveRun.countedLastSeenAt || snapshot.lastHostStatusAt || nowIso())
             : null,
-          botNames: snapshotActiveRun.botNames
+          botNames: snapshotActiveRun.botNames,
+          maxProgressPercent: snapshotActiveRun.maxProgressPercent || 0
         })
       } else {
         let activeRun = sanitizeTimingRun({
           ...nextRecord.activeRun,
           lastSeenAt: snapshotActiveRun.lastSeenAt || nextRecord.activeRun.lastSeenAt,
           activeBotCount: snapshotActiveRun.activeBotCount,
-          botNames: snapshotActiveRun.botNames
+          botNames: snapshotActiveRun.botNames,
+          maxProgressPercent: Math.max(nextRecord.activeRun.maxProgressPercent || 0, snapshotActiveRun.maxProgressPercent || 0)
         })
         if (snapshotActiveRun.activeBotCount > 0) {
           activeRun = sanitizeTimingRun({
