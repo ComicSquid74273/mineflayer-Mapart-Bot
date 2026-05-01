@@ -311,6 +311,11 @@ function isRuntimeStopError(err) {
   return err?.code === 'RUNTIME_STOP_REQUESTED' || err instanceof RuntimeStopRequestedError
 }
 
+function isGoalChangedError(err) {
+  return String(err?.message || err || '').toLowerCase().includes('goal was changed') ||
+    String(err?.message || err || '').toLowerCase().includes('goalchanged')
+}
+
 function assertRuntimeContinue(bot, config, detail = 'stopping-after-current-step') {
   if (!isRuntimeStopRequested(config)) return
   const dashboardRuntime = config?.__dashboardRuntime
@@ -4191,22 +4196,44 @@ async function gotoWithTemporaryThinkTimeout(bot, goal, timeoutMs) {
   }
 }
 
-async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path') {
+async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path', options = {}) {
   const limitMs = Math.max(1000, toNumber(timeoutMs, 30000))
+  const pollMs = Math.max(100, toNumber(options.pollMs, 250))
+  const shouldPauseTimeout = typeof options.shouldPauseTimeout === 'function'
+    ? options.shouldPauseTimeout
+    : null
   let timeoutId = null
   try {
     await Promise.race([
       bot.pathfinder.goto(goal),
       new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-        try { bot.pathfinder?.stop?.() } catch { }
-        try { bot.pathfinder?.setGoal?.(null) } catch { }
+        let activeElapsedMs = 0
+        let lastCheckAt = Date.now()
+        timeoutId = setInterval(() => {
+          const now = Date.now()
+          const elapsed = now - lastCheckAt
+          lastCheckAt = now
+
+          let paused = false
+          try {
+            paused = shouldPauseTimeout ? shouldPauseTimeout() === true : false
+          } catch {
+            paused = false
+          }
+
+          if (paused) return
+
+          activeElapsedMs += elapsed
+          if (activeElapsedMs < limitMs) return
+
+          try { bot.pathfinder?.stop?.() } catch { }
+          try { bot.pathfinder?.setGoal?.(null) } catch { }
           reject(new Error(`${label}-timeout-${limitMs}ms`))
-        }, limitMs)
+        }, pollMs)
       })
     ])
   } finally {
-    if (timeoutId) clearTimeout(timeoutId)
+    if (timeoutId) clearInterval(timeoutId)
   }
 }
 
@@ -8538,6 +8565,25 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
     return selectedStack?.name || 'empty'
   }
+  const getWorkloadRuntime = (reason) => classifyRuntimePosition(bot, config, reason)
+  const isWorkloadPlatformReady = (runtime = null) => {
+    if (config.advanced?.platformWatchdogEnabled === false || getPlatformBounds(config) == null) return true
+    const resolved = runtime || getWorkloadRuntime('workload-platform-check')
+    if (resolved?.classification?.platform === true) return true
+    const pos = bot?.entity?.position
+    return isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)
+  }
+  const waitForWorkloadPlatformReady = async (reason) => {
+    if (isWorkloadPlatformReady()) return true
+    const runtime = getWorkloadRuntime(reason)
+    const state = runtime?.classification?.state || 'unknown'
+    const pos = formatBotPosition(bot)
+    console.log(`[NERV-WORKLOAD-PLATFORM-HOLD] reason=${reason} state=${state} pos=${pos}; pausing placement until platform is ready.`)
+    stopBotMovement(bot)
+    await waitForPlatformReady(bot, config, reason)
+    lastTickTime = Date.now()
+    return isWorkloadPlatformReady()
+  }
   const chooseStallRecoveryTargets = () => {
     const selected = []
     const selectedKeys = new Set()
@@ -8768,6 +8814,15 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
+      if (!isWorkloadPlatformReady()) {
+        if (!checkpointMoveInProgress) {
+          await waitForWorkloadPlatformReady('workload-placement-loop')
+        } else {
+          lastTickTime = Date.now()
+          await delay(Math.max(250, pollMs || 0))
+        }
+        continue
+      }
       if (inlineRepairEnabled) {
         scanNearbyRepairAlerts()
       }
@@ -8898,30 +8953,52 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     for (const checkpoint of checkpoints) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (emergencyRestockBlock) break
-      currentGoal = checkpoint.position
-      currentAction = checkpoint.action
-      currentActiveCols = checkpoint.activeCols
-      const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
-      const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
-      bot.setControlState('sprint', shouldSprint)
-      const beforeMove = bot.entity.position
-      console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs}`)
-      checkpointMoveInProgress = true
-      try {
-        await gotoGoalWithHardTimeout(
-          bot,
-          new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer),
-          checkpointMoveTimeoutMs,
-          'nerv-workload-checkpoint'
-        )
-        const afterMove = bot.entity.position
-        console.log(`[NERV-WORKLOAD-CHECKPOINT-OK] action=${currentAction || 'place'} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)}`)
-      } catch (err) {
-        const afterMove = bot.entity.position
-        console.log(`[NERV-WORKLOAD-CHECKPOINT-WARN] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)} -> ${err?.message || err}`)
-        throw err
-      } finally {
-        checkpointMoveInProgress = false
+      while (true) {
+        assertRuntimeContinue(bot, config, 'stopping-during-placement')
+        await waitForWorkloadPlatformReady('workload-checkpoint-pre')
+        currentGoal = checkpoint.position
+        currentAction = checkpoint.action
+        currentActiveCols = checkpoint.activeCols
+        const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
+        const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
+        bot.setControlState('sprint', shouldSprint)
+        const beforeMove = bot.entity.position
+        console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs}`)
+        checkpointMoveInProgress = true
+        try {
+          await gotoGoalWithHardTimeout(
+            bot,
+            new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer),
+            checkpointMoveTimeoutMs,
+            'nerv-workload-checkpoint',
+            {
+              shouldPauseTimeout: () => !isWorkloadPlatformReady(),
+              pollMs: Math.max(100, Math.min(1000, toNumber(advanced.platformWatchdogPollMs, toNumber(config.advanced?.platformWatchdogPollMs, 1000))))
+            }
+          )
+          const afterMove = bot.entity.position
+          if (!isWorkloadPlatformReady()) {
+            checkpointMoveInProgress = false
+            await waitForWorkloadPlatformReady('workload-checkpoint-after-move')
+            continue
+          }
+          console.log(`[NERV-WORKLOAD-CHECKPOINT-OK] action=${currentAction || 'place'} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)}`)
+          break
+        } catch (err) {
+          if (isRuntimeStopError(err)) throw err
+          const afterMove = bot.entity.position
+          const runtime = getWorkloadRuntime('workload-checkpoint-error')
+          if (isGoalChangedError(err) && !isWorkloadPlatformReady(runtime)) {
+            checkpointMoveInProgress = false
+            console.log(`[NERV-WORKLOAD-CHECKPOINT-HOLD] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)} state=${runtime?.classification?.state || 'unknown'}; waiting for platform then retrying checkpoint.`)
+            await waitForWorkloadPlatformReady('workload-checkpoint-goalchanged')
+            continue
+          }
+          console.log(`[NERV-WORKLOAD-CHECKPOINT-WARN] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)} -> ${err?.message || err}`)
+          throw err
+        } finally {
+          checkpointMoveInProgress = false
+        }
       }
 
       if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
