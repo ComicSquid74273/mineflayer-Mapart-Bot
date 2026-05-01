@@ -165,6 +165,7 @@ function getAuthRequirement(pathname, method) {
   if (pathname === '/api/dashboard/auth/me') return 'authenticated'
   if (reqIsLogPath(pathname, method)) return 'canViewLogs'
   if (reqIsLogDeletePath(pathname, method)) return 'canManageOperators'
+  if (reqIsDashboardFileReadPath(pathname, method)) return 'canOperate'
   if (reqIsOperatorManagementPath(pathname)) return 'canManageOperators'
   if (reqIsDataManagementPath(pathname)) return 'canManageOperators'
   if (reqIsConfigManagementPath(pathname)) return 'canManageOperators'
@@ -186,6 +187,10 @@ function reqIsNodeDeletePath(pathname, method) {
 
 function reqIsLogDeletePath(pathname, method) {
   return method === 'POST' && Boolean(matchPath(pathname, '/api/dashboard/logs/:fileName/delete'))
+}
+
+function reqIsDashboardFileReadPath(pathname, method) {
+  return method === 'GET' && pathname === '/api/dashboard/files'
 }
 
 function reqIsOperatorManagementPath(pathname) {
@@ -438,6 +443,41 @@ function summarizeNode(node) {
     nodeLogs: Array.isArray(node.nodeLogs) ? node.nodeLogs : [],
     timing: node.timing || null
   }
+}
+
+function listUploadAssignments() {
+  const fileAssignments = store.listFiles()
+    .filter((item) => item.assignedBotName || item.assignedHostLabel || item.claimedByBotName || item.deliveryStatus !== 'unassigned')
+    .map((item) => ({
+      id: item.fileId,
+      source: 'stored-file',
+      fileName: item.originalName || item.storedName || item.fileId,
+      sizeBytes: item.sizeBytes,
+      targetBotName: item.assignedBotName || null,
+      targetHostLabel: item.assignedHostLabel || null,
+      claimedByBotName: item.claimedByBotName || null,
+      status: item.deliveryStatus || 'unknown',
+      createdAt: item.uploadedAt || null,
+      completedAt: item.deliveredAt || null,
+      resultMessage: item.failedReason || null
+    }))
+  const commandAssignments = store.listCommands((item) => item.commandType === 'upload-node-file')
+    .map((item) => ({
+      id: item.commandId,
+      source: 'node-command',
+      fileName: item.fileName || 'unknown.nbt',
+      sizeBytes: null,
+      targetBotName: item.targetBotName || null,
+      targetHostLabel: item.targetHostLabel || null,
+      claimedByBotName: item.claimedByBotName || null,
+      status: item.status || 'unknown',
+      createdAt: item.createdAt || null,
+      completedAt: item.completedAt || null,
+      resultMessage: item.resultMessage || null
+    }))
+  return [...commandAssignments, ...fileAssignments]
+    .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
+    .slice(0, 150)
 }
 
 async function waitForNodeLogDownload(store, commandId, timeoutMs = 15000) {
@@ -1072,7 +1112,7 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/files') {
-    return sendJson(res, 200, { items: store.listFiles() })
+    return sendJson(res, 200, { items: store.listFiles(), assignments: listUploadAssignments() })
   }
 
   return notFound(res)

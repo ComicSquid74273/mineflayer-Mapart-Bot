@@ -487,6 +487,21 @@ textarea {
   color: var(--ink);
 }
 
+select {
+  color-scheme: dark;
+}
+
+select option,
+select optgroup {
+  background: #122331;
+  color: var(--ink);
+}
+
+select option:checked {
+  background: var(--accent);
+  color: #ffffff;
+}
+
 button {
   border: 0;
   border-radius: 999px;

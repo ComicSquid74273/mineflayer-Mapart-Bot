@@ -5,6 +5,7 @@ const state = {
   operators: [],
   configs: [],
   dataFiles: [],
+  uploadAssignments: [],
   configEditor: { name: null, content: '', dirty: false },
   refreshTimer: null,
   refreshIntervalMs: 300000,
@@ -21,6 +22,7 @@ const state = {
     operators: '',
     configs: '',
     dataFiles: '',
+    uploadAssignments: '',
     events: '',
     auth: ''
   },
@@ -82,6 +84,7 @@ const elements = {
   distributeLabel: document.getElementById('distributeLabel'),
   uploadForm: document.getElementById('uploadForm'),
   uploadStatus: document.getElementById('uploadStatus'),
+  uploadAssignmentsList: document.getElementById('uploadAssignmentsList'),
   clearDataButton: document.getElementById('clearDataButton'),
   configFilesList: document.getElementById('configFilesList'),
   dataFilesList: document.getElementById('dataFilesList'),
@@ -124,7 +127,7 @@ function hasPermission(permissionName) {
 }
 
 function escapeHtml(value) {
-  return String(value || '')
+  return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -530,13 +533,15 @@ function renderSummary() {
 function renderNodeTimingMetrics(node) {
   const timing = node.timing || {}
   const activeRun = timing.activeRun || null
+  const completed = Number(timing.totalCompletedMaps || 0)
+  const average = completed > 0 ? formatDuration(timing.averageDurationMs) : 'n/a'
   return `
     <div class="node-timing-strip">
       <div class="metric metric-compact">
-        Avg Map Time<strong>${escapeHtml(formatDuration(timing.averageDurationMs))}</strong>
+        Avg Map Time<strong>${escapeHtml(average)}</strong>
       </div>
       <div class="metric metric-compact">
-        Completed<strong>${escapeHtml(timing.totalCompletedMaps ?? 0)}</strong>
+        Completed<strong>${escapeHtml(completed)}</strong>
       </div>
       <div class="metric metric-compact">
         Current Run<strong>${escapeHtml(activeRun ? formatDuration(activeRun.elapsedMs) : 'idle')}</strong>
@@ -564,14 +569,14 @@ function renderBotCard(bot) {
         <span class="verify-label">Verification Required</span>
         <div class="verify-detail">
           <span class="verify-field">Bot: <strong>${escapeHtml(bot.botName)}</strong></span>
-          <span class="verify-field">Code: <strong class="verify-code">${escapeHtml(bot.verificationCode || 'loading…')}</strong></span>
+          <span class="verify-field">Code: <strong class="verify-code">${escapeHtml(bot.verificationCode || 'loading...')}</strong></span>
           <span class="verify-field">IP: <strong>${escapeHtml(bot.botIp || 'unknown')}</strong></span>
         </div>
       </div>
       <div class="verify-actions">
-        <button class="accent-button small-button" type="button" data-action="verify-done" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">✓ Verified</button>
-        <button class="ghost-button small-button" type="button" data-action="verify-refresh" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">↺ Resend</button>
-        <button class="ghost-button small-button" type="button" data-action="verify-close" data-bot-name="${escapeHtml(bot.botName)}" title="Dismiss banner">✕</button>
+        <button class="accent-button small-button" type="button" data-action="verify-done" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Verified</button>
+        <button class="ghost-button small-button" type="button" data-action="verify-refresh" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Resend</button>
+        <button class="ghost-button small-button" type="button" data-action="verify-close" data-bot-name="${escapeHtml(bot.botName)}" title="Dismiss banner">x</button>
       </div>
     </div>
   ` : ''
@@ -594,7 +599,7 @@ function renderBotCard(bot) {
           <span class="health-dot ${escapeHtml(healthClass)}" title="${escapeHtml(healthClass === 'health-green' ? 'Healthy' : healthClass === 'health-yellow' ? 'Warning' : 'Issue')}"></span>
           <div>
             <h3 class="bot-name">${escapeHtml(bot.botName)}</h3>
-            <p class="bot-meta">${escapeHtml(bot.role || 'single')} · ${escapeHtml(locationText)}${bot.botIp && !showVerify ? ` · ${escapeHtml(bot.botIp)}` : ''}</p>
+            <p class="bot-meta">${escapeHtml(bot.role || 'single')} | ${escapeHtml(locationText)}${bot.botIp && !showVerify ? ` | ${escapeHtml(bot.botIp)}` : ''}</p>
           </div>
         </div>
         <div class="status-inline">
@@ -635,7 +640,7 @@ function renderBotCard(bot) {
             : '<p class="chat-empty">No recent chat</p>'}
         </div>
         <div class="chat-input-row">
-          <input class="chat-input" type="text" placeholder="Send chat message…" maxlength="256"
+          <input class="chat-input" type="text" placeholder="Send chat message..." maxlength="256"
             data-chat-bot="${escapeHtml(bot.botName)}"
             data-permission-needed="canOperate" />
           <button class="accent-button small-button" type="button"
@@ -678,7 +683,7 @@ function renderBots() {
         <div class="fleet-node-head">
           <div>
             <h3 class="bot-name">${escapeHtml(node.hostLabel)}</h3>
-            <p class="bot-meta">${escapeHtml((node.botNames || []).join(', ') || 'no bots')} · Online ${escapeHtml(node.onlineCount)}/${escapeHtml(node.botCount)} · Last update ${escapeHtml(formatTime(node.lastStatusAt))}</p>
+            <p class="bot-meta">${escapeHtml((node.botNames || []).join(', ') || 'no bots')} | Online ${escapeHtml(node.onlineCount)}/${escapeHtml(node.botCount)} | Last update ${escapeHtml(formatTime(node.lastStatusAt))}</p>
           </div>
           <div class="fleet-node-controls">
             <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
@@ -760,7 +765,7 @@ function renderFiles() {
       nodeOptions.push('</optgroup>')
     }
   } else if (byNode.size > 1) {
-    // Multiple nodes — use <optgroup> to separate them
+    // Multiple nodes - use <optgroup> to separate them
     for (const [nodeLabel, bots] of byNode.entries()) {
       nodeOptions.push(`<optgroup label="${escapeHtml(nodeLabel)}">`)
       const onlineCount = bots.filter((bot) => bot.online).length
@@ -768,7 +773,7 @@ function renderFiles() {
       nodeOptions.push('</optgroup>')
     }
   } else {
-    // Single node — flat list, no group header needed
+    // Single node - flat list, no group header needed
     const nodeLabel = byNode.keys().next().value || 'unknown'
     const bots = byNode.get(nodeLabel) || []
     const onlineCount = bots.filter((bot) => bot.online).length
@@ -777,6 +782,55 @@ function renderFiles() {
 
   elements.uploadNodeSelect.innerHTML = nodeOptions.join('')
   restoreFormState(snapshot)
+}
+
+function renderUploadAssignments() {
+  if (!elements.uploadAssignmentsList) return
+  const sig = JSON.stringify({
+    canOperate: hasPermission('canOperate'),
+    assignments: state.uploadAssignments
+  })
+  if (state.renderCache.uploadAssignments === sig) return
+  state.renderCache.uploadAssignments = sig
+
+  if (!hasPermission('canOperate')) {
+    elements.uploadAssignmentsList.innerHTML = `
+      <article class="empty-card">
+        <h3>Assignments hidden</h3>
+        <p>Login as an operator to view NBT upload assignments.</p>
+      </article>`
+    return
+  }
+
+  if (!state.uploadAssignments.length) {
+    elements.uploadAssignmentsList.innerHTML = `
+      <article class="empty-card">
+        <h3>No upload assignments</h3>
+        <p>Uploaded NBT targets and claim status will appear here.</p>
+      </article>`
+    return
+  }
+
+  elements.uploadAssignmentsList.innerHTML = state.uploadAssignments.slice(0, 30).map((item) => {
+    const target = item.targetBotName
+      ? `Bot: ${item.targetBotName}`
+      : (item.targetHostLabel ? `Node: ${item.targetHostLabel}` : 'Unassigned')
+    const status = String(item.status || 'unknown')
+    const statusClass = ['succeeded', 'placed', 'downloaded'].includes(status) ? 'status-online'
+      : (['failed'].includes(status) ? 'status-offline' : 'status-neutral')
+    const claimed = item.claimedByBotName ? ` | claimed by ${item.claimedByBotName}` : ''
+    const result = item.resultMessage ? ` | ${item.resultMessage}` : ''
+    return `
+      <article class="file-item compact-file-item">
+        <div class="file-row">
+          <div>
+            <strong>${escapeHtml(item.fileName || 'unknown.nbt')}</strong>
+            <p class="file-meta">${escapeHtml(target)}${escapeHtml(claimed)} | ${escapeHtml(formatTime(item.createdAt))}${escapeHtml(result)}</p>
+          </div>
+          <span class="tag ${statusClass}">${escapeHtml(status)}</span>
+        </div>
+      </article>`
+  }).join('')
 }
 
 function renderNodes() {
@@ -796,13 +850,12 @@ function renderNodes() {
 
   elements.nodesGrid.innerHTML = state.nodes.map((node) => {
     const files = Array.isArray(node.nodeFiles) ? node.nodeFiles : []
-    const logs = Array.isArray(node.nodeLogs) ? node.nodeLogs : []
     return `
       <article class="node-card">
         <div class="file-row">
           <div>
             <strong>${escapeHtml(node.hostLabel)}</strong>
-            <p class="file-meta">Bots: ${escapeHtml((node.botNames || []).join(', ') || 'none')} · Online ${escapeHtml(node.onlineCount)}/${escapeHtml(node.botCount)}</p>
+            <p class="file-meta">Bots: ${escapeHtml((node.botNames || []).join(', ') || 'none')} | Online ${escapeHtml(node.onlineCount)}/${escapeHtml(node.botCount)}</p>
           </div>
           <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
         </div>
@@ -812,26 +865,12 @@ function renderNodes() {
             <div class="file-row">
               <div>
                 <strong>${escapeHtml(file.fileName)}</strong>
-                <p class="file-meta">${escapeHtml(file.sizeBytes)} bytes · ${escapeHtml(formatTime(file.modifiedAt))}</p>
+                <p class="file-meta">${escapeHtml(file.sizeBytes)} bytes | ${escapeHtml(formatTime(file.modifiedAt))}</p>
               </div>
               <button class="danger-button small-button" type="button" data-action="delete-node-file" data-permission-needed="canDeleteNodeFiles" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Delete</button>
             </div>
           </article>
         `).join('') : '<p class="hint">No .nbt files reported on this node.</p>'}
-        <div style="margin-top:14px;">
-          <strong>Logs</strong>
-        </div>
-        ${logs.length ? logs.map((file) => `
-          <article class="file-item compact-file-item">
-            <div class="file-row">
-              <div>
-                <strong>${escapeHtml(file.fileName)}</strong>
-                <p class="file-meta">${escapeHtml(formatFileSize(file.sizeBytes))} · ${escapeHtml(formatTime(file.modifiedAt))}</p>
-              </div>
-              <button class="ghost-button small-button" type="button" data-action="download-node-log" data-permission-needed="canViewLogs" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Download</button>
-            </div>
-          </article>
-        `).join('') : '<p class="hint">No .log files reported on this node.</p>'}
       </article>
     `
   }).join('')
@@ -972,11 +1011,11 @@ function renderOperators() {
         <div class="file-row">
           <div>
             <strong>${escapeHtml(item.username)}</strong>
-            <p class="file-meta">role=${escapeHtml(item.role)} · created ${escapeHtml(formatTime(item.createdAt))} · updated ${escapeHtml(formatTime(item.updatedAt))}</p>
+            <p class="file-meta">role=${escapeHtml(item.role)} | created ${escapeHtml(formatTime(item.createdAt))} | updated ${escapeHtml(formatTime(item.updatedAt))}</p>
           </div>
           <button class="danger-button small-button" type="button" data-action="delete-operator" data-permission-needed="canManageOperators" data-username="${escapeHtml(item.username)}">Delete</button>
         </div>
-        <p class="hint">Logs: ${permissions.canViewLogs ? 'yes' : 'no'} · Operate: ${permissions.canOperate ? 'yes' : 'no'} · Delete node files: ${permissions.canDeleteNodeFiles ? 'yes' : 'no'} · Manage operators: ${permissions.canManageOperators ? 'yes' : 'no'}</p>
+        <p class="hint">Logs: ${permissions.canViewLogs ? 'yes' : 'no'} | Operate: ${permissions.canOperate ? 'yes' : 'no'} | Delete node files: ${permissions.canDeleteNodeFiles ? 'yes' : 'no'} | Manage operators: ${permissions.canManageOperators ? 'yes' : 'no'}</p>
       </article>
     `
   }).join('')
@@ -1011,7 +1050,7 @@ function renderConfigs() {
       <div class="file-row">
         <div>
           <strong>${escapeHtml(mainConfig.name)}</strong>
-          <p class="file-meta">${formatFileSize(mainConfig.sizeBytes)} · modified ${escapeHtml(formatTime(mainConfig.modifiedAt))}</p>
+          <p class="file-meta">${formatFileSize(mainConfig.sizeBytes)} | modified ${escapeHtml(formatTime(mainConfig.modifiedAt))}</p>
         </div>
         <button class="ghost-button small-button" type="button"
           data-action="edit-config" data-permission-needed="canManageOperators"
@@ -1098,7 +1137,7 @@ async function onSaveConfig() {
   try {
     JSON.parse(content)
   } catch {
-    if (elements.configEditorStatus) elements.configEditorStatus.textContent = 'Invalid JSON — not saved.'
+    if (elements.configEditorStatus) elements.configEditorStatus.textContent = 'Invalid JSON - not saved.'
     return
   }
   try {
@@ -1178,7 +1217,7 @@ function renderEvents() {
   elements.eventLog.innerHTML = items.map((entry) => `
     <article class="log-row ${escapeHtml(entry.level)}">
       <div>
-        <strong>${escapeHtml(entry.operator || 'unknown')} · ${escapeHtml(entry.message)}</strong>
+        <strong>${escapeHtml(entry.operator || 'unknown')} | ${escapeHtml(entry.message)}</strong>
         <div class="hint">${escapeHtml(entry.action || 'activity')}</div>
       </div>
       <span class="timestamp">${escapeHtml(formatTime(entry.createdAt))}</span>
@@ -1221,12 +1260,16 @@ async function refreshData(options = {}) {
     const dataFiles = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/data', { requireAuth: true })
       : { files: [] }
+    const uploadFiles = state.auth.verified && hasPermission('canOperate')
+      ? await requestJson('/api/dashboard/files', { requireAuth: true })
+      : { assignments: [] }
     state.bots = Array.isArray(bots.items) ? bots.items : []
     state.nodes = Array.isArray(nodes.items) ? nodes.items : []
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = Array.isArray(configs.files) ? configs.files : []
     state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
+    state.uploadAssignments = Array.isArray(uploadFiles.assignments) ? uploadFiles.assignments : []
     state.events = Array.isArray(events.items) ? events.items : []
     // Clear dismissed banners for bots that are no longer verifying
     for (const botName of [...state.dismissedVerify]) {
@@ -1240,6 +1283,7 @@ async function refreshData(options = {}) {
     renderSummary()
     renderBots()
     renderFiles()
+    renderUploadAssignments()
     renderNodes()
     renderLogs()
     renderOperators()
