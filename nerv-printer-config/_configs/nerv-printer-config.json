@@ -373,6 +373,8 @@
     "scannerPlaceConfirmPollMs": 15,
     "workloadCheckpointMoveTimeoutMs": 30000,
     "workloadCheckpointTimeoutAcceptExtraRange": 0.35,
+    "workloadStraightCheckpointMovement": true,
+    "workloadStraightCheckpointTickMs": 50,
     "placementStallTimeoutMs": 5000,
     "placementStallRecoveryMs": 2000,
     "placementStallRecoveryAttempts": 3,

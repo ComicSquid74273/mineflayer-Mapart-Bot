@@ -2274,6 +2274,8 @@ function createDefaultConfig() {
       scannerPlaceConfirmPollMs: 15,
       workloadCheckpointMoveTimeoutMs: 30000,
       workloadCheckpointTimeoutAcceptExtraRange: 0.35,
+      workloadStraightCheckpointMovement: true,
+      workloadStraightCheckpointTickMs: 50,
       placementStallTimeoutMs: 5000,
       placementStallRecoveryMs: 2000,
       placementStallRecoveryAttempts: 3,
@@ -4310,6 +4312,79 @@ async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path', opt
     ])
   } finally {
     if (timeoutId) clearInterval(timeoutId)
+  }
+}
+
+async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, label = 'straight-walk', options = {}) {
+  const limitMs = Math.max(1000, toNumber(timeoutMs, 30000))
+  const tickMs = Math.max(25, toNumber(options.tickMs, 50))
+  const targetRange = Math.max(0.1, toNumber(range, 0.8))
+  const sprint = options.sprint === true
+  const jump = options.jump === true
+  const config = options.config || {}
+  const shouldPauseTimeout = typeof options.shouldPauseTimeout === 'function'
+    ? options.shouldPauseTimeout
+    : null
+  const isGoalSatisfied = typeof options.isGoalSatisfied === 'function'
+    ? options.isGoalSatisfied
+    : () => distanceToPoint(bot?.entity?.position, point) <= targetRange
+  const Vec3 = bot?.entity?.position?.constructor
+  let activeElapsedMs = 0
+  let lastCheckAt = Date.now()
+
+  try {
+    try { bot.pathfinder?.stop?.() } catch { }
+    try { bot.pathfinder?.setGoal?.(null) } catch { }
+    bot.setControlState('back', false)
+    bot.setControlState('left', false)
+    bot.setControlState('right', false)
+    bot.setControlState('jump', jump)
+
+    while (isBotSessionLive(bot)) {
+      assertRuntimeContinue(bot, config, `${label}-runtime-stop`)
+      if (isGoalSatisfied()) return
+
+      const now = Date.now()
+      const elapsed = now - lastCheckAt
+      lastCheckAt = now
+
+      let paused = false
+      try {
+        paused = shouldPauseTimeout ? shouldPauseTimeout() === true : false
+      } catch {
+        paused = false
+      }
+
+      if (paused) {
+        bot.setControlState('forward', false)
+        bot.setControlState('sprint', false)
+        await delay(tickMs)
+        continue
+      }
+
+      activeElapsedMs += elapsed
+      if (activeElapsedMs >= limitMs) {
+        throw new Error(`${label}-timeout-${limitMs}ms`)
+      }
+
+      const pos = bot?.entity?.position
+      if (Vec3 && pos) {
+        try {
+          await bot.lookAt(new Vec3(Number(point.x), Number(pos.y) + 1.62, Number(point.z)), true)
+        } catch { }
+      }
+      bot.setControlState('sprint', sprint)
+      bot.setControlState('forward', true)
+      await delay(tickMs)
+    }
+
+    throw new Error(`${label}-session-ended`)
+  } finally {
+    bot.setControlState('forward', false)
+    bot.setControlState('back', false)
+    bot.setControlState('left', false)
+    bot.setControlState('right', false)
+    bot.setControlState('jump', false)
   }
 }
 
@@ -8448,6 +8523,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
   const checkpointMoveTimeoutMs = Math.max(1000, toNumber(advanced.workloadCheckpointMoveTimeoutMs, 30000))
   const checkpointTimeoutAcceptExtraRange = Math.max(0, toNumber(advanced.workloadCheckpointTimeoutAcceptExtraRange, 0.35))
+  const straightCheckpointMovement = advanced.workloadStraightCheckpointMovement !== false
+  const straightCheckpointTickMs = Math.max(25, toNumber(advanced.workloadStraightCheckpointTickMs, 50))
   const stallTimeoutMs = Math.max(0, toNumber(advanced.placementStallTimeoutMs, 5000))
 
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
@@ -8534,6 +8611,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const isTransientPlacementReason = (reason) => {
     const text = String(reason || '')
     return text === 'unconfirmed-place' || text.startsWith('held-item-desync-')
+  }
+  const shouldWalkCheckpointStraight = (checkpoint) => {
+    if (!straightCheckpointMovement) return false
+    const action = String(checkpoint?.action || '')
+    return action === 'inline-repair' || action === 'lineEnd' || action === 'sprint'
   }
   const noteWorldPlacementProgress = () => {
     stall.lastWorldProgressAt = Date.now()
@@ -9047,27 +9129,47 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         const beforeMove = bot.entity.position
         const checkpointAcceptRange = checkpointBuffer + checkpointTimeoutAcceptExtraRange
         const checkpointIsCloseEnough = () => distanceToPoint(bot?.entity?.position, checkpoint.position) <= checkpointAcceptRange
-        console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs}`)
+        const useStraightCheckpoint = shouldWalkCheckpointStraight(checkpoint)
+        const movementMode = useStraightCheckpoint ? 'straight' : 'pathfinder'
+        console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs} mode=${movementMode}`)
         checkpointMoveInProgress = true
         try {
-          await gotoGoalWithHardTimeout(
-            bot,
-            new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer),
-            checkpointMoveTimeoutMs,
-            'nerv-workload-checkpoint',
-            {
-              shouldPauseTimeout: () => !isWorkloadPlatformReady(),
-              pollMs: Math.max(100, Math.min(1000, toNumber(advanced.platformWatchdogPollMs, toNumber(config.advanced?.platformWatchdogPollMs, 1000)))),
-              isGoalSatisfied: checkpointIsCloseEnough
-            }
-          )
+          if (useStraightCheckpoint) {
+            await walkStraightToPointWithHardTimeout(
+              bot,
+              checkpoint.position,
+              checkpointBuffer,
+              checkpointMoveTimeoutMs,
+              'nerv-workload-checkpoint',
+              {
+                config,
+                sprint: shouldSprint,
+                jump: false,
+                tickMs: straightCheckpointTickMs,
+                shouldPauseTimeout: () => !isWorkloadPlatformReady(),
+                isGoalSatisfied: checkpointIsCloseEnough
+              }
+            )
+          } else {
+            await gotoGoalWithHardTimeout(
+              bot,
+              new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer),
+              checkpointMoveTimeoutMs,
+              'nerv-workload-checkpoint',
+              {
+                shouldPauseTimeout: () => !isWorkloadPlatformReady(),
+                pollMs: Math.max(100, Math.min(1000, toNumber(advanced.platformWatchdogPollMs, toNumber(config.advanced?.platformWatchdogPollMs, 1000)))),
+                isGoalSatisfied: checkpointIsCloseEnough
+              }
+            )
+          }
           const afterMove = bot.entity.position
           if (!isWorkloadPlatformReady()) {
             checkpointMoveInProgress = false
             await waitForWorkloadPlatformReady('workload-checkpoint-after-move')
             continue
           }
-          console.log(`[NERV-WORKLOAD-CHECKPOINT-OK] action=${currentAction || 'place'} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)}`)
+          console.log(`[NERV-WORKLOAD-CHECKPOINT-OK] action=${currentAction || 'place'} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)} mode=${movementMode}`)
           break
         } catch (err) {
           if (isRuntimeStopError(err)) throw err
@@ -9142,12 +9244,40 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           const backX = botPos.x + (dx / dist) * missRecoveryBacktrackBlocks
           const backZ = botPos.z + (dz / dist) * missRecoveryBacktrackBlocks
 
-          assertRuntimeContinue(bot, config, 'stopping-during-placement')
-          await bot.pathfinder.goto(new GoalNear(backX, checkpoint.position.y, backZ, checkpointBuffer))
-          assertRuntimeContinue(bot, config, 'stopping-during-placement')
-          await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
-
-          bot.setControlState('sneak', false)
+          try {
+            assertRuntimeContinue(bot, config, 'stopping-during-placement')
+            await walkStraightToPointWithHardTimeout(
+              bot,
+              { x: backX, y: checkpoint.position.y, z: backZ },
+              checkpointBuffer,
+              checkpointMoveTimeoutMs,
+              'nerv-workload-miss-backtrack',
+              {
+                config,
+                sprint: false,
+                jump: false,
+                tickMs: straightCheckpointTickMs,
+                shouldPauseTimeout: () => !isWorkloadPlatformReady()
+              }
+            )
+            assertRuntimeContinue(bot, config, 'stopping-during-placement')
+            await walkStraightToPointWithHardTimeout(
+              bot,
+              checkpoint.position,
+              checkpointBuffer,
+              checkpointMoveTimeoutMs,
+              'nerv-workload-miss-return',
+              {
+                config,
+                sprint: false,
+                jump: false,
+                tickMs: straightCheckpointTickMs,
+                shouldPauseTimeout: () => !isWorkloadPlatformReady()
+              }
+            )
+          } finally {
+            bot.setControlState('sneak', false)
+          }
 
           const stillMissed = missedInCols.filter((target) => {
             const key = getTargetKey(target)

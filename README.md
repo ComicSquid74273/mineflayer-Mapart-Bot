@@ -408,6 +408,8 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.scannerPlaceConfirmPollMs` | `15` | Poll interval while waiting for placement confirmation. | Keep small; this is only used by confirming placement paths. |
 | `advanced.workloadCheckpointMoveTimeoutMs` | `30000` | Hard timeout for moving to the next workload checkpoint. | Prevents silent standing forever after refill/pathfinder stalls. |
 | `advanced.workloadCheckpointTimeoutAcceptExtraRange` | `0.35` | Extra distance accepted when a checkpoint times out but the bot is already effectively at the target. | Prevents near-goal pathfinder hesitation from aborting the run. |
+| `advanced.workloadStraightCheckpointMovement` | `true` | Uses Nerv-style forward walking for in-lane workload checkpoints instead of pathfinder. | Keep enabled; pathfinder is still used for restock/start travel. |
+| `advanced.workloadStraightCheckpointTickMs` | `50` | Control/look update interval for straight print-lane movement. | Match Minecraft tick pacing unless steering looks choppy. |
 | `advanced.placementStallTimeoutMs` | `5000` | Marks a local stuck area after this long without real block-world placement progress. | Set `0` to disable; skipped areas are left for final repair. |
 | `advanced.placementStallRecoveryMs` | `2000` | Starts a local slow confirmed recovery after this long without real block-world progress. | Runs before stall skip. |
 | `advanced.placementStallRecoveryAttempts` | `3` | Slow confirmed placements to try during local stall recovery. | Set `0` to skip straight to stall skip. |
