@@ -2204,9 +2204,12 @@ function createDefaultConfig() {
       startupSupportMinRatio: 0.5,
       startupSupportPollMs: 5000,
       startupSupportLogMs: 15000,
+      restockSyncStrategy: 'nerv-window',
       preRestockDelayMs: 500,
       inventoryActionDelayMs: 100,
       postRestockDelayMs: 500,
+      inventoryExtraStateSyncMs: 0,
+      restockFastSettleMs: 0,
       restockPostCloseInventorySyncMs: 2000,
       restockFailureCooldownMs: 8000,
       predictiveRestock: true,
@@ -2270,6 +2273,7 @@ function createDefaultConfig() {
       scannerPlaceConfirmMs: 80,
       scannerPlaceConfirmPollMs: 15,
       workloadCheckpointMoveTimeoutMs: 30000,
+      workloadCheckpointTimeoutAcceptExtraRange: 0.35,
       placementStallTimeoutMs: 5000,
       placementStallRecoveryMs: 2000,
       placementStallRecoveryAttempts: 3,
@@ -3530,6 +3534,13 @@ async function recoverMissingItemInventoryDesync(bot, config, blockName, label =
   return false
 }
 
+function normalizeRestockSyncStrategy(value) {
+  const normalized = String(value || 'nerv-window').toLowerCase().trim()
+  if (normalized === 'safe') return 'safe'
+  if (normalized === 'nerv' || normalized === 'window' || normalized === 'nerv-window') return 'nerv-window'
+  return 'nerv-window'
+}
+
 function getMaterialChestPositions(config, blockName) {
   const materialDict = config.machine?.materialDict || {}
   const value = materialDict[blockName]
@@ -3638,6 +3649,8 @@ async function openContainerAt(bot, position, accessPosition) {
 async function restockMaterial(bot, config, blockName, requestedPulls = 1, neededByBlock = null) {
   assertRuntimeContinue(bot, config, 'stopping-during-restock')
   const advanced = config.advanced || {}
+  const restockSyncStrategy = normalizeRestockSyncStrategy(advanced.restockSyncStrategy)
+  let forceSafeRestock = restockSyncStrategy === 'safe'
   const failureCooldownMs = Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))
   const syncWaitMs = Math.max(200, toNumber(advanced.restockInventorySyncWaitMs, 2000))
   const lastFailedAt = restockFailureCache.get(blockName)
@@ -3664,12 +3677,12 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const itemInfo = bot.registry.itemsByName[blockName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
   const requestedStackCount = Math.max(1, toNumber(requestedPulls, 1))
-  const sameChestSyncRetries = Math.max(0, toNumber(advanced.restockSameChestSyncRetries, 2))
+  const sameChestSyncRetries = Math.max(restockSyncStrategy === 'nerv-window' ? 1 : 0, toNumber(advanced.restockSameChestSyncRetries, 2))
   const sameChestRetryDelayMs = Math.max(200, toNumber(advanced.restockSameChestRetryDelayMs, Math.max(syncWaitMs, 1200)))
   const sameChestRetryPollMs = Math.max(25, toNumber(advanced.restockSameChestRetryPollMs, 100))
   const sameChestRetrySettleMs = Math.max(0, toNumber(advanced.restockSameChestRetrySettleMs, 150))
   const fastBurstStacks = Math.max(1, toNumber(advanced.restockFastStacksPerBurst, 8))
-  const fastBurstSettleMs = Math.max(100, toNumber(advanced.restockFastSettleMs, 300))
+  const fastBurstSettleMs = Math.max(0, toNumber(advanced.restockFastSettleMs, restockSyncStrategy === 'nerv-window' ? 0 : 300))
   const fastBurstMinItems = Math.max(stackSize * 2, toNumber(advanced.restockFastMinItems, stackSize * 2))
   const haveBeforeRestock = countInventoryItems(bot, blockName)
   const exactDesiredItemCount = neededByBlock instanceof Map && neededByBlock.has(blockName)
@@ -3724,11 +3737,13 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         let retrySameChest = false
         let retryStartHave = 0
         let retryTargetCount = 0
+        let skipRetryCatchupWait = false
+        const attemptStrategy = forceSafeRestock ? 'safe' : restockSyncStrategy
         try {
           const travel = chestTravelPoint(spot)
           if (config.errorHandling?.logErrors !== false) {
             const retryLabel = sameChestAttempt > 0 ? ` retry=${sameChestAttempt}/${sameChestSyncRetries}` : ''
-            console.log(`[RESTOCK-CHEST] ${blockName}: chest=${spot.x},${spot.y},${spot.z} open=${travel?.x ?? spot.x},${travel?.y ?? spot.y},${travel?.z ?? spot.z} dist=${Math.round(Math.sqrt(horizontalDist2(bot, spot)))}${retryLabel}`)
+            console.log(`[RESTOCK-CHEST] ${blockName}: chest=${spot.x},${spot.y},${spot.z} open=${travel?.x ?? spot.x},${travel?.y ?? spot.y},${travel?.z ?? spot.z} dist=${Math.round(Math.sqrt(horizontalDist2(bot, spot)))} strategy=${attemptStrategy}${retryLabel}`)
           }
           try {
             container = await openContainerAt(bot, spot, spot.accessPosition)
@@ -3834,13 +3849,18 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           }
 
           try {
+            const useNervWindow = attemptStrategy === 'nerv-window'
             const burstNeed = Math.min(amountStillNeeded, currentCapacity)
             const burstStacksRequested = Math.max(1, Math.min(fastBurstStacks, Math.floor(burstNeed / stackSize)))
             const windowBefore = countWindowInventoryItems(container, itemId, blockName)
             const burst = await quickMoveChestItemStacks(bot, container, itemId, burstNeed, stackSize, burstStacksRequested, {
               onlyFullStacks: true,
               timeoutMs: syncWaitMs,
-              pollMs: sameChestRetryPollMs
+              pollMs: sameChestRetryPollMs,
+              waitForSlot: !useNervWindow,
+              actionDelayMs: useNervWindow
+                ? Math.max(0, toNumber(advanced.inventoryActionDelayMs, 10))
+                : sameChestRetryPollMs
             })
 
             if (burst.stacksMoved <= 0) {
@@ -3850,30 +3870,34 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               break
             }
 
-            await delay(fastBurstSettleMs)
+            if (fastBurstSettleMs > 0) await delay(fastBurstSettleMs)
             const expectedWindowTarget = Math.min(targetCount, windowBefore + burst.movedEstimate)
-            const windowHave = await waitForWindowInventoryCount(
-              container,
-              itemId,
-              blockName,
-              expectedWindowTarget,
-              syncWaitMs,
-              sameChestRetryPollMs
-            )
-            let haveAfterWait = await waitForInventoryCountChangeOrTarget(
-              bot,
-              blockName,
-              haveBeforePull,
-              Math.min(targetCount, expectedWindowTarget),
-              syncWaitMs,
-              sameChestRetryPollMs,
-              sameChestRetrySettleMs
-            )
+            const windowHave = useNervWindow
+              ? countWindowInventoryItems(container, itemId, blockName)
+              : await waitForWindowInventoryCount(
+                container,
+                itemId,
+                blockName,
+                expectedWindowTarget,
+                syncWaitMs,
+                sameChestRetryPollMs
+              )
+            let haveAfterWait = useNervWindow
+              ? countInventoryItems(bot, blockName)
+              : await waitForInventoryCountChangeOrTarget(
+                bot,
+                blockName,
+                haveBeforePull,
+                Math.min(targetCount, expectedWindowTarget),
+                syncWaitMs,
+                sameChestRetryPollMs,
+                sameChestRetrySettleMs
+              )
             observedHave = Math.max(observedHave, haveAfterWait, windowHave)
             maxWindowHave = Math.max(maxWindowHave, windowHave)
 
             if (config.errorHandling?.logErrors !== false) {
-              console.log(`[RESTOCK-BURST] ${blockName}: quickMovedStacks=${burst.stacksMoved} windowHave=${windowHave} invHave=${haveAfterWait} target=${targetCount}`)
+              console.log(`[RESTOCK-BURST] ${blockName}: strategy=${attemptStrategy} quickMovedStacks=${burst.stacksMoved} durationMs=${burst.durationMs} windowHave=${windowHave} invHave=${haveAfterWait} target=${targetCount}`)
             }
 
             if (windowHave >= Math.min(targetCount, expectedWindowTarget)) {
@@ -3884,7 +3908,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               continue
             }
 
-            if (windowHave > haveBeforePull && haveAfterWait < Math.min(targetCount, windowHave)) {
+            if (!useNervWindow && windowHave > haveBeforePull && haveAfterWait < Math.min(targetCount, windowHave)) {
               haveAfterWait = await waitForInventoryCountChangeOrTarget(
                 bot,
                 blockName,
@@ -3948,7 +3972,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               try { container.close() } catch { }
               container = null
             }
-            return await waitForRestockInventoryReady(
+            const ready = await waitForRestockInventoryReady(
               bot,
               config,
               blockName,
@@ -3956,10 +3980,21 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               Math.min(desiredItemCount, haveAtStart + willPullTotal),
               'inventory-full-success'
             )
+            if (ready) return true
+            if (attemptStrategy === 'nerv-window' && sameChestAttempt < sameChestSyncRetries) {
+              forceSafeRestock = true
+              retrySameChest = true
+              skipRetryCatchupWait = true
+              console.log(`[RESTOCK-FALLBACK] ${blockName} nerv-window final sync failed after inventory-full success; reopening same chest with safe strategy.`)
+            } else {
+              return false
+            }
           }
-          restockFailureCache.set(blockName, Date.now())
-          console.log(`[RESTOCK-WARN] Stopping ${blockName} restock because inventory is full: have=${haveNow} target=${desiredItemCount}.`)
-          return false
+          if (!retrySameChest) {
+            restockFailureCache.set(blockName, Date.now())
+            console.log(`[RESTOCK-WARN] Stopping ${blockName} restock because inventory is full: have=${haveNow} target=${desiredItemCount}.`)
+            return false
+          }
         }
 
         if (observedHave >= haveAtStart + willPullTotal || observedHave >= desiredItemCount ||
@@ -3976,7 +4011,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             haveAtStart + willPullTotal,
             Math.max(maxWindowHave, countInventoryItems(bot, blockName))
           )
-          return await waitForRestockInventoryReady(
+          const ready = await waitForRestockInventoryReady(
             bot,
             config,
             blockName,
@@ -3984,6 +4019,15 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             expectedReadyCount,
             maxWindowHave > countInventoryItems(bot, blockName) ? 'window-confirmed' : 'inventory-confirmed'
           )
+          if (ready) return true
+          if (attemptStrategy === 'nerv-window' && sameChestAttempt < sameChestSyncRetries) {
+            forceSafeRestock = true
+            retrySameChest = true
+            skipRetryCatchupWait = true
+            console.log(`[RESTOCK-FALLBACK] ${blockName} nerv-window final sync failed; reopening same chest with safe strategy.`)
+          } else {
+            return false
+          }
         }
 
           if (stoppedForInventorySync) {
@@ -4008,6 +4052,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
 
         if (!retrySameChest) {
           break
+        }
+
+        if (skipRetryCatchupWait) {
+          sameChestAttempt += 1
+          continue
         }
 
         const haveAfterRetryWait = await waitForInventoryCountChangeOrTarget(
@@ -4202,11 +4251,16 @@ async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path', opt
   const shouldPauseTimeout = typeof options.shouldPauseTimeout === 'function'
     ? options.shouldPauseTimeout
     : null
+  const isGoalSatisfied = typeof options.isGoalSatisfied === 'function'
+    ? options.isGoalSatisfied
+    : null
   let timeoutId = null
   try {
+    const gotoPromise = bot.pathfinder.goto(goal)
+    gotoPromise.catch(() => {})
     await Promise.race([
-      bot.pathfinder.goto(goal),
-      new Promise((_, reject) => {
+      gotoPromise,
+      new Promise((resolve, reject) => {
         let activeElapsedMs = 0
         let lastCheckAt = Date.now()
         timeoutId = setInterval(() => {
@@ -4221,10 +4275,32 @@ async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path', opt
             paused = false
           }
 
+          if (isGoalSatisfied) {
+            try {
+              if (isGoalSatisfied()) {
+                try { bot.pathfinder?.stop?.() } catch { }
+                try { bot.pathfinder?.setGoal?.(null) } catch { }
+                resolve()
+                return
+              }
+            } catch { }
+          }
+
           if (paused) return
 
           activeElapsedMs += elapsed
           if (activeElapsedMs < limitMs) return
+
+          if (isGoalSatisfied) {
+            try {
+              if (isGoalSatisfied()) {
+                try { bot.pathfinder?.stop?.() } catch { }
+                try { bot.pathfinder?.setGoal?.(null) } catch { }
+                resolve()
+                return
+              }
+            } catch { }
+          }
 
           try { bot.pathfinder?.stop?.() } catch { }
           try { bot.pathfinder?.setGoal?.(null) } catch { }
@@ -5131,6 +5207,9 @@ async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stack
   const onlyFullStacks = options.onlyFullStacks !== false
   const timeoutMs = Math.max(100, toNumber(options.timeoutMs, 3000))
   const pollMs = Math.max(25, toNumber(options.pollMs, 100))
+  const waitForSlot = options.waitForSlot !== false
+  const actionDelayMs = Math.max(0, toNumber(options.actionDelayMs, waitForSlot ? pollMs : 0))
+  const startedAt = Date.now()
   const slots = getChestWindowSlots(window)
     .filter((entry) => entry.stack?.type === itemId)
     .sort((a, b) => toNumber(b.stack?.count, 0) - toNumber(a.stack?.count, 0))
@@ -5145,18 +5224,20 @@ async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stack
     const plannedCount = onlyFullStacks ? stackSize : count
     if (amountNeeded - movedEstimate < plannedCount) break
     await bot.clickWindow(entry.slot, 0, 1)
-    await waitForWindowSlot(window, entry.slot, (stack) => (
-      !stack ||
-      toNumber(stack.count, 0) <= 0 ||
-      stack.type !== itemId ||
-      toNumber(stack.count, 0) < count
-    ), timeoutMs, pollMs)
+    if (waitForSlot) {
+      await waitForWindowSlot(window, entry.slot, (stack) => (
+        !stack ||
+        toNumber(stack.count, 0) <= 0 ||
+        stack.type !== itemId ||
+        toNumber(stack.count, 0) < count
+      ), timeoutMs, pollMs)
+    }
     movedEstimate += count
     stacksMoved += 1
-    await delay(pollMs)
+    if (actionDelayMs > 0) await delay(actionDelayMs)
   }
 
-  return { movedEstimate, stacksMoved }
+  return { movedEstimate, stacksMoved, durationMs: Date.now() - startedAt }
 }
 
 function formatWindowStack(stack) {
@@ -8366,6 +8447,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const alertReach = Math.max(1, toNumber(advanced.scannerAlertReach, Math.max(printer.placeRange, 4) + 0.75))
   const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
   const checkpointMoveTimeoutMs = Math.max(1000, toNumber(advanced.workloadCheckpointMoveTimeoutMs, 30000))
+  const checkpointTimeoutAcceptExtraRange = Math.max(0, toNumber(advanced.workloadCheckpointTimeoutAcceptExtraRange, 0.35))
   const stallTimeoutMs = Math.max(0, toNumber(advanced.placementStallTimeoutMs, 5000))
 
   const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
@@ -8963,6 +9045,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
         bot.setControlState('sprint', shouldSprint)
         const beforeMove = bot.entity.position
+        const checkpointAcceptRange = checkpointBuffer + checkpointTimeoutAcceptExtraRange
+        const checkpointIsCloseEnough = () => distanceToPoint(bot?.entity?.position, checkpoint.position) <= checkpointAcceptRange
         console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs}`)
         checkpointMoveInProgress = true
         try {
@@ -8973,7 +9057,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             'nerv-workload-checkpoint',
             {
               shouldPauseTimeout: () => !isWorkloadPlatformReady(),
-              pollMs: Math.max(100, Math.min(1000, toNumber(advanced.platformWatchdogPollMs, toNumber(config.advanced?.platformWatchdogPollMs, 1000))))
+              pollMs: Math.max(100, Math.min(1000, toNumber(advanced.platformWatchdogPollMs, toNumber(config.advanced?.platformWatchdogPollMs, 1000)))),
+              isGoalSatisfied: checkpointIsCloseEnough
             }
           )
           const afterMove = bot.entity.position
@@ -8987,6 +9072,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         } catch (err) {
           if (isRuntimeStopError(err)) throw err
           const afterMove = bot.entity.position
+          if (String(err?.message || err || '').includes('nerv-workload-checkpoint-timeout') && checkpointIsCloseEnough()) {
+            console.log(`[NERV-WORKLOAD-CHECKPOINT-OK] action=${currentAction || 'place'} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)} reason=timeout-near-goal distance=${distanceToPoint(afterMove, checkpoint.position).toFixed(2)} acceptRange=${checkpointAcceptRange.toFixed(2)}`)
+            break
+          }
           const runtime = getWorkloadRuntime('workload-checkpoint-error')
           if (isGoalChangedError(err) && !isWorkloadPlatformReady(runtime)) {
             checkpointMoveInProgress = false
@@ -10148,7 +10237,7 @@ function createBot(config) {
 
   applyAntiHunger(bot, config)
   installChatLogin(bot, config)
-  bot.once('login', () => applyInventoryStateSync(bot))
+  bot.once('login', () => applyInventoryStateSync(bot, config))
 
   return bot
 }
@@ -10169,12 +10258,14 @@ function waitForInventoryStateUpdate(bot, timeoutMs) {
   })
 }
 
-function applyInventoryStateSync(bot) {
+function applyInventoryStateSync(bot, config) {
+  const waitMs = Math.max(0, toNumber(config?.advanced?.inventoryExtraStateSyncMs, 0))
+  if (waitMs <= 0) return
   if (!bot.supportFeature('stateIdUsed')) return
   const original = bot.clickWindow.bind(bot)
   bot.clickWindow = async function (slot, mouseButton, mode) {
     await original(slot, mouseButton, mode)
-    await waitForInventoryStateUpdate(bot, 150)
+    await waitForInventoryStateUpdate(bot, waitMs)
   }
 }
 

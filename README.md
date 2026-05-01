@@ -305,9 +305,12 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 
 | Key | Current | Options / Meaning | Tuning hint |
 |---|---:|---|---|
+| `advanced.restockSyncStrategy` | `nerv-window` | `nerv-window` queues full chest stacks from the synced window snapshot; `safe` keeps per-stack confirmation waits. | Use `safe` only if the fast path falls back repeatedly on a laggy server. |
 | `advanced.preRestockDelayMs` | `80` | Delay before restock interaction. | Increase if chest opens before bot is ready. |
 | `advanced.inventoryActionDelayMs` | `35` | Delay between inventory clicks/actions. | Increase if item transfers are unreliable. |
 | `advanced.postRestockDelayMs` | `120` | Delay after restock. | Increase if inventory update arrives late. |
+| `advanced.inventoryExtraStateSyncMs` | `0` | Optional extra wait after each Mineflayer window click on state-id versions. | Keep `0`; set `150` to restore the older conservative click wrapper. |
+| `advanced.restockFastSettleMs` | `0` | Extra settle wait after a fast restock burst before checking the open window. | Keep `0` with `nerv-window`; raise only if server window updates arrive late. |
 | `advanced.restockPostCloseInventorySyncMs` | `2000` | Max wait after closing a restock chest for local inventory/hotbar to show the moved stack. | Prevents printing from resuming from chest-window state before the bot can actually select the item. |
 | `advanced.restockFailureCooldownMs` | `250` | Cooldown after failed material restock. | Increase if bot loops too fast on empty chests. |
 | `advanced.predictiveRestock` | `true` | Plan inventory before placement window. | Keep `true`; prevents mid-row emergency refill. |
@@ -404,6 +407,7 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.scannerPlaceConfirmMs` | `80` | Confirmation window used by non-optimistic placement paths. | Litematic workload stays optimistic for smooth movement. |
 | `advanced.scannerPlaceConfirmPollMs` | `15` | Poll interval while waiting for placement confirmation. | Keep small; this is only used by confirming placement paths. |
 | `advanced.workloadCheckpointMoveTimeoutMs` | `30000` | Hard timeout for moving to the next workload checkpoint. | Prevents silent standing forever after refill/pathfinder stalls. |
+| `advanced.workloadCheckpointTimeoutAcceptExtraRange` | `0.35` | Extra distance accepted when a checkpoint times out but the bot is already effectively at the target. | Prevents near-goal pathfinder hesitation from aborting the run. |
 | `advanced.placementStallTimeoutMs` | `5000` | Marks a local stuck area after this long without real block-world placement progress. | Set `0` to disable; skipped areas are left for final repair. |
 | `advanced.placementStallRecoveryMs` | `2000` | Starts a local slow confirmed recovery after this long without real block-world progress. | Runs before stall skip. |
 | `advanced.placementStallRecoveryAttempts` | `3` | Slow confirmed placements to try during local stall recovery. | Set `0` to skip straight to stall skip. |
