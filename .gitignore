@@ -14,6 +14,7 @@ node_modules/
 graphify-out/
 
 # Dashboard service runtime data
+dashboard-service/data/
 
 # Generated finished map outputs
 finished-maps/

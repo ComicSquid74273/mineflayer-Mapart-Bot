@@ -45,6 +45,18 @@ function createStore(baseDir) {
   const HOLD_NODE_PHASES = new Set([])
 
   function defaultOperators() {
+    if (String(process.env.DASHBOARD_SEED_DEMO_OPERATORS || '').trim().toLowerCase() !== 'true') {
+      return [
+        {
+          username: String(process.env.DASHBOARD_ADMIN_USERNAME || 'admin').trim() || 'admin',
+          password: String(process.env.DASHBOARD_ADMIN_PASSWORD || crypto.randomBytes(18).toString('base64url')).trim(),
+          role: 'admin',
+          permissions: {},
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        }
+      ]
+    }
     return [
       {
         username: 'admin-demo',

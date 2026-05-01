@@ -47,6 +47,9 @@ Environment variables:
 - `DASHBOARD_HOST` - bind host, default `0.0.0.0`
 - `DASHBOARD_DATA_DIR` - storage directory, default `dashboard-service/data`
 - `DASHBOARD_LOGS_DIR` - directory used for authenticated `.log` downloads, default repo `logs/`
+- `DASHBOARD_ADMIN_USERNAME` - first-run admin username when `operators.json` does not exist, default `admin`
+- `DASHBOARD_ADMIN_PASSWORD` - first-run admin password when `operators.json` does not exist, default is a generated value written to `operators.json`
+- `DASHBOARD_SEED_DEMO_OPERATORS=true` - opt in to legacy demo accounts for local testing only
 
 Operator model:
 
@@ -57,12 +60,12 @@ Operator model:
   - `admin` - operator permissions plus node-file delete and operator management
 - explicit permission flags can override the role defaults per account
 
-Demo file:
+First-run operator file:
 
-- `data/operators.json` is seeded with:
-  - `admin-demo` / `admin-demo`
-  - `operator-demo` / `operator-demo`
-  - `viewer-demo` / `viewer-demo`
+- `data/operators.json` is seeded with one admin account by default
+- inspect `data/operators.json` to get or replace the generated password
+- legacy demo accounts are only seeded when `DASHBOARD_SEED_DEMO_OPERATORS=true`
+- if an existing `operators.json` still contains `admin-demo`, `operator-demo`, or `viewer-demo` with matching demo passwords, replace or delete them before exposing the dashboard
 
 Example record:
 
@@ -102,8 +105,12 @@ Example record:
 - `GET /api/dashboard/operators`
 - `GET /api/dashboard/logs`
 - `GET /api/dashboard/logs/:fileName/download`
+- `GET /api/dashboard/data`
 - `POST /api/dashboard/operators`
 - `POST /api/dashboard/operators/:username/delete`
+- `POST /api/dashboard/data/clear`
+- `POST /api/dashboard/data/:fileName/delete`
+- `POST /api/dashboard/logs/:fileName/delete`
 - `POST /api/dashboard/commands/start-all`
 - `POST /api/dashboard/commands/stop-all`
 - `POST /api/dashboard/nodes/:hostLabel/commands/start`
@@ -120,6 +127,7 @@ Example record:
 - dashboard viewing is public
 - log downloads require an account with `canViewLogs`
 - mutating actions require `canOperate`
+- dashboard log deletion, data-file deletion, data clear, config edits, and operator management require `canManageOperators`
 - destructive node-file deletes require `canDeleteNodeFiles`
 - operator management requires `canManageOperators`
 - live bot cards with start-print and stop-print controls

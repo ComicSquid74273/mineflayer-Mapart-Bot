@@ -860,7 +860,7 @@ function renderLogs() {
               </div>
               <div style="display:flex;gap:8px;flex-shrink:0;">
                 <button class="ghost-button small-button" type="button" data-action="download-log" data-permission-needed="canViewLogs" data-file-name="${escapeHtml(item.fileName)}">Download</button>
-                <button class="danger-button small-button" type="button" data-action="delete-log" data-permission-needed="canOperate" data-file-name="${escapeHtml(item.fileName)}">Delete</button>
+                <button class="danger-button small-button" type="button" data-action="delete-log" data-permission-needed="canManageOperators" data-file-name="${escapeHtml(item.fileName)}">Delete</button>
               </div>
             </div>
           </article>
@@ -1339,8 +1339,8 @@ async function onDeleteNodeFile(hostLabel, fileName) {
 }
 
 async function onDeleteLog(fileName) {
-  if (!hasPermission('canOperate')) {
-    pushEvent('warn', 'Login as an operator before deleting log files.')
+  if (!hasPermission('canManageOperators')) {
+    pushEvent('warn', 'Admin permission required before deleting log files.')
     return
   }
   await submitJson(`/api/dashboard/logs/${encodeURIComponent(fileName)}/delete`, {})
@@ -1457,6 +1457,11 @@ document.addEventListener('click', async (event) => {
   markUserInteraction()
   const button = event.target.closest('button[data-action]')
   if (!button) return
+  const requiredPermission = button.dataset.permissionNeeded || ''
+  if (requiredPermission && !hasPermission(requiredPermission)) {
+    pushEvent('warn', 'Login with approved access before using this dashboard action.')
+    return
+  }
   try {
     button.disabled = true
     if (button.dataset.action === 'delete-node-file') {

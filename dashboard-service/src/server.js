@@ -164,10 +164,12 @@ function actorHasPermission(actor, requiredPermission) {
 function getAuthRequirement(pathname, method) {
   if (pathname === '/api/dashboard/auth/me') return 'authenticated'
   if (reqIsLogPath(pathname, method)) return 'canViewLogs'
+  if (reqIsLogDeletePath(pathname, method)) return 'canManageOperators'
   if (reqIsOperatorManagementPath(pathname)) return 'canManageOperators'
   if (reqIsDataManagementPath(pathname)) return 'canManageOperators'
+  if (reqIsConfigManagementPath(pathname)) return 'canManageOperators'
   if (reqIsNodeDeletePath(pathname, method)) return 'canDeleteNodeFiles'
-  if (method !== 'GET' && pathname.startsWith('/api/dashboard/')) return 'canOperate'
+  if (reqIsDashboardOperationPath(pathname, method)) return 'canOperate'
   return null
 }
 
@@ -182,6 +184,10 @@ function reqIsNodeDeletePath(pathname, method) {
   return method === 'POST' && Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/files/:fileName/delete'))
 }
 
+function reqIsLogDeletePath(pathname, method) {
+  return method === 'POST' && Boolean(matchPath(pathname, '/api/dashboard/logs/:fileName/delete'))
+}
+
 function reqIsOperatorManagementPath(pathname) {
   return pathname === '/api/dashboard/operators'
     || Boolean(matchPath(pathname, '/api/dashboard/operators/:username/delete'))
@@ -191,6 +197,28 @@ function reqIsDataManagementPath(pathname) {
   return pathname === '/api/dashboard/data'
     || pathname === '/api/dashboard/data/clear'
     || Boolean(matchPath(pathname, '/api/dashboard/data/:fileName/delete'))
+}
+
+function reqIsConfigManagementPath(pathname) {
+  return pathname === '/api/dashboard/config'
+    || Boolean(matchPath(pathname, '/api/dashboard/config/:fileName'))
+}
+
+function reqIsDashboardOperationPath(pathname, method) {
+  if (method !== 'POST') return false
+  return pathname === '/api/dashboard/commands/start-all'
+    || pathname === '/api/dashboard/commands/stop-all'
+    || pathname === '/api/dashboard/files'
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/start'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/stop'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/start'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/stop'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/verify'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/chat'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/disconnect'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/reconnect'))
+    || Boolean(matchPath(pathname, '/api/dashboard/files/:fileId/assign'))
 }
 
 function ensureWithinDir(filePath, dirPath) {
@@ -1052,8 +1080,16 @@ const server = http.createServer((req, res) => {
 })
 
 server.listen(PORT, HOST, () => {
+  const demoOperators = store.listOperatorCredentials().filter((item) => {
+    const username = String(item.username || '').toLowerCase()
+    return (username === 'admin-demo' || username === 'operator-demo' || username === 'viewer-demo')
+      && String(item.password || '') === username
+  })
   console.log(`[dashboard-service] listening on http://${HOST}:${PORT}`)
   console.log(`[dashboard-service] loaded ${store.listOperators().length} operator account(s) from ${path.join(DATA_DIR, 'operators.json')}`)
+  if (demoOperators.length) {
+    console.warn(`[dashboard-service] WARNING: demo operator credentials are enabled: ${demoOperators.map((item) => item.username).join(', ')}. Replace or delete them before exposing this dashboard.`)
+  }
   console.log(`[dashboard-service] log downloads served from ${LOGS_DIR} (also checks ${path.resolve(process.cwd(), 'logs')})`)
   console.log(`[dashboard-service] direct NBT uploads go to ${NBT_DIR}`)
 })
