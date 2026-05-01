@@ -671,7 +671,12 @@ async function route(req, res) {
     if (!contentBase64) return badRequest(res, 'contentBase64 is required')
     let buffer
     try { buffer = Buffer.from(contentBase64, 'base64') } catch { return badRequest(res, 'invalid base64 content') }
+    const targetBotName = String(body?.targetBotName || '').trim()
+    if (targetBotName && !store.listBotsForHost(nbtUploadParams.hostLabel).some((bot) => bot.botName === targetBotName)) {
+      return badRequest(res, `targetBotName ${targetBotName} is not on node ${nbtUploadParams.hostLabel}`)
+    }
     const command = store.createCommand({
+      targetBotName: targetBotName || null,
       targetHostLabel: nbtUploadParams.hostLabel,
       commandType: 'upload-node-file',
       fileName,
@@ -679,7 +684,7 @@ async function route(req, res) {
       requestedBy: actor.username
     })
     auditOperatorAction(actor, 'upload-nbt', `Queued direct node upload for ${fileName} to ${nbtUploadParams.hostLabel}.`, {
-      hostLabel: nbtUploadParams.hostLabel, fileName, sizeBytes: buffer.length, commandId: command.commandId
+      hostLabel: nbtUploadParams.hostLabel, targetBotName: targetBotName || null, fileName, sizeBytes: buffer.length, commandId: command.commandId
     })
     return sendJson(res, 201, { ok: true, queued: true, command, fileName, sizeBytes: buffer.length })
   }

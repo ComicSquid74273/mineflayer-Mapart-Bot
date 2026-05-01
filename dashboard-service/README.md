@@ -12,7 +12,7 @@ Version 1 is intentionally narrow:
 
 - start and stop print-work commands for already running bots
 - compact per-bot status
-- NBT upload and node-based assignment
+- NBT upload with node/shared-folder assignment or individual bot assignment
 - bot command polling and result reporting
 - browser UI for operators
 
@@ -26,7 +26,7 @@ The service stores JSON metadata under `data/` and uploaded NBT files under `dat
 
 Operator accounts live in `data/operators.json` as plain JSON records so you can inspect and edit them directly when needed.
 
-Uploaded NBTs are assigned to nodes by `hostLabel`, not to individual bots. One bot on the selected node claims the file and downloads it into that node's configured `nbtFolder`, which is then shared by the bots running on that same machine.
+Uploaded NBTs can be assigned to nodes by `hostLabel` or to individual bots. Node assignment is best when bots on that node share the same `nbtFolder`; one bot claims the file and downloads it into that shared folder. Bot assignment is best when multiple bot runtimes on the same IP should receive separate files.
 
 ## Run
 
@@ -135,7 +135,7 @@ Example record:
 - start-node and stop-node controls inside each grouped fleet section
 - admin-only operator panel for creating, updating, and deleting accounts
 - NBT upload form
-- node-based NBT assignment form
+- node/shared-folder and bot-based NBT assignment form
 - authenticated log download panel for current and archived `.log` files on the dashboard host
 - shared operator audit log showing actions done by authenticated operators
 
@@ -156,9 +156,11 @@ This keeps the first version dependency-free. A later version can switch to mult
 
 ## Node Assignment
 
-When you assign an uploaded NBT, select the node label shown by the bots' `hostLabel` field.
+When you assign an uploaded NBT to a node, select the node label shown by the bots' `hostLabel` field.
 
 - the dashboard keeps the uploaded file in its own storage
 - one bot on the selected node claims that file from the dashboard
 - that bot downloads the file into the node's local `nbtFolder`
 - all bots on that node then see the file because they share the same machine folder
+
+When you assign an uploaded NBT to a bot, the dashboard creates an `assign-nbt` command for that bot only. This is useful when several bot runtimes share an IP address but should receive different files.

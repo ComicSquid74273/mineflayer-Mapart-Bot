@@ -76,7 +76,10 @@ const elements = {
   stopAllButton: document.getElementById('stopAllButton'),
   distributeCheckbox: document.getElementById('distributeCheckbox'),
   uploadNodeSelect: document.getElementById('uploadNodeSelect'),
-  uploadNodeSelectLabel: document.getElementById('uploadNodeSelectLabel'),
+  uploadTargetType: document.getElementById('uploadTargetType'),
+  uploadTargetSelectLabel: document.getElementById('uploadTargetSelectLabel'),
+  uploadTargetSelectText: document.getElementById('uploadTargetSelectText'),
+  distributeLabel: document.getElementById('distributeLabel'),
   uploadForm: document.getElementById('uploadForm'),
   uploadStatus: document.getElementById('uploadStatus'),
   clearDataButton: document.getElementById('clearDataButton'),
@@ -313,6 +316,8 @@ function renderAuthState() {
   const canOperate = hasPermission('canOperate')
   if (elements.fileInput) elements.fileInput.disabled = !canOperate
   if (elements.uploadNodeSelect) elements.uploadNodeSelect.disabled = !canOperate
+  if (elements.uploadTargetType) elements.uploadTargetType.disabled = !canOperate
+  if (elements.distributeCheckbox) elements.distributeCheckbox.disabled = !canOperate
   if (elements.operatorForm) {
     const disabled = !hasPermission('canManageOperators')
     for (const element of [
@@ -467,17 +472,24 @@ function activeElementInsideForm() {
 }
 
 function captureFormState() {
-  return { uploadNode: elements.uploadNodeSelect.value, distribute: elements.distributeCheckbox.checked }
+  return {
+    uploadNode: elements.uploadNodeSelect.value,
+    distribute: elements.distributeCheckbox.checked,
+    targetType: elements.uploadTargetType?.value || 'node'
+  }
 }
 
 function restoreFormState(snapshot) {
   if (!snapshot) return
+  if (snapshot.targetType && elements.uploadTargetType) {
+    elements.uploadTargetType.value = snapshot.targetType
+  }
   if (snapshot.uploadNode && Array.from(elements.uploadNodeSelect.options).some((option) => option.value === snapshot.uploadNode)) {
     elements.uploadNodeSelect.value = snapshot.uploadNode
   }
   if (snapshot.distribute) {
     elements.distributeCheckbox.checked = true
-    elements.uploadNodeSelectLabel.style.display = 'none'
+    elements.uploadTargetSelectLabel.style.display = 'none'
     elements.uploadNodeSelect.required = false
   }
 }
@@ -710,12 +722,26 @@ function renderBots() {
 }
 
 function renderFiles() {
-  const sig = JSON.stringify(state.bots.map((b) => `${b.botName}:${b.hostLabel}:${b.online}`))
+  const sig = JSON.stringify({
+    targetType: elements.uploadTargetType?.value || 'node',
+    bots: state.bots.map((b) => `${b.botName}:${b.hostLabel}:${b.online}`)
+  })
   if (state.renderCache.files === sig) return
   state.renderCache.files = sig
 
   const snapshot = captureFormState()
-  const nodeOptions = ['<option value="">Select node</option>']
+  const targetType = elements.uploadTargetType?.value === 'bot' ? 'bot' : 'node'
+  const targetLabel = targetType === 'bot' ? 'bot' : 'node'
+  const nodeOptions = [`<option value="">Select ${targetLabel}</option>`]
+
+  if (elements.uploadTargetSelectText) {
+    elements.uploadTargetSelectText.textContent = targetType === 'bot' ? 'Target bot' : 'Target node'
+  }
+  if (elements.distributeLabel) {
+    elements.distributeLabel.textContent = targetType === 'bot'
+      ? 'Distribute equally across all online bots'
+      : 'Distribute equally across all nodes'
+  }
 
   // Group bots by hostLabel so related bots appear together
   const byNode = new Map()
@@ -725,7 +751,15 @@ function renderFiles() {
     byNode.get(label).push(bot)
   }
 
-  if (byNode.size > 1) {
+  if (targetType === 'bot') {
+    for (const [nodeLabel, bots] of byNode.entries()) {
+      nodeOptions.push(`<optgroup label="${escapeHtml(nodeLabel)}">`)
+      for (const bot of bots.sort((left, right) => String(left.botName).localeCompare(String(right.botName)))) {
+        nodeOptions.push(`<option value="${escapeHtml(bot.botName)}">${escapeHtml(bot.botName)} (${bot.online ? 'online' : 'offline'})</option>`)
+      }
+      nodeOptions.push('</optgroup>')
+    }
+  } else if (byNode.size > 1) {
     // Multiple nodes — use <optgroup> to separate them
     for (const [nodeLabel, bots] of byNode.entries()) {
       nodeOptions.push(`<optgroup label="${escapeHtml(nodeLabel)}">`)
@@ -1252,25 +1286,40 @@ async function onUpload(event) {
   if (!files.length) return
 
   const distribute = elements.distributeCheckbox.checked
+  const targetType = elements.uploadTargetType?.value === 'bot' ? 'bot' : 'node'
 
-  // Build the per-file node assignment list
-  let fileAssignments // Array of { file, hostLabel }
+  // Build the per-file assignment list.
+  let fileAssignments // Array of { file, target }
   if (distribute) {
-    const nodeLabels = [...new Map(
-      state.bots.map((b) => [String(b.hostLabel || 'unknown').trim() || 'unknown', true])
-    ).keys()]
-    if (!nodeLabels.length) {
-      pushEvent('warn', 'No nodes are available to distribute to.')
+    const targets = targetType === 'bot'
+      ? state.bots
+          .filter((bot) => bot.online)
+          .map((bot) => ({
+            target: String(bot.botName || '').trim(),
+            hostLabel: String(bot.hostLabel || 'unknown').trim() || 'unknown'
+          }))
+          .filter((item) => item.target)
+      : [...new Map(
+          state.bots.map((b) => [String(b.hostLabel || 'unknown').trim() || 'unknown', true])
+        ).keys()].map((hostLabel) => ({ target: hostLabel, hostLabel }))
+    if (!targets.length) {
+      pushEvent('warn', `No ${targetType}s are available to distribute to.`)
       return
     }
-    fileAssignments = files.map((file, i) => ({ file, hostLabel: nodeLabels[i % nodeLabels.length] }))
+    fileAssignments = files.map((file, i) => ({ file, ...targets[i % targets.length] }))
   } else {
-    const targetHostLabel = elements.uploadNodeSelect.value
-    if (!targetHostLabel) {
-      pushEvent('warn', 'Select a target node before uploading.')
+    const selectedTarget = elements.uploadNodeSelect.value
+    if (!selectedTarget) {
+      pushEvent('warn', `Select a target ${targetType} before uploading.`)
       return
     }
-    fileAssignments = files.map((file) => ({ file, hostLabel: targetHostLabel }))
+    const selectedBot = targetType === 'bot'
+      ? state.bots.find((bot) => String(bot.botName || '').trim() === selectedTarget)
+      : null
+    const hostLabel = targetType === 'bot'
+      ? (String(selectedBot?.hostLabel || 'unknown').trim() || 'unknown')
+      : selectedTarget
+    fileAssignments = files.map((file) => ({ file, target: selectedTarget, hostLabel }))
   }
 
   state.uploadBusy = true
@@ -1278,38 +1327,42 @@ async function onUpload(event) {
   let failed = 0
 
   try {
-    for (const { file, hostLabel } of fileAssignments) {
-      elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name} -> ${hostLabel}`
+    for (const { file, target } of fileAssignments) {
+      elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name} -> ${target}`
       try {
         const base64 = await fileToBase64(file)
         await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/nbt/upload`, {
           fileName: file.name,
           contentBase64: base64,
+          targetBotName: targetType === 'bot' ? target : null
         })
         completed += 1
       } catch (error) {
         failed += 1
-        pushEvent('error', `Upload failed for ${file.name} -> ${hostLabel}: ${error.message}`)
+        pushEvent('error', `Upload failed for ${file.name} -> ${target}: ${error.message}`)
       }
     }
 
     if (distribute) {
-      const nodeLabels = [...new Set(fileAssignments.map((a) => a.hostLabel))]
+      const targets = [...new Set(fileAssignments.map((a) => a.target))]
       elements.uploadStatus.textContent = failed > 0
-        ? `Upload finished: ${completed} succeeded, ${failed} failed across ${nodeLabels.length} node(s).`
-        : `${completed} file(s) distributed across ${nodeLabels.length} node(s).`
-      pushEvent('info', `Distributed ${completed}/${files.length} files across nodes: ${nodeLabels.join(', ')}${failed ? ` (${failed} failed)` : ''}`)
+        ? `Upload finished: ${completed} succeeded, ${failed} failed across ${targets.length} ${targetType}(s).`
+        : `${completed} file(s) distributed across ${targets.length} ${targetType}(s).`
+      pushEvent('info', `Distributed ${completed}/${files.length} files across ${targetType}s: ${targets.join(', ')}${failed ? ` (${failed} failed)` : ''}`)
     } else {
-      const targetHostLabel = fileAssignments[0]?.hostLabel || ''
+      const target = fileAssignments[0]?.target || ''
       elements.uploadStatus.textContent = failed > 0
         ? `Upload finished: ${completed} succeeded, ${failed} failed.`
-        : `${completed} file(s) uploaded and assigned to node ${targetHostLabel}.`
-      pushEvent('info', `Uploaded -> ${targetHostLabel}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
+        : `${completed} file(s) uploaded and assigned to ${targetType} ${target}.`
+      pushEvent('info', `Uploaded -> ${target}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
     }
 
     elements.uploadForm.reset()
-    elements.uploadNodeSelectLabel.style.display = ''
+    if (elements.uploadTargetType) elements.uploadTargetType.value = targetType
+    elements.uploadTargetSelectLabel.style.display = ''
     elements.uploadNodeSelect.required = true
+    state.renderCache.files = ''
+    renderFiles()
     await refreshData()
   } finally {
     state.uploadBusy = false
@@ -1587,9 +1640,16 @@ elements.uploadForm.addEventListener('submit', (event) => {
 
 elements.distributeCheckbox.addEventListener('change', () => {
   const distribute = elements.distributeCheckbox.checked
-  elements.uploadNodeSelectLabel.style.display = distribute ? 'none' : ''
+  elements.uploadTargetSelectLabel.style.display = distribute ? 'none' : ''
   elements.uploadNodeSelect.required = !distribute
 })
+
+if (elements.uploadTargetType) {
+  elements.uploadTargetType.addEventListener('change', () => {
+    state.renderCache.files = ''
+    renderFiles()
+  })
+}
 
 elements.operatorForm.addEventListener('submit', (event) => {
   void onSaveOperator(event).catch((error) => pushEvent('error', error.message))

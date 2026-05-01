@@ -72,17 +72,24 @@
             <span>NBT file</span>
             <input id="fileInput" name="file" type="file" accept=".nbt" multiple required>
           </label>
+          <label>
+            <span>Target type</span>
+            <select id="uploadTargetType">
+              <option value="node">Nodes / shared folders</option>
+              <option value="bot">Individual bots</option>
+            </select>
+          </label>
           <label class="checkbox-row">
             <input id="distributeCheckbox" type="checkbox">
-            <span>Distribute equally across all nodes</span>
+            <span id="distributeLabel">Distribute equally across all nodes</span>
           </label>
-          <label id="uploadNodeSelectLabel">
-            <span>Target node</span>
+          <label id="uploadTargetSelectLabel">
+            <span id="uploadTargetSelectText">Target node</span>
             <select id="uploadNodeSelect" required>
               <option value="">Select node</option>
             </select>
           </label>
-          <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload To Node</button>
+          <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload NBT</button>
           <p id="uploadStatus" class="hint">No upload in progress.</p>
         </form>
       </section>

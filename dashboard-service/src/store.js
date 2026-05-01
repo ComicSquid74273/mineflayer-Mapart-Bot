@@ -786,7 +786,12 @@ function createStore(baseDir) {
     const normalizedBot = String(botName || '').trim()
     if (!normalizedHost || !normalizedBot) return null
     const items = listCommands()
-    const index = items.findIndex((item) => item.targetHostLabel === normalizedHost && (item.status === 'pending' || (item.status === 'claimed' && item.claimedByBotName === normalizedBot)))
+    const commandMatchesBot = (item) => !item.targetBotName || String(item.targetBotName || '').trim() === normalizedBot
+    const index = items.findIndex((item) =>
+      item.targetHostLabel === normalizedHost
+      && commandMatchesBot(item)
+      && (item.status === 'pending' || (item.status === 'claimed' && item.claimedByBotName === normalizedBot))
+    )
     if (index < 0) return null
     const current = items[index]
     if (current.status === 'pending') {
