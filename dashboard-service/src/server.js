@@ -11,6 +11,7 @@ const LOGS_DIR = process.env.DASHBOARD_LOGS_DIR || path.resolve(__dirname, '..',
 const CONFIG_DIR = process.env.DASHBOARD_CONFIG_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config', '_configs')
 const NBT_DIR = process.env.DASHBOARD_NBT_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config')
 const store = createStore(DATA_DIR)
+const PROTECTED_DATA_FILES = new Set(['operators.json'])
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
     canViewLogs: true,
@@ -164,6 +165,7 @@ function getAuthRequirement(pathname, method) {
   if (pathname === '/api/dashboard/auth/me') return 'authenticated'
   if (reqIsLogPath(pathname, method)) return 'canViewLogs'
   if (reqIsOperatorManagementPath(pathname)) return 'canManageOperators'
+  if (reqIsDataManagementPath(pathname)) return 'canManageOperators'
   if (reqIsNodeDeletePath(pathname, method)) return 'canDeleteNodeFiles'
   if (method !== 'GET' && pathname.startsWith('/api/dashboard/')) return 'canOperate'
   return null
@@ -185,9 +187,48 @@ function reqIsOperatorManagementPath(pathname) {
     || Boolean(matchPath(pathname, '/api/dashboard/operators/:username/delete'))
 }
 
+function reqIsDataManagementPath(pathname) {
+  return pathname === '/api/dashboard/data'
+    || pathname === '/api/dashboard/data/clear'
+    || Boolean(matchPath(pathname, '/api/dashboard/data/:fileName/delete'))
+}
+
 function ensureWithinDir(filePath, dirPath) {
   const relative = path.relative(dirPath, filePath)
   return !relative.startsWith('..') && !path.isAbsolute(relative)
+}
+
+function listDataFiles() {
+  const files = []
+  if (!fs.existsSync(DATA_DIR)) return files
+  for (const entry of fs.readdirSync(DATA_DIR, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue
+    const filePath = path.join(DATA_DIR, entry.name)
+    if (!ensureWithinDir(filePath, DATA_DIR)) continue
+    const stats = fs.statSync(filePath)
+    const protectedFile = PROTECTED_DATA_FILES.has(entry.name.toLowerCase())
+    files.push({
+      name: entry.name,
+      sizeBytes: stats.size,
+      modifiedAt: stats.mtime.toISOString(),
+      protected: protectedFile,
+      deletable: !protectedFile
+    })
+  }
+  return files.sort((a, b) => {
+    if (a.protected !== b.protected) return a.protected ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+}
+
+function resolveDeletableDataFilePath(fileName) {
+  const safeName = path.basename(String(fileName || '').trim())
+  if (!safeName || !safeName.toLowerCase().endsWith('.json')) return null
+  if (PROTECTED_DATA_FILES.has(safeName.toLowerCase())) return null
+  const filePath = path.join(DATA_DIR, safeName)
+  if (!ensureWithinDir(filePath, DATA_DIR)) return null
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return null
+  return filePath
 }
 
 function listDownloadableLogs() {
@@ -506,15 +547,33 @@ async function route(req, res) {
     return sendJson(res, 200, { ok: true })
   }
 
+  if (req.method === 'GET' && pathname === '/api/dashboard/data') {
+    return sendJson(res, 200, { files: listDataFiles(), dataDir: DATA_DIR })
+  }
+
+  const dataDeleteParams = matchPath(pathname, '/api/dashboard/data/:fileName/delete')
+  if (dataDeleteParams) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const fileName = path.basename(String(dataDeleteParams.fileName || '').trim())
+    if (PROTECTED_DATA_FILES.has(fileName.toLowerCase())) {
+      return forbidden(res, `${fileName} is protected`)
+    }
+    const filePath = resolveDeletableDataFilePath(fileName)
+    if (!filePath) return notFound(res)
+    fs.unlinkSync(filePath)
+    if (fileName.toLowerCase() !== 'events.json') {
+      auditOperatorAction(actor, 'delete-data-file', `Deleted data file ${fileName}.`, { fileName }, 'warn')
+    }
+    return sendJson(res, 200, { ok: true, deleted: [fileName] })
+  }
+
   if (req.method === 'POST' && pathname === '/api/dashboard/data/clear') {
-    if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
-    const PROTECTED = new Set(['operators.json'])
     const deleted = []
     const errors = []
     try {
       for (const entry of fs.readdirSync(DATA_DIR, { withFileTypes: true })) {
         if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue
-        if (PROTECTED.has(entry.name.toLowerCase())) continue
+        if (PROTECTED_DATA_FILES.has(entry.name.toLowerCase())) continue
         const filePath = path.join(DATA_DIR, entry.name)
         try {
           fs.unlinkSync(filePath)

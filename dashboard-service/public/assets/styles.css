@@ -146,6 +146,7 @@ h1 {
 }
 
 .panel-header,
+.subsection-header,
 .status-inline,
 .summary-strip,
 .bot-head,
@@ -159,12 +160,18 @@ h1 {
 }
 
 .panel-header,
+.subsection-header,
 .bot-head,
 .file-row,
 .log-row,
 .fleet-node-head {
   justify-content: space-between;
   align-items: start;
+}
+
+.subsection-header {
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
 }
 
 .status-inline {

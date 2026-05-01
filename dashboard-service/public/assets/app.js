@@ -4,6 +4,7 @@ const state = {
   logs: [],
   operators: [],
   configs: [],
+  dataFiles: [],
   configEditor: { name: null, content: '', dirty: false },
   refreshTimer: null,
   refreshIntervalMs: 300000,
@@ -19,6 +20,7 @@ const state = {
     logs: '',
     operators: '',
     configs: '',
+    dataFiles: '',
     events: '',
     auth: ''
   },
@@ -79,6 +81,7 @@ const elements = {
   uploadStatus: document.getElementById('uploadStatus'),
   clearDataButton: document.getElementById('clearDataButton'),
   configFilesList: document.getElementById('configFilesList'),
+  dataFilesList: document.getElementById('dataFilesList'),
   configEditorSection: document.getElementById('configEditorSection'),
   configEditorTitle: document.getElementById('configEditorTitle'),
   configEditorClose: document.getElementById('configEditorClose'),
@@ -983,6 +986,48 @@ function renderConfigs() {
     </article>`
 }
 
+function renderDataFiles() {
+  if (!elements.dataFilesList) return
+  const sig = JSON.stringify({ canAdmin: hasPermission('canManageOperators'), dataFiles: state.dataFiles })
+  if (state.renderCache.dataFiles === sig) return
+  state.renderCache.dataFiles = sig
+
+  if (!hasPermission('canManageOperators')) {
+    elements.dataFilesList.innerHTML = `
+      <article class="empty-card">
+        <h3>Admin only</h3>
+        <p>Log in as admin to view and delete dashboard data files.</p>
+      </article>`
+    return
+  }
+
+  if (!state.dataFiles.length) {
+    elements.dataFilesList.innerHTML = `
+      <article class="empty-card">
+        <h3>No data files found</h3>
+        <p>The dashboard data folder does not currently contain JSON files.</p>
+      </article>`
+    return
+  }
+
+  elements.dataFilesList.innerHTML = state.dataFiles.map((file) => {
+    const protectedText = file.protected ? 'protected' : 'deletable'
+    const action = file.deletable
+      ? `<button class="danger-button small-button" type="button" data-action="delete-data-file" data-permission-needed="canManageOperators" data-file-name="${escapeHtml(file.name)}">Delete</button>`
+      : '<span class="status-pill status-neutral">Protected</span>'
+    return `
+      <article class="file-item">
+        <div class="file-row">
+          <div>
+            <strong>${escapeHtml(file.name)}</strong>
+            <p class="file-meta">${escapeHtml(formatFileSize(file.sizeBytes))} | modified ${escapeHtml(formatTime(file.modifiedAt))} | ${escapeHtml(protectedText)}</p>
+          </div>
+          ${action}
+        </div>
+      </article>`
+  }).join('')
+}
+
 function renderConfigEditor() {
   const { name, content } = state.configEditor
   if (!name) {
@@ -1056,6 +1101,24 @@ async function onClearData() {
   }
 }
 
+async function onDeleteDataFile(fileName) {
+  if (!hasPermission('canManageOperators')) {
+    pushEvent('warn', 'Admin permission required.')
+    return
+  }
+  const safeName = String(fileName || '').trim()
+  if (!safeName) return
+  const confirmed = confirm(`Delete data file ${safeName}? (operators.json is protected)`)
+  if (!confirmed) return
+  try {
+    const result = await submitJson(`/api/dashboard/data/${encodeURIComponent(safeName)}/delete`, {})
+    pushEvent('warn', `Deleted data file ${(result.deleted || [safeName])[0] || safeName}`)
+    await refreshData()
+  } catch (err) {
+    pushEvent('error', `Delete data file failed: ${err.message}`)
+  }
+}
+
 function renderEvents() {
   const eventsSignature = JSON.stringify({
     localEvents: state.localEvents,
@@ -1121,11 +1184,15 @@ async function refreshData(options = {}) {
     const configs = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/config', { requireAuth: true })
       : { files: [] }
+    const dataFiles = state.auth.verified && hasPermission('canManageOperators')
+      ? await requestJson('/api/dashboard/data', { requireAuth: true })
+      : { files: [] }
     state.bots = Array.isArray(bots.items) ? bots.items : []
     state.nodes = Array.isArray(nodes.items) ? nodes.items : []
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = Array.isArray(configs.files) ? configs.files : []
+    state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
     state.events = Array.isArray(events.items) ? events.items : []
     // Clear dismissed banners for bots that are no longer verifying
     for (const botName of [...state.dismissedVerify]) {
@@ -1143,6 +1210,7 @@ async function refreshData(options = {}) {
     renderLogs()
     renderOperators()
     renderConfigs()
+    renderDataFiles()
     renderAuthState()
   } catch (error) {
     elements.serviceStatus.textContent = 'Service offline'
@@ -1398,6 +1466,8 @@ document.addEventListener('click', async (event) => {
       pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
     } else if (button.dataset.action === 'delete-operator') {
       await onDeleteOperator(button.dataset.username || '')
+    } else if (button.dataset.action === 'delete-data-file') {
+      await onDeleteDataFile(button.dataset.fileName || '')
     } else if (button.dataset.action === 'download-log') {
       await downloadLogFile(button.dataset.fileName || '')
       pushEvent('info', `Downloaded log ${button.dataset.fileName || ''}`)
