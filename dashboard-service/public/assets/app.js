@@ -187,8 +187,50 @@ function phaseClass(phase) {
   return `phase-${String(phase || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 }
 
+function isActiveNbtRun(bot) {
+  const currentNbt = String(bot?.currentNbt || '').trim().toLowerCase()
+  return Boolean(bot?.online && currentNbt && currentNbt !== 'none' && bot?.currentNbtStartedAt)
+}
+
+function displayBotPhase(bot) {
+  const phase = String(bot?.phase || '').trim().toLowerCase()
+  const detail = String(bot?.statusDetail || '').trim()
+  if (isActiveNbtRun(bot) && (phase === 'waiting-spawn' || /^spawn-\d+$/i.test(detail))) {
+    return 'printing'
+  }
+  return bot?.phase || 'unknown'
+}
+
+function displayBotStatusDetail(bot) {
+  const detail = String(bot?.statusDetail || '').trim()
+  const phase = displayBotPhase(bot)
+  if (isActiveNbtRun(bot) && /^spawn-\d+$/i.test(detail)) {
+    return phase
+  }
+  return detail || phase || 'unknown'
+}
+
+function isBotPrinting(bot) {
+  return displayBotPhase(bot) === 'printing'
+}
+
+function formatBotProgress(bot) {
+  const progress = bot?.progress || null
+  const percent = Number(progress?.percent)
+  if (Number.isFinite(percent)) return `${percent}%`
+
+  const processed = Number(progress?.processed)
+  const total = Number(progress?.total)
+  if (Number.isFinite(processed) && Number.isFinite(total) && total > 0) {
+    return `${Number(((processed / total) * 100).toFixed(2))}%`
+  }
+
+  return isActiveNbtRun(bot) && isBotPrinting(bot) ? 'working' : 'n/a'
+}
+
 function botHealthClass(bot) {
-  if (!bot.online || bot.phase === 'crashed' || bot.phase === 'stopped') return 'health-red'
+  const phase = displayBotPhase(bot)
+  if (!bot.online || phase === 'crashed' || phase === 'stopped') return 'health-red'
   if (bot.tokenWaiting || bot.activeState === 'stale' || bot.reconnectState === 'reconnecting') return 'health-yellow'
   return 'health-green'
 }
@@ -502,7 +544,7 @@ function renderSummary() {
     botCount: state.bots.length,
     nodeCount: state.nodes.length,
     online: state.bots.filter((item) => item.online).length,
-    printing: state.bots.filter((item) => item.phase === 'printing').length,
+    printing: state.bots.filter((item) => isBotPrinting(item)).length,
     stale: state.bots.filter((item) => item.activeState === 'stale').length,
     idle: state.bots.filter((item) => item.idle).length
   })
@@ -510,7 +552,7 @@ function renderSummary() {
   state.renderCache.summary = summarySignature
 
   const online = state.bots.filter((item) => item.online).length
-  const printing = state.bots.filter((item) => item.phase === 'printing').length
+  const printing = state.bots.filter((item) => isBotPrinting(item)).length
   const stale = state.bots.filter((item) => item.activeState === 'stale').length
   const idle = state.bots.filter((item) => item.idle).length
   const nodeCount = state.nodes.length
@@ -554,11 +596,9 @@ function renderNodeTimingMetrics(node) {
 }
 
 function renderBotCard(bot) {
-  const statusDetail = bot.statusDetail || bot.phase || 'unknown'
+  const statusDetail = displayBotStatusDetail(bot)
   const locationText = bot.locationDetail || bot.location || 'unknown'
-  const progress = bot.progress && Number.isFinite(Number(bot.progress.percent))
-    ? `${bot.progress.percent}%`
-    : 'n/a'
+  const progress = formatBotProgress(bot)
   const currentRunElapsed = bot.currentNbtStartedAt
     ? formatDuration(Date.now() - new Date(bot.currentNbtStartedAt).getTime())
     : 'n/a'

@@ -400,13 +400,20 @@ function summarizeBot(bot) {
   const lastStatusAt = new Date(bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
   const ageMs = Number.isFinite(lastStatusAt) ? Math.max(0, Date.now() - lastStatusAt) : Number.POSITIVE_INFINITY
   const fresh = ageMs <= 30000
+  const currentNbt = String(bot?.currentNbt || '').trim()
+  const statusDetail = bot.statusDetail || bot.phase || null
+  const spawnDetail = /^spawn-\d+$/i.test(String(statusDetail || '').trim())
+  const spawnPhase = String(bot?.phase || '').trim().toLowerCase() === 'waiting-spawn'
+  const activeNbtRun = fresh && currentNbt && currentNbt.toLowerCase() !== 'none' && bot?.currentNbtStartedAt
+  const displayPhase = activeNbtRun && (spawnPhase || spawnDetail) ? 'printing' : bot.phase
+  const displayStatusDetail = activeNbtRun && (spawnPhase || spawnDetail) ? 'printing' : statusDetail
   return {
     botName: bot.botName,
     runtime: bot.runtime,
     hostLabel: bot.hostLabel,
     online: fresh ? bot.online === true : false,
-    phase: bot.phase,
-    statusDetail: bot.statusDetail || bot.phase || null,
+    phase: displayPhase,
+    statusDetail: displayStatusDetail,
     health: bot.health,
     hunger: bot.hunger,
     activeState: fresh ? bot.activeState : 'stale',
@@ -417,7 +424,7 @@ function summarizeBot(bot) {
     role: bot.role,
     recoveryState: bot.recoveryState,
     reconnectState: bot.reconnectState,
-    currentNbt: bot.currentNbt,
+    currentNbt,
     lastStatusAt: bot.lastStatusAt,
     lastError: bot.lastError || null,
     warnings: Array.isArray(bot.warnings) ? bot.warnings.slice(-5) : [],

@@ -509,6 +509,9 @@ function createRuntimeControl() {
     isStopRequested() {
       return state.stopRequested === true
     },
+    isRunActive() {
+      return state.runActive === true
+    },
     markRunStarted(source = 'runtime') {
       state.runActive = true
       state.lastSource = source
@@ -797,7 +800,15 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const now = Date.now()
     const progress = currentProgress()
     const rawPhase = state.phase || progress?.phase || 'idle'
-    const phase = normalizeDashboardPhase(rawPhase)
+    const progressPhase = normalizeDashboardPhase(progress?.phase)
+    let phase = normalizeDashboardPhase(rawPhase)
+    const runActive = runtimeControl?.isRunActive?.() === true
+    const hasActiveNbtRun = runActive && state.currentNbtStartedAt && currentSourceName()
+    if (phase === 'waiting-spawn' && hasActiveNbtRun) {
+      phase = ['printing', 'repair', 'rescan', 'post-print', 'cleanup'].includes(progressPhase)
+        ? progressPhase
+        : 'printing'
+    }
     const health = Number.isFinite(Number(bot?.health)) ? Number(bot.health) : 20
     const hunger = Number.isFinite(Number(bot?.food)) ? Number(bot.food) : 20
     const idle = phase === 'idle' || (now - state.lastActivityAt >= dashboard.idleWindowMs && !['printing', 'repair', 'rescan', 'post-print', 'cleanup', 'starting', 'waiting-spawn'].includes(phase))
@@ -814,7 +825,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const runtimeLocation = currentRuntimeLocation()
     const location = mapDashboardLocation(runtimeLocation)
     const locationDetail = mapDashboardLocationDetail(runtimeLocation)
-    const statusDetail = state.statusDetail || (phase === 'idle' ? 'idle' : phase)
+    let statusDetail = state.statusDetail || (phase === 'idle' ? 'idle' : phase)
+    if (hasActiveNbtRun && phase !== 'waiting-spawn' && /^spawn-\d+$/i.test(String(statusDetail || '').trim())) {
+      statusDetail = phase
+    }
     const progressPayload = progress && Number.isFinite(Number(progress.totalTargets)) && ['printing', 'repair', 'rescan', 'post-print', 'cleanup'].includes(phase)
       ? {
           processed: toNumber(progress.processedTargets, 0),
@@ -15126,8 +15140,8 @@ function runSingleSession(config, sessionNumber) {
     bot.on('spawn', async () => {
       spawnedCount += 1
       dashboardRuntime?.noteActivity()
-      dashboardRuntime?.setPhase('waiting-spawn', `spawn-${spawnedCount}`)
       if (printerStarted || startupPending) return
+      dashboardRuntime?.setPhase('waiting-spawn', `spawn-${spawnedCount}`)
 
       const reqSpawn = getRequiredSpawnCount(config)
       const autoTrigger = getLobbyPortalAutoTrigger(bot?.entity?.position, config)
