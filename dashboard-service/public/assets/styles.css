@@ -554,6 +554,13 @@ button:disabled {
   gap: 10px;
 }
 
+#uploadAssignmentsList {
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}
+
 .file-item,
 .log-row,
 .empty-card {
