@@ -32,8 +32,8 @@
     "checkTimeoutInterval": 60000,
     "reconnect": {
       "enabled": true,
-      "delayMs": 10000,
-      "maxAttempts": 25
+      "delayMs": 20000,
+      "maxAttempts": 50
     }
   },
   "connection": {
