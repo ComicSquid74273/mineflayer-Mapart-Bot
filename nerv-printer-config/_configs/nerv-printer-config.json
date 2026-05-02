@@ -8,7 +8,7 @@
       },
       {
             "name": "ComicBot001",
-            "enabled": true,
+            "enabled": false,
             "auth": "offline",
             "loginPassword": "zKoUufW3hb71u"
           },
