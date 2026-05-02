@@ -205,7 +205,7 @@
           },
           "reconnect": {
             "enabled": true,
-            "delayMs": 11000,
+            "delayMs": 50000,
             "maxAttempts": 50
           }
         },
