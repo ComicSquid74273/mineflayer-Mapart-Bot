@@ -28,6 +28,7 @@ const placementWorkload = createPlacementWorkload({
   delay,
   GoalNear,
   estimateNeededFromLookahead,
+  ensureMaterialsForTargets,
   restockMaterial,
   countInventoryItems,
   recoverMissingItemInventoryDesync,
@@ -7129,7 +7130,7 @@ function estimateNeededFromLookahead(targets) {
 
 async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
   const advanced = config.advanced || {}
-  if (advanced.predictiveRestock === false || !targets.length) return true
+  if ((advanced.predictiveRestock === false && options.force !== true) || !targets.length) return true
   assertRuntimeContinue(bot, config, 'stopping-during-inventory-plan')
 
   const planning = options.windowed === true
@@ -8596,7 +8597,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks)
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
-  const neededByBlock = estimateNeededFromLookahead(batchTargets)
   let active = true
   let currentGoal = checkpoints[0].position
   let currentAction = checkpoints[0].action
@@ -8988,6 +8988,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     const Vec3Current = bot.entity.position.constructor
     return batchTargets.filter((target) => {
       if (activeCols instanceof Set && !activeCols.has(target.col)) return false
+      if (stallSkipped.has(getTargetKey(target))) return false
+      const actual = bot.blockAt(new Vec3Current(target.position.x, target.position.y, target.position.z))
+      return actual?.name !== target.blockName
+    })
+  }
+  const getUnresolvedTraversalTargets = () => {
+    const Vec3Current = bot.entity.position.constructor
+    return batchTargets.filter((target) => {
       if (stallSkipped.has(getTargetKey(target))) return false
       const actual = bot.blockAt(new Vec3Current(target.position.x, target.position.y, target.position.z))
       return actual?.name !== target.blockName
@@ -9390,8 +9398,18 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   if (allowEmergencyRestock && emergencyRestockBlock) {
     console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; stopping movement, refilling, and retrying remaining targets once.`)
-    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
-    if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
+    const unresolvedBeforeRestock = getUnresolvedTraversalTargets()
+    const traversalNeededByBlock = estimateNeededFromLookahead(unresolvedBeforeRestock.length ? unresolvedBeforeRestock : batchTargets)
+    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, traversalNeededByBlock)
+    const hasEmergencyMaterial = restocked || countInventoryItems(bot, emergencyRestockBlock) > 0
+    if (hasEmergencyMaterial && unresolvedBeforeRestock.length > 0) {
+      await ensureMaterialsForTargets(bot, config, unresolvedBeforeRestock, {
+        force: true,
+        windowed: true,
+        materials: [...new Set(unresolvedBeforeRestock.map((target) => target.blockName).filter(Boolean))]
+      })
+    }
+    if (hasEmergencyMaterial) {
       await returnToEmergencyRestockAnchor()
       const Vec3Retry = bot.entity.position.constructor
       const remainingTargets = batchTargets.filter((target) => {
