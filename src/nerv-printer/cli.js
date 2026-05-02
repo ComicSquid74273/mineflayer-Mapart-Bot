@@ -3640,26 +3640,48 @@ function getMaterialChestGroupsForRefill(bot, config, blockName) {
   return groups.map((group) => group.spots)
 }
 
-async function openContainerAt(bot, position, accessPosition) {
+async function openContainerAt(bot, position, accessPosition, options = {}) {
   const Vec3 = bot.entity.position.constructor
   const blockPos = new Vec3(position.x, position.y, position.z)
+  const accessRange = Math.max(0.35, toNumber(options.accessRange, accessPosition ? 1.25 : 2))
+  const attempts = Math.max(1, Math.floor(toNumber(options.attempts, 3)))
+  const timeoutMs = Math.max(500, toNumber(options.timeoutMs, 2500))
+  const retryDelayMs = Math.max(50, toNumber(options.retryDelayMs, 250))
+  const blockWaitMs = Math.max(500, toNumber(options.blockWaitMs, 5000))
+  const blockPollMs = Math.max(50, toNumber(options.blockPollMs, 150))
+  const strictAccess = options.strictAccess === true
   // Always navigate to accessPosition if provided — it is the configured standing spot for the chest.
   // Falling back to the chest block position when far away caused the bot to pathfind into walls/inaccessible spots.
-  const goalPos = accessPosition || position
-  const goal = new GoalNear(goalPos.x, goalPos.y, goalPos.z, 2)
+  await gotoConfiguredAccess(bot, position, accessPosition, accessRange, options.config || null, options.reason || 'open-container', { strict: strictAccess })
 
-  if (distanceToPoint(bot?.entity?.position, goalPos) > 2.25) {
-    const gotoPromise = bot.pathfinder.goto(goal)
-    gotoPromise.catch(() => {})
-    await gotoPromise
+  const block = await waitForBlockAt(bot, blockPos, {
+    timeoutMs: blockWaitMs,
+    pollMs: blockPollMs,
+    expectedNames: options.expectedNames
+  })
+
+  let lastError = null
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      closeCurrentWindowIfOpen(bot, `open-container-attempt-${attempt}`)
+      await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
+      return await Promise.race([
+        bot.openContainer(block),
+        (async () => {
+          await delay(timeoutMs)
+          throw new Error(`open-container-timeout-${timeoutMs}ms`)
+        })()
+      ])
+    } catch (err) {
+      lastError = err
+      if (attempt >= attempts) break
+      try { bot.pathfinder?.stop?.() } catch { }
+      await delay(retryDelayMs)
+      await gotoConfiguredAccess(bot, position, accessPosition, Math.max(0.35, accessRange * 0.8), options.config || null, options.reason || 'open-container-retry', { strict: strictAccess })
+    }
   }
 
-  const block = bot.blockAt(blockPos)
-  if (!block) {
-    throw new Error(`No container block found at ${position.x} ${position.y} ${position.z}`)
-  }
-
-  return await bot.openContainer(block)
+  throw new Error(`Could not open container at ${position.x} ${position.y} ${position.z} from ${formatBotPosition(bot)}: ${lastError?.message || lastError}`)
 }
 
 async function restockMaterial(bot, config, blockName, requestedPulls = 1, neededByBlock = null) {
@@ -3762,7 +3784,18 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             console.log(`[RESTOCK-CHEST] ${blockName}: chest=${spot.x},${spot.y},${spot.z} open=${travel?.x ?? spot.x},${travel?.y ?? spot.y},${travel?.z ?? spot.z} dist=${Math.round(Math.sqrt(horizontalDist2(bot, spot)))} strategy=${attemptStrategy}${retryLabel}`)
           }
           try {
-            container = await openContainerAt(bot, spot, spot.accessPosition)
+            container = await openContainerAt(bot, spot, spot.accessPosition, {
+              config,
+              reason: `restock-${blockName}`,
+              strictAccess: Boolean(spot.accessPosition),
+              accessRange: toNumber(advanced.restockChestAccessRange, 1.25),
+              attempts: toNumber(advanced.restockChestOpenAttempts, 3),
+              timeoutMs: toNumber(advanced.restockChestOpenTimeoutMs, 2500),
+              retryDelayMs: toNumber(advanced.restockChestOpenRetryDelayMs, 250),
+              blockWaitMs: toNumber(advanced.restockChestBlockWaitMs, 5000),
+              blockPollMs: toNumber(advanced.restockChestBlockPollMs, 150),
+              expectedNames: ['chest', 'trapped_chest', 'barrel']
+            })
           } catch (navErr) {
             const navMsg = String(navErr?.message || navErr || '').toLowerCase()
             if (navMsg.includes('goal was changed') || navMsg.includes('goalchanged')) {
@@ -4057,8 +4090,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             }
           }
         } catch (err) {
-          if (config.advanced?.debugPrints) {
-            console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.z}: ${err?.message || err}`)
+          const message = String(err?.message || err)
+          if (message.includes('Could not open container') || message.includes('open-container-timeout') || message.includes('No block at') || message.includes('Unexpected block at')) {
+            console.log(`[RESTOCK-WARN] Could not open chest for ${blockName} at ${spot.x},${spot.y},${spot.z}: ${message}`)
+          } else if (config.advanced?.debugPrints) {
+            console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.z}: ${message}`)
           }
         } finally {
           if (container) {

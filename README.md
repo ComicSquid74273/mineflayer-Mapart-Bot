@@ -311,6 +311,9 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.postRestockDelayMs` | `120` | Delay after restock. | Increase if inventory update arrives late. |
 | `advanced.inventoryExtraStateSyncMs` | `0` | Optional extra wait after each Mineflayer window click on state-id versions. | Keep `0`; set `150` to restore the older conservative click wrapper. |
 | `advanced.restockFastSettleMs` | `0` | Extra settle wait after a fast restock burst before checking the open window. | Keep `0` with `nerv-window`; raise only if server window updates arrive late. |
+| `advanced.restockChestAccessRange` | `1.25` | Max distance from the configured restock `open` point before opening a chest. | Lower if the bot stops just outside reach; raise only if the open point is hard to path to. |
+| `advanced.restockChestOpenAttempts` | `3` | Number of bounded chest-open attempts before trying the next chest. | Raise on intermittent server interaction lag. |
+| `advanced.restockChestOpenTimeoutMs` | `2500` | Per-attempt timeout for Mineflayer chest open. | Raise if chest windows appear very late. |
 | `advanced.restockPostCloseInventorySyncMs` | `2000` | Max wait after closing a restock chest for local inventory/hotbar to show the moved stack. | Prevents printing from resuming from chest-window state before the bot can actually select the item. |
 | `advanced.restockFailureCooldownMs` | `250` | Cooldown after failed material restock. | Increase if bot loops too fast on empty chests. |
 | `advanced.predictiveRestock` | `true` | Plan inventory before placement window. | Keep `true`; prevents mid-row emergency refill. |
