@@ -3825,12 +3825,12 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         }
 
         if (totalInChest <= 0) {
-          if (config.advanced?.debugPrints) {
+          if (config.errorHandling?.logErrors !== false) {
             console.log(`[RESTOCK-SKIP] Chest at ${spot.x} ${spot.y} ${spot.z} has 0 of ${blockName}, moving to next.`)
           }
           try { container.close() } catch { }
           container = null
-          continue
+          break
         }
 
         // How much do we need vs what the chest has?
