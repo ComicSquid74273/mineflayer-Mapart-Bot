@@ -3494,6 +3494,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 }
 
 async function equipMaterial(bot, config, blockName, options = {}) {
+  const allowRestock = options.allowRestock !== false
   const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
   const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
 
@@ -3506,6 +3507,10 @@ async function equipMaterial(bot, config, blockName, options = {}) {
   }
 
   if (unavailableMaterialCache.has(blockName)) {
+    return false
+  }
+
+  if (!allowRestock) {
     return false
   }
 
@@ -7550,7 +7555,10 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   }
 
   if (String(bot.heldItem?.name || '') !== target.blockName) {
-    const equipped = await equipMaterial(bot, config, target.blockName, { fastSwap: isFastNoWaitPlacement })
+    const equipped = await equipMaterial(bot, config, target.blockName, {
+      fastSwap: isFastNoWaitPlacement,
+      allowRestock: !isFastNoWaitPlacement
+    })
     const selectedMaterialReady = selectedMaterialMatches(bot, target.blockName)
     if (!equipped || !selectedMaterialReady) {
       if (countInventoryItems(bot, target.blockName) > 0) {
