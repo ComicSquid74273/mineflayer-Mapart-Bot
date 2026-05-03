@@ -287,6 +287,16 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function resolveUniqueFilePath(targetPath) {
+  if (!fs.existsSync(targetPath)) return targetPath
+  const parsed = path.parse(targetPath)
+  for (let index = 2; index < 10000; index += 1) {
+    const candidate = path.join(parsed.dir, `${parsed.name}-${index}${parsed.ext}`)
+    if (!fs.existsSync(candidate)) return candidate
+  }
+  throw new Error(`could not resolve unique file path for ${targetPath}`)
+}
+
 function observeBackgroundTask(promise) {
   if (promise && typeof promise.catch === 'function') {
     promise.catch(() => {})
@@ -1084,6 +1094,33 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         fs.unlinkSync(targetPath)
         noteActivity()
         await reportNodeCommandResult(command.commandId, 'succeeded', `deleted finished map ${command.fileName}`)
+        return true
+      }
+      case 'reprint-finished-map': {
+        const fileName = path.basename(String(command.fileName || '').trim())
+        if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) {
+          await reportNodeCommandResult(command.commandId, 'failed', `invalid finished map file name: ${command.fileName || 'unknown'}`)
+          return true
+        }
+        const fromPath = resolveFinishedMapPath(fileName)
+        if (!fs.existsSync(fromPath)) {
+          await reportNodeCommandResult(command.commandId, 'failed', `finished map not found: ${fileName}`)
+          return true
+        }
+        try {
+          const targetPath = resolveUniqueFilePath(resolveNodeNbtPath(fileName))
+          fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+          fs.copyFileSync(fromPath, targetPath)
+          state.currentNbt = path.basename(targetPath)
+          printingIntentActive = true
+          runtimeControl?.requestStart('dashboard-reprint')
+          state.startRequested = true
+          state.stopRequested = false
+          noteActivity()
+          await reportNodeCommandResult(command.commandId, 'succeeded', `queued reprint ${path.basename(targetPath)} and requested start`)
+        } catch (error) {
+          await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
+        }
         return true
       }
       default: {
@@ -9990,11 +10027,9 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           fs.mkdirSync(finishedDir, { recursive: true })
         }
 
-        const toPath = path.join(finishedDir, path.basename(fromPath))
-        if (!fs.existsSync(toPath)) {
-          fs.renameSync(fromPath, toPath)
-          console.log(`[FILES] Moved ${path.basename(fromPath)} to ${toPath}`)
-        }
+        const toPath = resolveUniqueFilePath(path.join(finishedDir, path.basename(fromPath)))
+        fs.renameSync(fromPath, toPath)
+        console.log(`[FILES] Moved ${path.basename(fromPath)} to ${toPath}`)
       }
     }
 
@@ -10512,7 +10547,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       fs.mkdirSync(finishedDir, { recursive: true })
     }
 
-    const toPath = path.join(finishedDir, path.basename(fromPath))
+    const toPath = resolveUniqueFilePath(path.join(finishedDir, path.basename(fromPath)))
     fs.renameSync(fromPath, toPath)
     console.log(`[FILES] Moved ${path.basename(fromPath)} to ${toPath}`)
   }

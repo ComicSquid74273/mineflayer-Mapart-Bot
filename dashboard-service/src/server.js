@@ -238,6 +238,7 @@ function reqIsDashboardOperationPath(pathname, method) {
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/stop'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/reprint'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/stop'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/verify'))
@@ -1230,6 +1231,25 @@ async function route(req, res) {
       fileName,
       commandId: command.commandId
     }, 'warn')
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/reprint')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const fileName = path.basename(String(params.fileName || '').trim())
+    if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) return badRequest(res, 'fileName must end in .nbt')
+    const command = store.createCommand({
+      targetHostLabel: params.hostLabel,
+      commandType: 'reprint-finished-map',
+      fileName,
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'reprint-finished-map', `Queued reprint for ${fileName} on node ${params.hostLabel}.`, {
+      hostLabel: params.hostLabel,
+      fileName,
+      commandId: command.commandId
+    })
     return sendJson(res, 201, { command })
   }
 

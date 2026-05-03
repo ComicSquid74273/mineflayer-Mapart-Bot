@@ -403,6 +403,10 @@ h1 {
   flex-wrap: wrap;
 }
 
+.toolbar-row {
+  margin-top: 14px;
+}
+
 .chat-panel {
   display: flex;
   flex-direction: column;

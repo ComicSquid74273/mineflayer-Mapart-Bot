@@ -6,6 +6,7 @@ const state = {
   configs: [],
   dataFiles: [],
   uploadAssignments: [],
+  nbtSearch: '',
   configEditor: { name: null, content: '', dirty: false },
   refreshTimer: null,
   refreshIntervalMs: 300000,
@@ -56,6 +57,7 @@ const elements = {
   fileInput: document.getElementById('fileInput'),
   lastRefresh: document.getElementById('lastRefresh'),
   logsList: document.getElementById('logsList'),
+  nbtSearchInput: document.getElementById('nbtSearchInput'),
   nodesGrid: document.getElementById('nodesGrid'),
   operatorForm: document.getElementById('operatorForm'),
   loginButton: document.getElementById('loginButton'),
@@ -960,7 +962,7 @@ function renderUploadAssignments() {
 }
 
 function renderNodes() {
-  const nodesSignature = JSON.stringify(state.nodes)
+  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch })
   if (state.renderCache.nodes === nodesSignature) return
   state.renderCache.nodes = nodesSignature
 
@@ -975,9 +977,18 @@ function renderNodes() {
   }
 
   elements.nodesGrid.innerHTML = state.nodes.map((node) => {
-    const files = Array.isArray(node.nodeFiles) ? node.nodeFiles : []
-    const finishedFiles = Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : []
+    const query = String(state.nbtSearch || '').trim().toLowerCase()
+    const matchesQuery = (file) => {
+      if (!query) return true
+      return String(file?.fileName || '').toLowerCase().includes(query)
+    }
+    const files = (Array.isArray(node.nodeFiles) ? node.nodeFiles : []).filter(matchesQuery)
+    const finishedFiles = (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : []).filter(matchesQuery)
     const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
+    const totalNodeFiles = Array.isArray(node.nodeFiles) ? node.nodeFiles.length : 0
+    const totalFinishedFiles = Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0
+    const noActiveText = query && totalNodeFiles ? 'No active .nbt files match this search.' : 'No .nbt files reported on this node.'
+    const noFinishedText = query && totalFinishedFiles ? 'No finished .nbt files match this search.' : 'No finished .nbt files reported on this node.'
     return `
       <article class="node-card">
         <div class="file-row">
@@ -996,12 +1007,14 @@ function renderNodes() {
                 <strong>${escapeHtml(file.fileName)}</strong>
                 <p class="file-meta">${escapeHtml(file.sizeBytes)} bytes | ${escapeHtml(formatTime(file.modifiedAt))}</p>
               </div>
-              <button class="danger-button small-button" type="button" data-action="delete-node-file" data-permission-needed="canDeleteNodeFiles" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Delete</button>
+              <div class="file-actions">
+                <button class="danger-button small-button" type="button" data-action="delete-node-file" data-permission-needed="canDeleteNodeFiles" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Delete</button>
+              </div>
             </div>
           </article>
-        `).join('') : '<p class="hint">No .nbt files reported on this node.</p>'}
-        <details class="finished-map-details">
-          <summary>Finished maps (${escapeHtml(node.finishedMapCount || finishedFiles.length || 0)})</summary>
+        `).join('') : `<p class="hint">${escapeHtml(noActiveText)}</p>`}
+        <details class="finished-map-details" open>
+          <summary>Finished maps (${escapeHtml(finishedFiles.length)}${query ? `/${escapeHtml(node.finishedMapCount || totalFinishedFiles || 0)}` : ''})</summary>
           <div class="finished-map-list">
             ${finishedFiles.length ? finishedFiles.map((file) => `
               <article class="file-item compact-file-item">
@@ -1010,10 +1023,13 @@ function renderNodes() {
                     <strong>${escapeHtml(file.fileName)}</strong>
                     <p class="file-meta">${escapeHtml(file.sizeBytes)} bytes | ${escapeHtml(formatTime(file.modifiedAt))}</p>
                   </div>
-                  <button class="danger-button small-button" type="button" data-action="delete-finished-map" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Delete</button>
+                  <div class="file-actions">
+                    <button class="accent-button small-button" type="button" data-action="reprint-finished-map" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Reprint</button>
+                    <button class="danger-button small-button" type="button" data-action="delete-finished-map" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Delete</button>
+                  </div>
                 </div>
               </article>
-            `).join('') : '<p class="hint">No finished .nbt files reported on this node.</p>'}
+            `).join('') : `<p class="hint">${escapeHtml(noFinishedText)}</p>`}
           </div>
         </details>
       </article>
@@ -1660,6 +1676,16 @@ async function onDeleteFinishedMap(hostLabel, fileName) {
   await refreshData()
 }
 
+async function onReprintFinishedMap(hostLabel, fileName) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before reprinting finished maps.')
+    return
+  }
+  await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/finished-maps/${encodeURIComponent(fileName)}/reprint`, {})
+  pushEvent('info', `Queued reprint for ${fileName} on ${hostLabel}`)
+  await refreshData()
+}
+
 async function onDeleteLog(fileName) {
   if (!hasPermission('canManageOperators')) {
     pushEvent('warn', 'Admin permission required before deleting log files.')
@@ -1790,6 +1816,8 @@ document.addEventListener('click', async (event) => {
       await onDeleteNodeFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
     } else if (button.dataset.action === 'delete-finished-map') {
       await onDeleteFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
+    } else if (button.dataset.action === 'reprint-finished-map') {
+      await onReprintFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
     } else if (button.dataset.action === 'download-node-log') {
       await downloadNodeLogFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
       pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
@@ -1928,6 +1956,14 @@ if (elements.uploadTargetType) {
   elements.uploadTargetType.addEventListener('change', () => {
     state.renderCache.files = ''
     renderFiles()
+  })
+}
+
+if (elements.nbtSearchInput) {
+  elements.nbtSearchInput.addEventListener('input', () => {
+    state.nbtSearch = elements.nbtSearchInput.value
+    state.renderCache.nodes = ''
+    renderNodes()
   })
 }
 
