@@ -803,7 +803,8 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           return {
             fileName: entry.name,
             sizeBytes: stats.size,
-            modifiedAt: stats.mtime.toISOString()
+            modifiedAt: stats.mtime.toISOString(),
+            reportedByBotName: botName
           }
         })
         .sort((left, right) => String(left.fileName).localeCompare(String(right.fileName), undefined, { numeric: true, sensitivity: 'base' }))

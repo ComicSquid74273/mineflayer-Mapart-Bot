@@ -128,10 +128,17 @@ function createStore(baseDir) {
     if (!input || typeof input !== 'object') return null
     const fileName = path.basename(String(input.fileName || '').trim())
     if (!fileName) return null
+    const reportedByBotNames = Array.isArray(input.reportedByBotNames)
+      ? input.reportedByBotNames
+      : (input.reportedByBotName ? [input.reportedByBotName] : [])
     return {
       fileName,
       sizeBytes: Math.max(0, toNumber(input.sizeBytes, 0)),
-      modifiedAt: String(input.modifiedAt || '').trim() || null
+      modifiedAt: String(input.modifiedAt || '').trim() || null,
+      reportedByBotNames: reportedByBotNames
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .sort((left, right) => String(left).localeCompare(String(right), undefined, { sensitivity: 'base' }))
     }
   }
 
@@ -153,7 +160,11 @@ function createStore(baseDir) {
         sizeBytes: Math.max(toNumber(existing.sizeBytes, 0), toNumber(normalized.sizeBytes, 0)),
         modifiedAt: nextModifiedMs >= existingModifiedMs
           ? (normalized.modifiedAt || existing.modifiedAt)
-          : (existing.modifiedAt || normalized.modifiedAt)
+          : (existing.modifiedAt || normalized.modifiedAt),
+        reportedByBotNames: Array.from(new Set([
+          ...(Array.isArray(existing.reportedByBotNames) ? existing.reportedByBotNames : []),
+          ...(Array.isArray(normalized.reportedByBotNames) ? normalized.reportedByBotNames : [])
+        ])).sort((left, right) => String(left).localeCompare(String(right), undefined, { sensitivity: 'base' }))
       })
     }
     return Array.from(byName.values())

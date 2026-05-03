@@ -1073,6 +1073,17 @@ function renderLogs() {
       botNames: Array.isArray(node.botNames) ? node.botNames : [],
       items: Array.isArray(node.nodeLogs) ? node.nodeLogs : []
     }))
+  const groupedBotCount = nodeLogGroups.reduce((sum, group) => sum + group.botNames.length, 0)
+  const sharedHostLabelNotice = nodeLogGroups.length === 1 && groupedBotCount > 1
+    ? `
+      <article class="file-item">
+        <div>
+          <strong>One node label detected</strong>
+          <p class="file-meta">All ${escapeHtml(groupedBotCount)} reporting bot(s) use hostLabel "${escapeHtml(nodeLogGroups[0].hostLabel)}", so logs are grouped under one node. Set a unique dashboard.hostLabel per machine/process if these should appear as separate nodes.</p>
+        </div>
+      </article>
+    `
+    : ''
 
   const logsSignature = JSON.stringify({
     verified: state.auth.verified,
@@ -1147,19 +1158,23 @@ function renderLogs() {
           <p class="file-meta">${escapeHtml(group.items.length)} log file(s)${group.botNames.length ? ` | Bots: ${escapeHtml(group.botNames.join(', '))}` : ''}</p>
         </div>
       </div>
-      ${group.items.length ? group.items.map((item) => `
-        <article class="file-item">
-          <div class="file-row">
-            <div>
-              <strong>${escapeHtml(item.fileName)}</strong>
-              <p class="file-meta">Node: ${escapeHtml(group.hostLabel)} | ${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}</p>
+      ${group.items.length ? group.items.map((item) => {
+        const reporters = Array.isArray(item.reportedByBotNames) && item.reportedByBotNames.length
+          ? ` | Reported by: ${item.reportedByBotNames.join(', ')}`
+          : ''
+        return `
+          <article class="file-item">
+            <div class="file-row">
+              <div>
+                <strong>${escapeHtml(item.fileName)}</strong>
+                <p class="file-meta">Node: ${escapeHtml(group.hostLabel)} | ${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}${escapeHtml(reporters)}</p>
+              </div>
+              <div style="display:flex;gap:8px;flex-shrink:0;">
+                <button class="ghost-button small-button" type="button" data-action="download-node-log" data-permission-needed="canViewLogs" data-host-label="${escapeHtml(group.hostLabel)}" data-file-name="${escapeHtml(item.fileName)}">Download</button>
+              </div>
             </div>
-            <div style="display:flex;gap:8px;flex-shrink:0;">
-              <button class="ghost-button small-button" type="button" data-action="download-node-log" data-permission-needed="canViewLogs" data-host-label="${escapeHtml(group.hostLabel)}" data-file-name="${escapeHtml(item.fileName)}">Download</button>
-            </div>
-          </div>
-        </article>
-      `).join('') : `
+          </article>`
+      }).join('') : `
         <article class="file-item">
           <div>
             <strong>No node logs reported</strong>
@@ -1170,7 +1185,7 @@ function renderLogs() {
     </section>
   `).join('')
 
-  elements.logsList.innerHTML = `${hostLogsMarkup}${nodeLogsMarkup}`
+  elements.logsList.innerHTML = `${hostLogsMarkup}${sharedHostLabelNotice}${nodeLogsMarkup}`
 }
 
 function renderOperators() {
