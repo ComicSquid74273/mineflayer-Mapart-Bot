@@ -2362,6 +2362,9 @@ function createDefaultConfig() {
       repairFallbackToStopPlace: true,
       repairStallEmergencyRestock: true,
       repairEmergencyRestockTransientHits: 3,
+      repairConfirmFastPlacements: true,
+      repairFastConfirmMs: 180,
+      repairFastConfirmPollMs: 15,
       repairVerifySettleMs: 120,
       repairMaxMismatchRatio: 0.25,
       repairMaxMismatchCount: 512,
@@ -7517,11 +7520,17 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   const printer = config.printer || {}
   const errors = config.errorHandling || {}
   const Vec3 = bot.entity.position.constructor
-  const isFastNoWaitPlacement = isRepairPass === 'noWait'
+  const isFastNoWaitPlacement = isRepairPass === 'noWait' || isRepairPass === 'noWaitConfirm'
+  const requiresFastConfirmation = isRepairPass === 'noWaitConfirm'
   const fastConfirmMs = isFastNoWaitPlacement
-    ? 0
+    ? (requiresFastConfirmation
+        ? Math.max(20, toNumber(config.advanced?.repairFastConfirmMs, Math.max(160, toNumber(config.advanced?.scannerPlaceConfirmMs, 80) * 2)))
+        : 0)
     : Math.max(0, toNumber(config.advanced?.scannerPlaceConfirmMs, Math.max(45, toNumber(config.advanced?.scannerWorkloadPollMs, 10) * 4)))
-  const fastConfirmPollMs = Math.max(5, toNumber(config.advanced?.scannerPlaceConfirmPollMs, 15))
+  const fastConfirmPollMs = Math.max(5, toNumber(
+    requiresFastConfirmation ? config.advanced?.repairFastConfirmPollMs : config.advanced?.scannerPlaceConfirmPollMs,
+    toNumber(config.advanced?.scannerPlaceConfirmPollMs, 15)
+  ))
 
   if (isFastNoWaitPlacement) {
     ensureUsableEntityState(bot, config, 'before-place-fast', { allowPlatformSeed: false, log: false })
@@ -7653,9 +7662,16 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
       }
-      if (isFastNoWaitPlacement || await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
+      if (!requiresFastConfirmation && isFastNoWaitPlacement) {
         placedSuccessfully = true
         break
+      }
+      if (await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
+        placedSuccessfully = true
+        break
+      }
+      if (requiresFastConfirmation) {
+        lastPlaceError = new Error('unconfirmed-place')
       }
     } catch (err) {
       lastPlaceError = err
@@ -7666,7 +7682,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         }
         return { state: 'skip', reason: `missing-item-${target.blockName}` }
       }
-      if (isFastNoWaitPlacement) {
+      if (isFastNoWaitPlacement && !requiresFastConfirmation) {
         // Fast path: don't wait for confirmation on error, just report failure
         break
       }
@@ -7685,6 +7701,9 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   }
 
   if (!placedSuccessfully) {
+    if (requiresFastConfirmation && String(lastPlaceError?.message || '') === 'unconfirmed-place') {
+      return { state: 'skip', reason: 'unconfirmed-place' }
+    }
     throw lastPlaceError || new Error('placement failed with all faces')
   }
 
@@ -7915,8 +7934,10 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   const moveTimeoutMs = Math.max(1000, toNumber(advanced.repairMoveTimeoutMs, 8000))
   const progressLogMs = Math.max(1000, toNumber(advanced.repairProgressLogMs, 5000))
   const fallbackToStopPlace = advanced.repairFallbackToStopPlace !== false
+  const confirmFastPlacements = advanced.repairConfirmFastPlacements !== false
   const Vec3 = bot.entity.position.constructor
   const processed = new Set()
+  const unconfirmedTargets = new Map()
   let active = true
   let placed = 0
   let already = 0
@@ -7952,6 +7973,9 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
     } else {
       skipped += 1
       const reason = String(result.reason || '')
+      if (reason === 'unconfirmed-place') {
+        unconfirmedTargets.set(targetKey(target), target)
+      }
       if (allowEmergencyRestock && advanced.repairStallEmergencyRestock !== false && (reason === 'unconfirmed-place' || reason.startsWith('held-item-desync-'))) {
         logPingDiagnostic(bot, config, `repair-${reason}`, {
           label,
@@ -8018,7 +8042,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
         placementsThisTick += 1
 
         try {
-          const result = await placeNervScannerTarget(bot, config, target)
+          const result = await placeNervScannerTarget(bot, config, target, { confirm: confirmFastPlacements })
           markResult(target, result, label)
         } catch (err) {
           skipped += 1
@@ -8112,7 +8136,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
             bot.setControlState('sprint', shouldSprintDuringRepair(config))
           }
         } else {
-          result = await placeNervScannerTarget(bot, config, target)
+          result = await placeNervScannerTarget(bot, config, target, { confirm: confirmFastPlacements })
         }
         markResult(target, result, actual && actual.name !== 'air' ? `${label}-STOP` : label)
       } catch (err) {
@@ -8163,6 +8187,25 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
       skipped += remainingTargets.length
     }
     return { placed, already, skipped }
+  }
+
+  if (fallbackToStopPlace && unconfirmedTargets.size > 0) {
+    const unresolvedUnconfirmed = scanPlacementErrors(bot, [...unconfirmedTargets.values()], {
+      config,
+      logPrefix: `${label}-UNCONFIRMED-VERIFY`,
+      logErrors: false,
+      maxLogs: 0
+    }).map((entry) => entry.target)
+
+    if (unresolvedUnconfirmed.length > 0) {
+      console.log(`[${label}-UNCONFIRMED-FALLBACK] stop-place repair for ${unresolvedUnconfirmed.length} unconfirmed fast placement(s).`)
+      stopBotMovement(bot)
+      const fallback = await repairTargets(bot, config, unresolvedUnconfirmed, placeRange)
+      const resolvedByFallback = fallback.placed + fallback.already
+      placed += fallback.placed
+      already += fallback.already
+      skipped = Math.max(0, skipped - resolvedByFallback) + fallback.skipped
+    }
   }
 
   if (fallbackNeeded && fallbackToStopPlace) {
@@ -8609,6 +8652,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
   const optimisticRetryMs = Math.max(25, toNumber(advanced.scannerOptimisticRetryMs, Math.max(120, pollMs * 4)))
   const inlineRepairEnabled = advanced.scannerInlineRepairEnabled === true
+  const lineEndSettleMs = Math.max(0, toNumber(advanced.scannerLineEndSettleMs, 0))
   const missRecoveryEnabled = advanced.scannerMissRecoveryEnabled !== false
   const missRecoveryThreshold = Math.max(1, toNumber(advanced.scannerMissRecoveryThreshold, 3))
   const missRecoveryBacktrackBlocks = Math.max(1, toNumber(advanced.scannerMissRecoveryBacktrackBlocks, 3))
@@ -9075,6 +9119,37 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       raiseRepairAlert(target, reason)
     }
   }
+  const drainActiveColumnTargets = async (timeoutMs) => {
+    const drainTimeoutMs = Math.max(0, toNumber(timeoutMs, 0))
+    if (drainTimeoutMs <= 0) return
+
+    const drainStart = Date.now()
+    const placeRangeSq = placeRange * placeRange
+    const Vec3Drain = bot.entity.position.constructor
+    while (Date.now() - drainStart < drainTimeoutMs) {
+      assertRuntimeContinue(bot, config, 'stopping-during-placement')
+      const now = Date.now()
+      const botPos = bot.entity.position
+      const hasNearbyPending = batchTargets.some((target) => {
+        const key = getTargetKey(target)
+        if (seen.has(key) || stallSkipped.has(key)) return false
+        if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) return false
+        const actual = bot.blockAt(new Vec3Drain(target.position.x, target.position.y, target.position.z))
+        if (actual?.name === target.blockName) {
+          markTargetPlacedInWorld(target, key)
+          return false
+        }
+        const pendingExpiry = pendingUntil.get(key)
+        if (pendingExpiry !== undefined && pendingExpiry > now + drainTimeoutMs) return false
+        const dx = botPos.x - (target.position.x + 0.5)
+        const dy = botPos.y - (target.position.y + 0.5)
+        const dz = botPos.z - (target.position.z + 0.5)
+        return dx * dx + dy * dy + dz * dz <= placeRangeSq
+      })
+      if (!hasNearbyPending) break
+      await delay(Math.max(1, pollMs || 10))
+    }
+  }
 
   const placementLoop = observeBackgroundTask((async () => {
     while (active) {
@@ -9294,32 +9369,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       }
 
       if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
-        const drainTimeoutMs = Math.max(50, toNumber(advanced.inlineRepairDrainMs, Math.max(200, retryCooldownMs * 4)))
-        const drainStart = Date.now()
-        const placeRangeSq = placeRange * placeRange
-        const Vec3Drain = bot.entity.position.constructor
-        while (Date.now() - drainStart < drainTimeoutMs) {
-          assertRuntimeContinue(bot, config, 'stopping-during-placement')
-          const botPos = bot.entity.position
-          const hasNearbyPending = batchTargets.some((t) => {
-            const key = getTargetKey(t)
-            if (seen.has(key) || stallSkipped.has(key)) return false
-            if (currentActiveCols instanceof Set && !currentActiveCols.has(t.col)) return false
-            const actual = bot.blockAt(new Vec3Drain(t.position.x, t.position.y, t.position.z))
-            if (actual?.name === t.blockName) {
-              markTargetPlacedInWorld(t, key)
-              return false
-            }
-            const pendingExpiry = pendingUntil.get(key)
-            if (pendingExpiry !== undefined && pendingExpiry > Date.now() + drainTimeoutMs) return false
-            const dx = botPos.x - (t.position.x + 0.5)
-            const dy = botPos.y - (t.position.y + 0.5)
-            const dz = botPos.z - (t.position.z + 0.5)
-            return dx * dx + dy * dy + dz * dz <= placeRangeSq
-          })
-          if (!hasNearbyPending) break
-          await delay(Math.max(1, pollMs || 10))
-        }
+        await drainActiveColumnTargets(Math.max(50, toNumber(advanced.inlineRepairDrainMs, Math.max(200, retryCooldownMs * 4))))
+      }
+
+      if (checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
+        await drainActiveColumnTargets(lineEndSettleMs)
       }
 
       if (missRecoveryEnabled && !emergencyRestockBlock && prevCheckpointPos) {
@@ -9406,22 +9460,29 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       prevCheckpointPos = { x: checkpoint.position.x, y: checkpoint.position.y, z: checkpoint.position.z }
 
-      if (inlineRepairEnabled && checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
+      if (checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
         const rowErrors = getUnresolvedTargetsForActiveCols(currentActiveCols)
         if (rowErrors.length > 0) {
-          console.log(`[NERV-WORKLOAD-LINEEND-REPAIR] unresolved=${rowErrors.length}; repairing before next traversal leg.`)
-          const repaired = await repairTargetsInBatches(bot, config, rowErrors, Math.max(1, toNumber(printer.placeRange, 4)), 'NERV-WORKLOAD-LINEEND')
-          placed += repaired.placed
-          already += repaired.already
-          skipped += repaired.skipped
-          for (const target of rowErrors) {
-            const key = getTargetKey(target)
-            const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
-            if (actual?.name === target.blockName) {
-              markTargetPlacedInWorld(target, key)
-            } else {
-              raiseRepairAlert(target, 'lineend-unresolved')
+          const previousAction = currentAction
+          currentAction = 'lineEnd-repair'
+          try {
+            console.log(`[NERV-WORKLOAD-LINEEND-REPAIR] unresolved=${rowErrors.length}; repairing before next traversal leg.`)
+            const repaired = await repairTargetsInBatches(bot, config, rowErrors, Math.max(1, toNumber(printer.placeRange, 4)), 'NERV-WORKLOAD-LINEEND')
+            placed += repaired.placed
+            already += repaired.already
+            skipped += repaired.skipped
+            for (const target of rowErrors) {
+              const key = getTargetKey(target)
+              const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
+              if (actual?.name === target.blockName) {
+                markTargetPlacedInWorld(target, key)
+              } else {
+                raiseRepairAlert(target, 'lineend-unresolved')
+              }
             }
+          } finally {
+            currentAction = previousAction
+            lastTickTime = Date.now()
           }
         }
       }
@@ -11675,8 +11736,8 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
   return best
 }
 
-async function placeNervScannerTarget(bot, config, target) {
-  return await placeTarget(bot, config, target, 'noWait')
+async function placeNervScannerTarget(bot, config, target, options = {}) {
+  return await placeTarget(bot, config, target, options.confirm === true ? 'noWaitConfirm' : 'noWait')
 }
 
 async function runNervScannerTest(bot, config) {

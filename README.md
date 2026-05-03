@@ -396,7 +396,7 @@ These are the main knobs for skipped blocks while printing.
 | `advanced.scannerMaxCatchupPlacements` | `10` | Max placements allowed in one workload burst. | Lower to `8` if server dislikes bursts. |
 | `advanced.scannerWorkloadPollMs` | `6` | Poll interval for time workload. | Lower is more responsive but more CPU. |
 | `advanced.scannerWorkloadLogEveryMs` | `1000` | Test workload progress log interval. | Mostly test/debug. |
-| `advanced.scannerLineEndSettleMs` | `4500` | Wait at line end while placement loop continues. | Increase if `missing` remains high; decrease if stable and too slow. |
+| `advanced.scannerLineEndSettleMs` | `4500` | Wait at line end while placement loop continues before the line-end world-state repair check. | Increase if `missing` remains high; decrease if stable and too slow. |
 | `advanced.scannerAdaptiveSlowdown` | `true` | Automatically slows down when a batch misses too much. | Keep `true` for multibot tuning. |
 | `advanced.scannerAdaptiveMissingThreshold` | `8` | Missing count that triggers slowdown. | Lower reacts faster; higher tolerates skips. |
 | `advanced.scannerAdaptiveRecoverThreshold` | `2` | Missing count that allows speed recovery. | Lower makes recovery stricter. |
@@ -431,6 +431,7 @@ Important workload logs:
 [NERV-WORKLOAD-STALL-RECOVER] start recovery=... stalledMs=... attempts=... optimistic=... target=x y z confirmMs=...
 [NERV-WORKLOAD-STALL-RECOVER] attempt=... target=x y z result=... confirmed=... before=... after=... held=... selected=...
 [NERV-WORKLOAD-STALL-SKIP] buffer=... skipped=... lastTarget=x y z stalledMs=... attempts=... optimistic=...
+[NERV-WORKLOAD-LINEEND-REPAIR] unresolved=...; repairing before next traversal leg.
 [NERV-WORKLOAD-ADAPT-SLOW] missing=... placeDelayMs=... lineEndSettleMs=...
 [NERV-WORKLOAD-ADAPT-RECOVER] missing=... placeDelayMs=... lineEndSettleMs=...
 ```
@@ -449,7 +450,10 @@ Important workload logs:
 | `advanced.repairFallbackToStopPlace` | `true` | If moving repair stalls, fallback to stop-place. | Keep `true`; prevents idle repair. |
 | `advanced.repairStallEmergencyRestock` | `true` | Trigger emergency restock/refresh if repair has no confirmed progress or repeated transient placement failures. | Experimental recovery for stale inventory/server refusal during repair. |
 | `advanced.repairEmergencyRestockTransientHits` | `3` | Transient repair failures before emergency restock/refresh. | Lower reacts faster; higher avoids restocking on brief lag. |
-| `advanced.repairVerifySettleMs` | `180` | Wait before verifying repaired batch. | Increase if server updates blocks late. |
+| `advanced.repairConfirmFastPlacements` | `true` | Confirm fast moving repair placements before counting them as placed. | Keep `true`; prevents packet-only clicks from hiding missed repairs. |
+| `advanced.repairFastConfirmMs` | `180` | Confirmation window for fast repair placement. | Increase if repair clicks are accepted late under lag. |
+| `advanced.repairFastConfirmPollMs` | `15` | Poll interval while confirming fast repair placement. | Keep small for responsive repair retries. |
+| `advanced.repairVerifySettleMs` | `120` | Wait before verifying repaired batch. | Increase if server updates blocks late. |
 | `advanced.repairMaxMismatchRatio` | `0.25` | Warning threshold only; no hard abort. | Logs warning above 25 percent mismatches. |
 | `advanced.repairMaxMismatchCount` | `512` | Warning count threshold only; no hard abort. | Logs warning when both count and ratio are high. |
 | `advanced.useMapCornerYForNbtCarpets` | `true` | Use machine/map-corner Y for NBT carpets. | Keep `true` for this platform. |
