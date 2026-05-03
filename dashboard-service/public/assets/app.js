@@ -7,6 +7,7 @@ const state = {
   dataFiles: [],
   uploadAssignments: [],
   nbtSearch: '',
+  localReprintCommands: [],
   configEditor: { name: null, content: '', dirty: false },
   refreshTimer: null,
   refreshIntervalMs: 300000,
@@ -984,7 +985,11 @@ function renderNodes() {
     }
     const files = (Array.isArray(node.nodeFiles) ? node.nodeFiles : []).filter(matchesQuery)
     const finishedFiles = (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : []).filter(matchesQuery)
-    const reprintCommands = (Array.isArray(node.reprintCommands) ? node.reprintCommands : []).filter(matchesQuery)
+    const serverReprints = Array.isArray(node.reprintCommands) ? node.reprintCommands : []
+    const localReprints = state.localReprintCommands
+      .filter((command) => String(command.hostLabel || '') === String(node.hostLabel || ''))
+      .filter((command) => !serverReprints.some((serverCommand) => serverCommand.commandId && serverCommand.commandId === command.commandId))
+    const reprintCommands = [...localReprints, ...serverReprints].filter(matchesQuery)
     const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
     const totalNodeFiles = Array.isArray(node.nodeFiles) ? node.nodeFiles.length : 0
     const totalFinishedFiles = Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0
@@ -1010,12 +1015,13 @@ function renderNodes() {
                 : (status === 'failed' ? 'status-offline' : 'status-neutral')
               const claimed = command.claimedByBotName ? ` | claimed by ${command.claimedByBotName}` : ''
               const result = command.resultMessage ? ` | ${command.resultMessage}` : ''
+              const queuedAt = command.createdAt ? formatTime(command.createdAt) : 'just now'
               return `
                 <article class="file-item compact-file-item">
                   <div class="file-row">
                     <div>
                       <strong>${escapeHtml(command.fileName)}</strong>
-                      <p class="file-meta">${escapeHtml(status)}${escapeHtml(claimed)} | queued ${escapeHtml(formatTime(command.createdAt))}${escapeHtml(result)}</p>
+                      <p class="file-meta">${escapeHtml(status)}${escapeHtml(claimed)} | queued ${escapeHtml(queuedAt)}${escapeHtml(result)}</p>
                     </div>
                     <span class="tag ${statusClass}">${escapeHtml(status)}</span>
                   </div>
@@ -1704,9 +1710,42 @@ async function onReprintFinishedMap(hostLabel, fileName) {
     pushEvent('warn', 'Login as an operator before reprinting finished maps.')
     return
   }
-  await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/finished-maps/${encodeURIComponent(fileName)}/reprint`, {})
-  pushEvent('info', `Queued reprint for ${fileName} on ${hostLabel}`)
-  await refreshData()
+  const localId = `local-reprint-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  state.localReprintCommands.unshift({
+    commandId: localId,
+    hostLabel,
+    fileName,
+    status: 'sending',
+    claimedByBotName: null,
+    createdAt: new Date().toISOString(),
+    completedAt: null,
+    resultMessage: 'sending request to dashboard'
+  })
+  state.localReprintCommands = state.localReprintCommands.slice(0, 20)
+  state.renderCache.nodes = ''
+  renderNodes()
+  try {
+    const result = await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/finished-maps/${encodeURIComponent(fileName)}/reprint`, {})
+    state.localReprintCommands = state.localReprintCommands.map((command) => command.commandId === localId
+      ? {
+          ...command,
+          commandId: result.command?.commandId || localId,
+          status: result.command?.status || 'pending',
+          resultMessage: 'waiting for node bot to claim it'
+        }
+      : command)
+    pushEvent('info', `Queued reprint for ${fileName} on ${hostLabel}`)
+    state.renderCache.nodes = ''
+    renderNodes()
+    await refreshData()
+  } catch (error) {
+    state.localReprintCommands = state.localReprintCommands.map((command) => command.commandId === localId
+      ? { ...command, status: 'failed', completedAt: new Date().toISOString(), resultMessage: error.message }
+      : command)
+    state.renderCache.nodes = ''
+    renderNodes()
+    throw error
+  }
 }
 
 async function onDeleteLog(fileName) {
