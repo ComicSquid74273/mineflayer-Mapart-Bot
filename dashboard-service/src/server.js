@@ -169,6 +169,7 @@ function getAuthRequirement(pathname, method) {
   if (reqIsOperatorManagementPath(pathname)) return 'canManageOperators'
   if (reqIsDataManagementPath(pathname)) return 'canManageOperators'
   if (reqIsConfigManagementPath(pathname)) return 'canManageOperators'
+  if (reqIsFinishedMapDeletePath(pathname, method)) return 'canManageOperators'
   if (reqIsNodeDeletePath(pathname, method)) return 'canDeleteNodeFiles'
   if (reqIsDashboardOperationPath(pathname, method)) return 'canOperate'
   return null
@@ -183,6 +184,10 @@ function reqIsLogPath(pathname, method) {
 
 function reqIsNodeDeletePath(pathname, method) {
   return method === 'POST' && Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/files/:fileName/delete'))
+}
+
+function reqIsFinishedMapDeletePath(pathname, method) {
+  return method === 'POST' && Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/delete'))
 }
 
 function reqIsLogDeletePath(pathname, method) {
@@ -411,6 +416,7 @@ function summarizeBot(bot) {
     botName: bot.botName,
     runtime: bot.runtime,
     hostLabel: bot.hostLabel,
+    configFileName: bot.configFileName || null,
     online: fresh ? bot.online === true : false,
     phase: displayPhase,
     statusDetail: displayStatusDetail,
@@ -424,6 +430,8 @@ function summarizeBot(bot) {
     role: bot.role,
     recoveryState: bot.recoveryState,
     reconnectState: bot.reconnectState,
+    reconnectCount: Number.isFinite(Number(bot.reconnectCount)) ? Number(bot.reconnectCount) : 0,
+    reconnectStreak: Number.isFinite(Number(bot.reconnectStreak)) ? Number(bot.reconnectStreak) : 0,
     currentNbt,
     lastStatusAt: bot.lastStatusAt,
     lastError: bot.lastError || null,
@@ -445,9 +453,14 @@ function summarizeNode(node) {
     botCount: node.botCount,
     onlineCount: node.onlineCount,
     botNames: node.botNames,
+    configFiles: Array.isArray(node.configFiles) ? node.configFiles : [],
     lastStatusAt: node.lastStatusAt,
     nodeFiles: Array.isArray(node.nodeFiles) ? node.nodeFiles : [],
     nodeLogs: Array.isArray(node.nodeLogs) ? node.nodeLogs : [],
+    finishedMapCount: Number.isFinite(Number(node.finishedMapCount)) ? Number(node.finishedMapCount) : 0,
+    finishedMapFiles: Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : [],
+    assignmentStats: node.assignmentStats || null,
+    operationalStats: node.operationalStats || null,
     timing: node.timing || null
   }
 }
@@ -678,6 +691,7 @@ async function route(req, res) {
         }
       }
     } catch {}
+    files.sort((left, right) => String(left.name).localeCompare(String(right.name), undefined, { sensitivity: 'base' }))
     return sendJson(res, 200, { files, configDir: CONFIG_DIR })
   }
 
@@ -844,11 +858,12 @@ async function route(req, res) {
     if (status !== 'succeeded' && status !== 'failed') return badRequest(res, 'status must be succeeded or failed')
     const command = store.completeNodeCommand(params.hostLabel, params.commandId, status, body?.resultMessage, body?.botName || null)
     if (!command) return notFound(res)
-    if (command.commandType === 'delete-node-file') {
+    if (command.commandType === 'delete-node-file' || command.commandType === 'delete-finished-map') {
+      const finishedMapDelete = command.commandType === 'delete-finished-map'
       store.addEvent({
         operator: `bot:${body?.botName || params.hostLabel}`,
-        action: 'delete-node-file-completed',
-        message: `${status === 'succeeded' ? 'Deleted' : 'Failed to delete'} ${command.fileName || 'unknown'} on node ${params.hostLabel}.`,
+        action: finishedMapDelete ? 'delete-finished-map-completed' : 'delete-node-file-completed',
+        message: `${status === 'succeeded' ? 'Deleted' : 'Failed to delete'} ${finishedMapDelete ? 'finished map ' : ''}${command.fileName || 'unknown'} on node ${params.hostLabel}.`,
         details: { hostLabel: params.hostLabel, fileName: command.fileName, commandId: params.commandId, status, resultMessage: body?.resultMessage || null },
         level: status === 'succeeded' ? 'info' : 'warn'
       })
@@ -1111,6 +1126,25 @@ async function route(req, res) {
       requestedBy: actor.username
     })
     auditOperatorAction(actor, 'delete-node-file', `Queued delete for ${fileName} on node ${params.hostLabel}.`, {
+      hostLabel: params.hostLabel,
+      fileName,
+      commandId: command.commandId
+    }, 'warn')
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/delete')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const fileName = path.basename(String(params.fileName || '').trim())
+    if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) return badRequest(res, 'fileName must end in .nbt')
+    const command = store.createCommand({
+      targetHostLabel: params.hostLabel,
+      commandType: 'delete-finished-map',
+      fileName,
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'delete-finished-map', `Queued finished map delete for ${fileName} on node ${params.hostLabel}.`, {
       hostLabel: params.hostLabel,
       fileName,
       commandId: command.commandId

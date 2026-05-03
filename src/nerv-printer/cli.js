@@ -747,8 +747,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return mapDashboardLocationDetail(currentRuntimeLocation())
   }
 
-  function listNodeNbtFiles() {
-    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+  function listNbtFilesInFolder(folder, warningKey, warningLabel) {
     if (!fs.existsSync(folder)) return []
     try {
       return fs.readdirSync(folder, { withFileTypes: true })
@@ -764,12 +763,22 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         })
         .sort((left, right) => String(left.fileName).localeCompare(String(right.fileName), undefined, { numeric: true, sensitivity: 'base' }))
     } catch (error) {
-      logThrottled(`dashboard-node-files-${botName}`, `[DASHBOARD-WARN] node file listing failed for ${botName}: ${error?.message || error}`, {
+      logThrottled(`${warningKey}-${botName}`, `[DASHBOARD-WARN] ${warningLabel} failed for ${botName}: ${error?.message || error}`, {
         intervalMs: 30000,
         level: 'warn'
       })
       return []
     }
+  }
+
+  function listNodeNbtFiles() {
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    return listNbtFilesInFolder(folder, 'dashboard-node-files', 'node file listing')
+  }
+
+  function listFinishedMapFiles() {
+    const folder = path.resolve(process.cwd(), config.files?.finishedFolder || './finished-maps')
+    return listNbtFilesInFolder(folder, 'dashboard-finished-map-files', 'finished map listing')
   }
 
   function listNodeLogFiles() {
@@ -838,10 +847,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         }
       : undefined
 
+    const nodeFiles = listNodeNbtFiles()
+    const finishedMapFiles = listFinishedMapFiles()
+
     return {
       botName,
       runtime: 'nerv-printer',
       hostLabel: dashboard.hostLabel,
+      configFileName: path.basename(getUserConfigPath()),
       online: isOnline,
       phase,
       health,
@@ -855,10 +868,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       role,
       recoveryState: phase === 'repair' ? 'recovering' : state.recoveryState,
       reconnectState: state.reconnectState,
+      reconnectCount: Math.max(0, toNumber(sessionNumber, 1) - 1),
+      reconnectStreak: state.reconnectState === 'reconnecting' ? Math.max(0, toNumber(sessionNumber, 1) - 1) : 0,
       currentNbt: currentSourceName(),
       lastStatusAt: new Date().toISOString(),
-      nodeFiles: listNodeNbtFiles(),
+      nodeFiles,
       nodeLogs: listNodeLogFiles(),
+      finishedMapCount: finishedMapFiles.length,
+      finishedMapFiles,
       progress: progressPayload,
       lastError: state.lastError || null,
       warnings: state.warnings.slice(-5),
@@ -962,6 +979,13 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return path.join(folder, safeName)
   }
 
+  function resolveFinishedMapPath(fileName) {
+    const folder = path.resolve(process.cwd(), config.files?.finishedFolder || './finished-maps')
+    const safeName = path.basename(String(fileName || '').trim())
+    if (!safeName) throw new Error('file name is required')
+    return path.join(folder, safeName)
+  }
+
   async function executeNodeCommand(command) {
     if (!command) return false
     switch (command.commandType) {
@@ -1020,6 +1044,17 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         }
         noteActivity()
         await reportNodeCommandResult(command.commandId, 'succeeded', `deleted ${command.fileName}`)
+        return true
+      }
+      case 'delete-finished-map': {
+        const targetPath = resolveFinishedMapPath(command.fileName)
+        if (!fs.existsSync(targetPath)) {
+          await reportNodeCommandResult(command.commandId, 'failed', `finished map not found: ${command.fileName}`)
+          return true
+        }
+        fs.unlinkSync(targetPath)
+        noteActivity()
+        await reportNodeCommandResult(command.commandId, 'succeeded', `deleted finished map ${command.fileName}`)
         return true
       }
       default: {

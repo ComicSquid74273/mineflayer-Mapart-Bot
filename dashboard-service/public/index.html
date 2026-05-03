@@ -166,18 +166,21 @@
       </section>
 
       <section class="panel panel-wide">
-        <div class="panel-header">
-          <div>
-            <p class="panel-kicker">Nodes</p>
-            <h2>Node NBT Files</h2>
+        <details class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Nodes</p>
+              <h2>Node NBT Files</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div id="nodesGrid" class="node-grid collapsible-content">
+            <article class="empty-card">
+              <h3>No node inventory yet</h3>
+              <p>Once a node reports its shared NBT folder, the files will appear here.</p>
+            </article>
           </div>
-        </div>
-        <div id="nodesGrid" class="node-grid">
-          <article class="empty-card">
-            <h3>No node inventory yet</h3>
-            <p>Once a node reports its shared NBT folder, the files will appear here.</p>
-          </article>
-        </div>
+        </details>
       </section>
 
       <section class="panel panel-wide">

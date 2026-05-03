@@ -169,6 +169,33 @@ h1 {
   align-items: start;
 }
 
+.collapsible-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.collapsible-summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.collapsible-summary::-webkit-details-marker {
+  display: none;
+}
+
+.summary-action::before {
+  content: "View";
+}
+
+.collapsible-section[open] .summary-action::before {
+  content: "Hide";
+}
+
+.collapsible-content {
+  margin-top: 16px;
+}
+
 .subsection-header {
   padding-top: 6px;
   border-top: 1px solid var(--line);
@@ -208,6 +235,12 @@ h1 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
+}
+
+.node-alert-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .summary-card {
@@ -555,7 +588,7 @@ button:disabled {
 }
 
 #uploadAssignmentsList {
-  max-height: 360px;
+  max-height: min(620px, 65vh);
   overflow-y: auto;
   padding-right: 4px;
   scrollbar-width: thin;
@@ -569,6 +602,27 @@ button:disabled {
 
 .node-card .file-item {
   padding: 10px 12px;
+}
+
+.finished-map-details {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.finished-map-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.finished-map-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(360px, 45vh);
+  overflow-y: auto;
+  padding-top: 10px;
+  padding-right: 4px;
+  scrollbar-width: thin;
 }
 
 .file-row,

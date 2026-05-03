@@ -574,9 +574,15 @@ function renderSummary() {
 
 function renderNodeTimingMetrics(node) {
   const timing = node.timing || {}
-  const activeRun = timing.activeRun || null
-  const completed = Number(timing.totalCompletedMaps || 0)
-  const average = completed > 0 ? formatDuration(timing.averageDurationMs) : 'n/a'
+  const completed = Number(node.finishedMapCount || 0)
+  const averageSamples = Number(timing.totalCompletedMaps || 0)
+  const averageDurationMs = Number(timing.averageDurationMs || 0)
+  const average = averageSamples > 0 && averageDurationMs > 0 ? formatDuration(averageDurationMs) : 'n/a'
+  const assignmentStats = node.assignmentStats || {}
+  const operationalStats = node.operationalStats || {}
+  const assigned = Number(assignmentStats.assignedTotal || 0)
+  const remaining = Number(operationalStats.remainingMaps || 0)
+  const reconnects = Number(operationalStats.reconnectCount || 0)
   return `
     <div class="node-timing-strip">
       <div class="metric metric-compact">
@@ -586,13 +592,29 @@ function renderNodeTimingMetrics(node) {
         Completed<strong>${escapeHtml(completed)}</strong>
       </div>
       <div class="metric metric-compact">
-        Current Run<strong>${escapeHtml(activeRun ? formatDuration(activeRun.elapsedMs) : 'idle')}</strong>
+        Assigned<strong>${escapeHtml(assigned)}</strong>
       </div>
       <div class="metric metric-compact">
-        Active Map<strong>${escapeHtml(activeRun?.fileName || timing.lastCompletedFileName || 'none')}</strong>
+        Remaining<strong>${escapeHtml(remaining)}</strong>
+      </div>
+      <div class="metric metric-compact">
+        Reconnects<strong>${escapeHtml(reconnects)}</strong>
       </div>
     </div>
   `
+}
+
+function renderNodeOperationalTags(node) {
+  const stats = node.operationalStats || {}
+  const assignmentStats = node.assignmentStats || {}
+  const tags = []
+  if (Number(assignmentStats.assignedPending || 0) > 0) tags.push(['status-neutral', `Pending ${assignmentStats.assignedPending}`])
+  if (Number(assignmentStats.assignedFailed || 0) > 0) tags.push(['status-offline', `Failed ${assignmentStats.assignedFailed}`])
+  if (Number(stats.staleBotCount || 0) > 0) tags.push(['status-neutral', `Stale ${stats.staleBotCount}`])
+  if (Number(stats.reconnectingCount || 0) > 0) tags.push(['status-neutral', `Reconnecting ${stats.reconnectingCount}`])
+  if (Number(stats.errorCount || 0) > 0) tags.push(['status-offline', `Errors ${stats.errorCount}`])
+  if (!tags.length) return ''
+  return `<div class="node-alert-strip">${tags.map(([className, label]) => `<span class="tag ${className}">${escapeHtml(label)}</span>`).join('')}</div>`
 }
 
 function renderBotCard(bot) {
@@ -659,7 +681,7 @@ function renderBotCard(bot) {
         <div class="metric">NBT<strong>${escapeHtml(bot.currentNbt || 'none')}</strong></div>
         <div class="metric">Current Run<strong>${escapeHtml(currentRunElapsed)}</strong></div>
         <div class="metric">Recovery<strong>${escapeHtml(bot.recoveryState || 'none')}</strong></div>
-        <div class="metric">Reconnect<strong>${escapeHtml(bot.reconnectState || 'idle')}</strong></div>
+        <div class="metric">Reconnect<strong>${escapeHtml(bot.reconnectCount ? `${bot.reconnectState || 'idle'} (${bot.reconnectCount})` : (bot.reconnectState || 'idle'))}</strong></div>
       </div>
       ${bot.lastError ? `<p class="hint">Last error: ${escapeHtml(bot.lastError)}</p>` : ''}
       ${warningsHtml}
@@ -718,21 +740,25 @@ function renderBots() {
 
   const renderedNodes = state.nodes.map((node) => {
     const nodeBots = (botsByNode.get(node.hostLabel) || []).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
+    const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
+    const configText = configFiles.length ? ` | Config ${configFiles.join(', ')}` : ''
+    const editConfigName = configFiles.length === 1 ? configFiles[0] : ''
     return `
       <article class="fleet-node-group">
         <div class="fleet-node-head">
           <div>
             <h3 class="bot-name">${escapeHtml(node.hostLabel)}</h3>
-            <p class="bot-meta">${escapeHtml((node.botNames || []).join(', ') || 'no bots')} | Online ${escapeHtml(node.onlineCount)}/${escapeHtml(node.botCount)} | Last update ${escapeHtml(formatTime(node.lastStatusAt))}</p>
+            <p class="bot-meta">${escapeHtml((node.botNames || []).join(', ') || 'no bots')} | Online ${escapeHtml(node.onlineCount)}/${escapeHtml(node.botCount)} | Last update ${escapeHtml(formatTime(node.lastStatusAt))}${escapeHtml(configText)}</p>
           </div>
           <div class="fleet-node-controls">
             <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
-            <button class="ghost-button small-button" type="button" data-action="edit-node-config" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" title="Edit nerv-printer-config.json for this node">Edit Config</button>
+            <button class="ghost-button small-button" type="button" data-action="edit-node-config" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" data-config-name="${escapeHtml(editConfigName)}" title="${escapeHtml(editConfigName ? `Edit ${editConfigName}` : 'View config files')}">Edit Config</button>
             <button class="accent-button small-button" type="button" data-action="start-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Start Node</button>
             <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Stop Node</button>
           </div>
         </div>
         ${renderNodeTimingMetrics(node)}
+        ${renderNodeOperationalTags(node)}
         <div class="fleet-node-bots">
           ${nodeBots.length ? nodeBots.map(renderBotCard).join('') : `
             <article class="empty-card">
@@ -890,16 +916,19 @@ function renderNodes() {
 
   elements.nodesGrid.innerHTML = state.nodes.map((node) => {
     const files = Array.isArray(node.nodeFiles) ? node.nodeFiles : []
+    const finishedFiles = Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : []
+    const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
     return `
       <article class="node-card">
         <div class="file-row">
           <div>
             <strong>${escapeHtml(node.hostLabel)}</strong>
-            <p class="file-meta">Bots: ${escapeHtml((node.botNames || []).join(', ') || 'none')} | Online ${escapeHtml(node.onlineCount)}/${escapeHtml(node.botCount)}</p>
+            <p class="file-meta">Bots: ${escapeHtml((node.botNames || []).join(', ') || 'none')} | Online ${escapeHtml(node.onlineCount)}/${escapeHtml(node.botCount)}${configFiles.length ? ` | Config ${escapeHtml(configFiles.join(', '))}` : ''}</p>
           </div>
           <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
         </div>
         ${renderNodeTimingMetrics(node)}
+        ${renderNodeOperationalTags(node)}
         ${files.length ? files.map((file) => `
           <article class="file-item compact-file-item">
             <div class="file-row">
@@ -911,6 +940,22 @@ function renderNodes() {
             </div>
           </article>
         `).join('') : '<p class="hint">No .nbt files reported on this node.</p>'}
+        <details class="finished-map-details">
+          <summary>Finished maps (${escapeHtml(node.finishedMapCount || finishedFiles.length || 0)})</summary>
+          <div class="finished-map-list">
+            ${finishedFiles.length ? finishedFiles.map((file) => `
+              <article class="file-item compact-file-item">
+                <div class="file-row">
+                  <div>
+                    <strong>${escapeHtml(file.fileName)}</strong>
+                    <p class="file-meta">${escapeHtml(file.sizeBytes)} bytes | ${escapeHtml(formatTime(file.modifiedAt))}</p>
+                  </div>
+                  <button class="danger-button small-button" type="button" data-action="delete-finished-map" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" data-file-name="${escapeHtml(file.fileName)}">Delete</button>
+                </div>
+              </article>
+            `).join('') : '<p class="hint">No finished .nbt files reported on this node.</p>'}
+          </div>
+        </details>
       </article>
     `
   }).join('')
@@ -1075,28 +1120,27 @@ function renderConfigs() {
     return
   }
 
-  const mainConfig = state.configs.find((f) => f.name === 'nerv-printer-config.json')
-  if (!mainConfig) {
+  if (!state.configs.length) {
     elements.configFilesList.innerHTML = `
       <article class="empty-card">
-        <h3>nerv-printer-config.json not found</h3>
+        <h3>No config files found</h3>
         <p>Make sure DASHBOARD_CONFIG_DIR points to the _configs directory.</p>
       </article>`
     return
   }
 
-  elements.configFilesList.innerHTML = `
+  elements.configFilesList.innerHTML = state.configs.map((configFile) => `
     <article class="file-item">
       <div class="file-row">
         <div>
-          <strong>${escapeHtml(mainConfig.name)}</strong>
-          <p class="file-meta">${formatFileSize(mainConfig.sizeBytes)} | modified ${escapeHtml(formatTime(mainConfig.modifiedAt))}</p>
+          <strong>${escapeHtml(configFile.name)}</strong>
+          <p class="file-meta">${formatFileSize(configFile.sizeBytes)} | modified ${escapeHtml(formatTime(configFile.modifiedAt))}</p>
         </div>
         <button class="ghost-button small-button" type="button"
           data-action="edit-config" data-permission-needed="canManageOperators"
-          data-config-name="${escapeHtml(mainConfig.name)}">Edit</button>
+          data-config-name="${escapeHtml(configFile.name)}">Edit</button>
       </div>
-    </article>`
+    </article>`).join('')
 }
 
 function renderDataFiles() {
@@ -1477,6 +1521,16 @@ async function onDeleteNodeFile(hostLabel, fileName) {
   await refreshData()
 }
 
+async function onDeleteFinishedMap(hostLabel, fileName) {
+  if (!hasPermission('canManageOperators')) {
+    pushEvent('warn', 'Admin permission required before deleting finished maps.')
+    return
+  }
+  await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/finished-maps/${encodeURIComponent(fileName)}/delete`, {})
+  pushEvent('warn', `Queued finished map delete for ${fileName} on ${hostLabel}`)
+  await refreshData()
+}
+
 async function onDeleteLog(fileName) {
   if (!hasPermission('canManageOperators')) {
     pushEvent('warn', 'Admin permission required before deleting log files.')
@@ -1605,6 +1659,8 @@ document.addEventListener('click', async (event) => {
     button.disabled = true
     if (button.dataset.action === 'delete-node-file') {
       await onDeleteNodeFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
+    } else if (button.dataset.action === 'delete-finished-map') {
+      await onDeleteFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
     } else if (button.dataset.action === 'download-node-log') {
       await downloadNodeLogFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
       pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
@@ -1632,8 +1688,11 @@ document.addEventListener('click', async (event) => {
     } else if (button.dataset.action === 'edit-config') {
       await onEditConfig(button.dataset.configName || '')
     } else if (button.dataset.action === 'edit-node-config') {
-      await onEditConfig('nerv-printer-config.json')
-      document.getElementById('configEditorSection')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      if (button.dataset.configName) {
+        await onEditConfig(button.dataset.configName)
+      } else {
+        elements.configFilesList?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }
     } else if (button.dataset.action === 'chat-send') {
       const botName = button.dataset.botName || ''
       const input = document.querySelector(`.chat-input[data-chat-bot="${CSS.escape(botName)}"]`)

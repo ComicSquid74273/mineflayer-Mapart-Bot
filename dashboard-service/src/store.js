@@ -124,6 +124,103 @@ function createStore(baseDir) {
     writeJson(nodeStatsFile, items)
   }
 
+  function sanitizeNodeFileEntry(input) {
+    if (!input || typeof input !== 'object') return null
+    const fileName = path.basename(String(input.fileName || '').trim())
+    if (!fileName) return null
+    return {
+      fileName,
+      sizeBytes: Math.max(0, toNumber(input.sizeBytes, 0)),
+      modifiedAt: String(input.modifiedAt || '').trim() || null
+    }
+  }
+
+  function mergeNodeFileEntries(currentItems, incomingItems) {
+    const byName = new Map()
+    for (const item of [...(Array.isArray(currentItems) ? currentItems : []), ...(Array.isArray(incomingItems) ? incomingItems : [])]) {
+      const normalized = sanitizeNodeFileEntry(item)
+      if (!normalized) continue
+      const key = normalized.fileName.toLowerCase()
+      const existing = byName.get(key)
+      if (!existing) {
+        byName.set(key, normalized)
+        continue
+      }
+      const existingModifiedMs = toTimestamp(existing.modifiedAt)
+      const nextModifiedMs = toTimestamp(normalized.modifiedAt)
+      byName.set(key, {
+        fileName: normalized.fileName || existing.fileName,
+        sizeBytes: Math.max(toNumber(existing.sizeBytes, 0), toNumber(normalized.sizeBytes, 0)),
+        modifiedAt: nextModifiedMs >= existingModifiedMs
+          ? (normalized.modifiedAt || existing.modifiedAt)
+          : (existing.modifiedAt || normalized.modifiedAt)
+      })
+    }
+    return Array.from(byName.values())
+      .sort((left, right) => String(left.fileName).localeCompare(String(right.fileName), undefined, { numeric: true, sensitivity: 'base' }))
+  }
+
+  function createAssignmentStats() {
+    return {
+      assignedTotal: 0,
+      assignedPending: 0,
+      assignedCompleted: 0,
+      assignedFailed: 0
+    }
+  }
+
+  function addAssignmentStatus(stats, status) {
+    stats.assignedTotal += 1
+    const normalized = String(status || '').trim().toLowerCase()
+    if (normalized === 'failed') {
+      stats.assignedFailed += 1
+    } else if (normalized === 'placed' || normalized === 'succeeded') {
+      stats.assignedCompleted += 1
+    } else if (normalized === 'assigned' || normalized === 'claimed' || normalized === 'downloaded') {
+      stats.assignedPending += 1
+    }
+    return stats
+  }
+
+  function buildAssignmentStatsByHost(botMap) {
+    const botToHost = new Map()
+    for (const bot of Object.values(botMap || {})) {
+      const botName = String(bot?.botName || '').trim()
+      const hostLabel = String(bot?.hostLabel || '').trim()
+      if (botName && hostLabel) botToHost.set(botName, hostLabel)
+    }
+
+    const byHost = new Map()
+    const ensureStats = (hostLabel) => {
+      const normalizedHost = String(hostLabel || '').trim()
+      if (!normalizedHost) return null
+      const stats = byHost.get(normalizedHost) || createAssignmentStats()
+      byHost.set(normalizedHost, stats)
+      return stats
+    }
+
+    for (const item of listFiles()) {
+      const targetHost = String(item.assignedHostLabel || '').trim()
+      const targetBot = String(item.assignedBotName || '').trim()
+      const hostLabel = targetHost || (targetBot ? botToHost.get(targetBot) : '')
+      const stats = ensureStats(hostLabel)
+      if (stats) addAssignmentStatus(stats, item.deliveryStatus)
+    }
+
+    return byHost
+  }
+
+  function createNodeOperationalStats() {
+    return {
+      reconnectCount: 0,
+      reconnectingCount: 0,
+      staleBotCount: 0,
+      warningCount: 0,
+      errorCount: 0,
+      remainingMaps: 0
+    }
+  }
+
   function sanitizeTimingRun(input) {
     if (!input || typeof input !== 'object') return null
     const fileName = String(input.fileName || '').trim()
@@ -151,7 +248,7 @@ function createStore(baseDir) {
     const startedAt = String(input.startedAt || '').trim()
     const completedAt = String(input.completedAt || '').trim()
     const durationMs = Math.max(0, toNumber(input.durationMs, 0))
-    if (!fileName || !startedAt || !completedAt || !Number.isFinite(durationMs)) return null
+    if (!fileName || !startedAt || !completedAt || !Number.isFinite(durationMs) || durationMs <= 0) return null
     return {
       fileName: path.basename(fileName),
       startedAt,
@@ -282,6 +379,7 @@ function createStore(baseDir) {
   }
 
   function recordCompletedNodeRun(record, completedRun, wasCompleted = false) {
+    if (!wasCompleted) return createNodeTimingRecord(record)
     const startedAtMs = toTimestamp(completedRun.startedAt)
     const completedAtMs = Math.max(startedAtMs, toTimestamp(completedRun.completedAt))
     const durationMs = Math.max(0, toNumber(completedRun.durationMs, Math.max(0, completedAtMs - startedAtMs)))
@@ -293,16 +391,14 @@ function createStore(baseDir) {
       botNames: completedRun.botNames
     })
 
-    if (!historyEntry) return record
+    if (!historyEntry) return createNodeTimingRecord(record)
 
     const next = createNodeTimingRecord(record)
-    if (wasCompleted) {
-      next.totalCompletedMaps += 1
-      next.totalDurationMs += historyEntry.durationMs
-      next.averageDurationMs = next.totalCompletedMaps > 0
-        ? Math.round(next.totalDurationMs / next.totalCompletedMaps)
-        : 0
-    }
+    next.totalCompletedMaps += 1
+    next.totalDurationMs += historyEntry.durationMs
+    next.averageDurationMs = next.totalCompletedMaps > 0
+      ? Math.round(next.totalDurationMs / next.totalCompletedMaps)
+      : 0
     next.recentRuns = [...next.recentRuns, historyEntry].slice(-12)
     next.updatedAt = historyEntry.completedAt
     return next
@@ -527,30 +623,59 @@ function createStore(baseDir) {
     const botMap = readBotMap()
     reconcileAllNodeTiming(botMap)
     const timingByHost = readNodeStatsMap()
+    const assignmentStatsByHost = buildAssignmentStatsByHost(botMap)
     const byHost = new Map()
     for (const bot of Object.values(botMap)) {
       const hostLabel = String(bot.hostLabel || '').trim() || 'unknown-host'
+      const botFinishedMapFiles = Array.isArray(bot.finishedMapFiles) ? bot.finishedMapFiles : []
+      const reportedFinishedMapCount = Math.max(0, toNumber(bot.finishedMapCount, botFinishedMapFiles.length))
       const current = byHost.get(hostLabel) || {
         hostLabel,
         botCount: 0,
         onlineCount: 0,
         botNames: [],
+        configFiles: [],
         lastStatusAt: null,
         nodeFiles: [],
         nodeLogs: [],
-        timing: summarizeNodeTiming(timingByHost[hostLabel])
+        finishedMapCount: 0,
+        finishedMapFiles: [],
+        latestFinishedMapStatusAtMs: 0,
+        timing: summarizeNodeTiming(timingByHost[hostLabel]),
+        assignmentStats: assignmentStatsByHost.get(hostLabel) || createAssignmentStats(),
+        operationalStats: createNodeOperationalStats()
       }
       current.botCount += 1
       const botLastStatusMs = new Date(bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
       const botAgeMs = Number.isFinite(botLastStatusMs) ? Math.max(0, Date.now() - botLastStatusMs) : Number.POSITIVE_INFINITY
       if (botAgeMs <= 30000 && bot.online === true) current.onlineCount += 1
       current.botNames.push(bot.botName)
+      const configFileName = path.basename(String(bot.configFileName || '').trim())
+      if (configFileName && !current.configFiles.includes(configFileName)) {
+        current.configFiles.push(configFileName)
+        current.configFiles.sort((left, right) => String(left).localeCompare(String(right), undefined, { sensitivity: 'base' }))
+      }
+      current.operationalStats.reconnectCount += Math.max(0, toNumber(bot.reconnectCount, 0))
+      if (String(bot.reconnectState || '').trim().toLowerCase() === 'reconnecting') current.operationalStats.reconnectingCount += 1
+      if (String(bot.activeState || '').trim().toLowerCase() === 'stale') current.operationalStats.staleBotCount += 1
+      if (String(bot.lastError || '').trim()) current.operationalStats.errorCount += 1
+      current.operationalStats.warningCount += Array.isArray(bot.warnings) ? bot.warnings.length : 0
+      current.nodeFiles = mergeNodeFileEntries(current.nodeFiles, bot.nodeFiles)
+      current.nodeLogs = mergeNodeFileEntries(current.nodeLogs, bot.nodeLogs)
+      current.finishedMapFiles = mergeNodeFileEntries(current.finishedMapFiles, botFinishedMapFiles)
+      if (botLastStatusMs >= current.latestFinishedMapStatusAtMs && (Object.prototype.hasOwnProperty.call(bot, 'finishedMapCount') || botFinishedMapFiles.length > 0)) {
+        current.latestFinishedMapStatusAtMs = botLastStatusMs
+        current.finishedMapCount = reportedFinishedMapCount
+      } else if (!current.latestFinishedMapStatusAtMs) {
+        current.finishedMapCount = current.finishedMapFiles.length
+      }
       if (!current.lastStatusAt || String(bot.lastStatusAt || '') > String(current.lastStatusAt || '')) {
         current.lastStatusAt = bot.lastStatusAt || null
-        current.nodeFiles = Array.isArray(bot.nodeFiles) ? bot.nodeFiles : []
-        current.nodeLogs = Array.isArray(bot.nodeLogs) ? bot.nodeLogs : []
       }
       byHost.set(hostLabel, current)
+    }
+    for (const node of byHost.values()) {
+      node.operationalStats.remainingMaps = Math.max(0, toNumber(node.assignmentStats?.assignedTotal, 0) - toNumber(node.finishedMapCount, 0))
     }
     return Array.from(byHost.values()).sort((left, right) => String(left.hostLabel).localeCompare(String(right.hostLabel)))
   }
