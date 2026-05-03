@@ -2142,6 +2142,127 @@ function hasUnfinishedProgressIntent(config) {
   return phase === 'printing' || phase === 'repair' || phase === 'post_print'
 }
 
+function getPlatformStallReconnectConfig(config) {
+  const advanced = config?.advanced || {}
+  return {
+    enabled: advanced.platformStallReconnectEnabled !== false,
+    pollMs: Math.max(1000, toNumber(advanced.platformStallReconnectPollMs, 5000)),
+    timeoutMs: Math.max(30000, toNumber(advanced.platformStallReconnectTimeoutMs, 120000)),
+    movementThreshold: Math.max(0.01, toNumber(advanced.platformStallReconnectMovementThreshold, 0.35)),
+    logMs: Math.max(1000, toNumber(advanced.platformStallReconnectLogMs, 30000))
+  }
+}
+
+function isPlatformStallReconnectPhase(phase) {
+  const normalized = normalizeResumePhase(phase)
+  return normalized === 'printing' || normalized === 'repair' || normalized === 'post_print'
+}
+
+function getProgressStallToken(progress) {
+  if (!progress) return ''
+  return [
+    progress.phase || '',
+    progress.state || '',
+    progress.action || '',
+    toNumber(progress.processedTargets, 0),
+    progress.postPrintStep || '',
+    progress.pass || '',
+    progress.errorCount || '',
+    progress.updatedAt || ''
+  ].join('|')
+}
+
+function startPlatformStallReconnectWatchdog(bot, config) {
+  const settings = getPlatformStallReconnectConfig(config)
+  if (!settings.enabled || !bot || bot.__nervPlatformStallReconnectTimer) {
+    return () => {}
+  }
+
+  const progressFile = path.resolve(process.cwd(), config.files?.progressFile || './logs/nerv-printer-progress.json')
+  let baselinePos = cloneFinitePosition(bot?.entity?.position)
+  let baselineAt = Date.now()
+  let lastProgressToken = ''
+  let lastLogAt = 0
+  let reconnecting = false
+
+  const resetBaseline = (pos, progressToken) => {
+    baselinePos = cloneFinitePosition(pos)
+    baselineAt = Date.now()
+    lastProgressToken = progressToken
+  }
+
+  const timer = setInterval(() => {
+    if (reconnecting) return
+    if (bot.__nervSessionActive === false || bot?._client?.state === 'disconnected') return
+    if (!bot.__nervPlatformWatchdogActive) return
+    if (bot.__nervAllowOffPlatformNavigation) {
+      resetBaseline(bot?.entity?.position, lastProgressToken)
+      return
+    }
+
+    const progress = readProgressState(progressFile)
+    if (!progress || !isPlatformStallReconnectPhase(progress.phase)) {
+      resetBaseline(bot?.entity?.position, '')
+      return
+    }
+
+    const runtime = classifyRuntimePosition(bot, config, 'platform-stall-reconnect')
+    const pos = bot?.entity?.position
+    const onPlatform = runtime?.classification?.platform === true ||
+      (isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config))
+    if (!onPlatform) {
+      resetBaseline(pos, getProgressStallToken(progress))
+      return
+    }
+
+    const progressToken = getProgressStallToken(progress)
+    const moved = distanceToPoint(pos, baselinePos)
+    if (!baselinePos || progressToken !== lastProgressToken || moved > settings.movementThreshold) {
+      resetBaseline(pos, progressToken)
+      return
+    }
+
+    const stalledMs = Date.now() - baselineAt
+    if (stalledMs < settings.timeoutMs) {
+      const now = Date.now()
+      if (now - lastLogAt >= settings.logMs) {
+        console.log(`[PLATFORM-STALL] phase=${progress.phase} state=${progress.state || 'n/a'} action=${progress.action || 'n/a'} same-position=${Math.round(stalledMs / 1000)}s/${Math.round(settings.timeoutMs / 1000)}s pos=${formatBotPosition(bot)}`)
+        lastLogAt = now
+      }
+      return
+    }
+
+    reconnecting = true
+    const reason = `platform-stall-${normalizeResumePhase(progress.phase)}`
+    console.log(`[PLATFORM-STALL-RECONNECT] No progress or movement for ${Math.round(stalledMs / 1000)}s while on platform; reconnecting and resuming from saved phase=${progress.phase} state=${progress.state || 'n/a'} action=${progress.action || 'n/a'}.`)
+    try {
+      writeJson(progressFile, {
+        ...progress,
+        interrupted: true,
+        lastEndReason: reason,
+        lastDisconnectAt: new Date().toISOString()
+      })
+    } catch (err) {
+      console.log(`[PLATFORM-STALL-WARN] Failed to update progress checkpoint before reconnect: ${err?.message || err}`)
+    }
+    stopBotMovement(bot)
+    closeCurrentWindowIfOpen(bot, reason)
+    bot.__nervForcedEndReason = reason
+    try { bot.quit(reason) } catch {}
+  }, settings.pollMs)
+
+  timer.unref?.()
+  bot.__nervPlatformStallReconnectTimer = timer
+  const stop = () => {
+    if (bot.__nervPlatformStallReconnectTimer === timer) {
+      bot.__nervPlatformStallReconnectTimer = null
+    }
+    clearInterval(timer)
+  }
+  bot.once('end', stop)
+  return stop
+}
+
 function createDefaultConfig() {
   return {
     bot: {
@@ -2317,6 +2438,11 @@ function createDefaultConfig() {
       platformWatchdogEnabled: true,
       platformWatchdogPollMs: 1000,
       platformHoldLogMs: 5000,
+      platformStallReconnectEnabled: true,
+      platformStallReconnectPollMs: 5000,
+      platformStallReconnectTimeoutMs: 120000,
+      platformStallReconnectMovementThreshold: 0.35,
+      platformStallReconnectLogMs: 30000,
       startupSupportProbeEnabled: true,
       startupSupportMinRatio: 0.5,
       startupSupportPollMs: 5000,
@@ -12804,6 +12930,11 @@ function shouldRetryReconnect(session, config) {
   return true
 }
 
+function shouldForceReconnectForPlatformStall(session, config) {
+  if (config?.advanced?.platformStallReconnectEnabled === false) return false
+  return String(session?.endReason || '').toLowerCase().startsWith('platform-stall-')
+}
+
 function isDdosProtectionText(value) {
   const text = String(value || '').toLowerCase()
   return text.includes('ddos protection') || text.includes('np ddos') || text.includes('connection blocked') || text.includes('please wait 30s') || text.includes('blocked (')
@@ -14901,6 +15032,8 @@ function installPlatformSafety(bot, config) {
   if (config.advanced?.platformWatchdogEnabled === false || bot.__nervPlatformSafetyInstalled) return
   bot.__nervPlatformSafetyInstalled = true
 
+  startPlatformStallReconnectWatchdog(bot, config)
+
   const pollMs = Math.max(250, toNumber(config.advanced?.platformWatchdogPollMs, 1000))
   const timer = setInterval(() => {
     if (!bot.__nervPlatformWatchdogActive) return
@@ -15445,7 +15578,7 @@ function runSingleSession(config, sessionNumber) {
     })
 
     bot.on('end', (reason) => {
-      const text = reason || 'disconnected'
+      const text = bot.__nervForcedEndReason || reason || 'disconnected'
       console.log(`[END] ${text}`)
       markProgressInterrupted(config, text, sessionNumber)
       settle(text)
@@ -16981,9 +17114,10 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
         clearInterval(heartbeatTimer)
       }
       const retryable = shouldRetryReconnect(session, sessionConfig)
+      const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig)
       console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
 
-      if (!reconnect.enabled || !retryable || attempt >= reconnect.maxAttempts) {
+      if (!reconnectAllowed || !retryable || attempt >= reconnect.maxAttempts) {
         break
       }
 
@@ -17215,10 +17349,11 @@ async function start() {
         config: sessionConfig
       })
       const retryable = shouldRetryReconnect(session, sessionConfig)
+      const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig)
       lastEndReason = session.endReason
       console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
 
-      if (!reconnect.enabled) {
+      if (!reconnectAllowed) {
         break
       }
 
