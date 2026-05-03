@@ -984,6 +984,7 @@ function renderNodes() {
     }
     const files = (Array.isArray(node.nodeFiles) ? node.nodeFiles : []).filter(matchesQuery)
     const finishedFiles = (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : []).filter(matchesQuery)
+    const reprintCommands = (Array.isArray(node.reprintCommands) ? node.reprintCommands : []).filter(matchesQuery)
     const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
     const totalNodeFiles = Array.isArray(node.nodeFiles) ? node.nodeFiles.length : 0
     const totalFinishedFiles = Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0
@@ -1000,6 +1001,28 @@ function renderNodes() {
         </div>
         ${renderNodeTimingMetrics(node)}
         ${renderNodeOperationalTags(node)}
+        ${reprintCommands.length ? `
+          <div class="reprint-queue">
+            <strong>Reprint queue</strong>
+            ${reprintCommands.map((command) => {
+              const status = String(command.status || 'unknown')
+              const statusClass = status === 'succeeded' ? 'status-online'
+                : (status === 'failed' ? 'status-offline' : 'status-neutral')
+              const claimed = command.claimedByBotName ? ` | claimed by ${command.claimedByBotName}` : ''
+              const result = command.resultMessage ? ` | ${command.resultMessage}` : ''
+              return `
+                <article class="file-item compact-file-item">
+                  <div class="file-row">
+                    <div>
+                      <strong>${escapeHtml(command.fileName)}</strong>
+                      <p class="file-meta">${escapeHtml(status)}${escapeHtml(claimed)} | queued ${escapeHtml(formatTime(command.createdAt))}${escapeHtml(result)}</p>
+                    </div>
+                    <span class="tag ${statusClass}">${escapeHtml(status)}</span>
+                  </div>
+                </article>`
+            }).join('')}
+          </div>
+        ` : ''}
         ${files.length ? files.map((file) => `
           <article class="file-item compact-file-item">
             <div class="file-row">

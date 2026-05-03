@@ -476,10 +476,35 @@ function summarizeNode(node) {
     nodeLogs: Array.isArray(node.nodeLogs) ? node.nodeLogs : [],
     finishedMapCount: Number.isFinite(Number(node.finishedMapCount)) ? Number(node.finishedMapCount) : 0,
     finishedMapFiles: Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : [],
+    reprintCommands: listNodeReprintCommands(node.hostLabel),
     assignmentStats: node.assignmentStats || null,
     operationalStats: node.operationalStats || null,
     timing: node.timing || null
   }
+}
+
+function listNodeReprintCommands(hostLabel) {
+  const normalizedHost = String(hostLabel || '').trim()
+  if (!normalizedHost) return []
+  const cutoffMs = Date.now() - (10 * 60 * 1000)
+  return store.listCommands((item) => {
+    if (item.commandType !== 'reprint-finished-map') return false
+    if (String(item.targetHostLabel || '').trim() !== normalizedHost) return false
+    if (item.status === 'pending' || item.status === 'claimed') return true
+    const completedMs = new Date(item.completedAt || item.createdAt || 0).getTime()
+    return Number.isFinite(completedMs) && completedMs >= cutoffMs
+  })
+    .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
+    .slice(0, 8)
+    .map((item) => ({
+      commandId: item.commandId,
+      fileName: item.fileName || 'unknown.nbt',
+      status: item.status || 'unknown',
+      claimedByBotName: item.claimedByBotName || null,
+      createdAt: item.createdAt || null,
+      completedAt: item.completedAt || null,
+      resultMessage: item.resultMessage || null
+    }))
 }
 
 function listUploadAssignments() {
