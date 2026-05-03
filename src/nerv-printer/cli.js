@@ -173,7 +173,7 @@ function initLogger() {
       }
     } catch (error) {
       if (terminalLogsEnabled) {
-        original.warn(`[LOG-WARN] log rotation failed for ${state.filePath}: ${error?.message || error}`)
+        original.warn(`[${new Date().toISOString()}]`, `[LOG-WARN] log rotation failed for ${state.filePath}: ${error?.message || error}`)
       }
     }
     state.stream = fs.createWriteStream(state.filePath, { flags: 'a' })
@@ -237,17 +237,17 @@ function initLogger() {
   }
 
   console.log = (...args) => {
-    if (terminalLogsEnabled) original.log(...args)
+    if (terminalLogsEnabled) original.log(`[${new Date().toISOString()}]`, ...args)
     write('INFO', args)
   }
 
   console.warn = (...args) => {
-    if (terminalLogsEnabled) original.warn(...args)
+    if (terminalLogsEnabled) original.warn(`[${new Date().toISOString()}]`, ...args)
     write('WARN', args)
   }
 
   console.error = (...args) => {
-    if (terminalLogsEnabled) original.error(...args)
+    if (terminalLogsEnabled) original.error(`[${new Date().toISOString()}]`, ...args)
     write('ERROR', args)
   }
 
@@ -259,7 +259,7 @@ function initLogger() {
     }
   })
 
-  if (terminalLogsEnabled) original.log(`[LOG] Writing runtime logs to ${LOG_FILE}`)
+  if (terminalLogsEnabled) original.log(`[${new Date().toISOString()}]`, `[LOG] Writing runtime logs to ${LOG_FILE}`)
   write('INFO', [`[LOG] Writing runtime logs to ${LOG_FILE}`])
   if (logConfig.rotateMs > 0) {
     write('INFO', [`[LOG] Rotation enabled every ${logConfig.rotateHours}h; archived logs kept for ${logConfig.retentionHours}h.`])
@@ -972,6 +972,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     })
   }
 
+  async function reportNodeConfigDownload(commandId, fileName, contentBase64) {
+    await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/config/${encodeURIComponent(commandId)}/result`, 'POST', {
+      botName,
+      fileName,
+      contentBase64
+    })
+  }
+
   function resolveNodeNbtPath(fileName) {
     const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
     const safeName = path.basename(String(fileName || '').trim())
@@ -1027,6 +1035,27 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           const contentBase64 = fs.readFileSync(logPath).toString('base64')
           await reportNodeLogDownload(command.commandId, fileName, contentBase64)
           await reportNodeCommandResult(command.commandId, 'succeeded', `downloaded ${fileName}`)
+        } catch (error) {
+          await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
+        }
+        return true
+      }
+      case 'download-node-config': {
+        const requestedName = path.basename(String(command.fileName || '').trim())
+        const configPath = getUserConfigPath()
+        const configName = path.basename(configPath)
+        if (!requestedName || requestedName !== configName) {
+          await reportNodeCommandResult(command.commandId, 'failed', `config file not available on this node: ${requestedName || 'unknown'}`)
+          return true
+        }
+        if (!fs.existsSync(configPath)) {
+          await reportNodeCommandResult(command.commandId, 'failed', `config file not found: ${configName}`)
+          return true
+        }
+        try {
+          const contentBase64 = fs.readFileSync(configPath).toString('base64')
+          await reportNodeConfigDownload(command.commandId, configName, contentBase64)
+          await reportNodeCommandResult(command.commandId, 'succeeded', `downloaded ${configName}`)
         } catch (error) {
           await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
         }

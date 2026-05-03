@@ -501,7 +501,67 @@ async function downloadNodeLogFile(hostLabel, fileName) {
   const url = window.URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
+  anchor.download = `${hostLabel || 'node'}-${fileName}`
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+async function downloadConfigFile(fileName) {
+  const response = await fetch(`/api/dashboard/config/${encodeURIComponent(fileName)}/download`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      authorization: authHeaderValue()
+    }
+  })
+  if (!response.ok) {
+    let message = `Request failed: ${response.status}`
+    try {
+      const body = await response.json()
+      if (body?.error) message = body.error
+    } catch {
+      // Ignore parse failure.
+    }
+    throw new Error(message)
+  }
+
+  const blob = await response.blob()
+  const url = window.URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
   anchor.download = fileName
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+async function downloadNodeConfigFile(hostLabel, fileName) {
+  const response = await fetch(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/config/${encodeURIComponent(fileName)}/download`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      authorization: authHeaderValue()
+    }
+  })
+  if (!response.ok) {
+    let message = `Request failed: ${response.status}`
+    try {
+      const body = await response.json()
+      if (body?.error) message = body.error
+    } catch {
+      // Ignore parse failure.
+    }
+    throw new Error(message)
+  }
+
+  const blob = await response.blob()
+  const url = window.URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `${hostLabel || 'node'}-${fileName}`
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
@@ -965,9 +1025,9 @@ function renderLogs() {
   const nodeLogGroups = state.nodes
     .map((node) => ({
       hostLabel: node.hostLabel,
+      botNames: Array.isArray(node.botNames) ? node.botNames : [],
       items: Array.isArray(node.nodeLogs) ? node.nodeLogs : []
     }))
-    .filter((group) => group.items.length > 0)
 
   const logsSignature = JSON.stringify({
     verified: state.auth.verified,
@@ -1014,7 +1074,7 @@ function renderLogs() {
             <div class="file-row">
               <div>
                 <strong>${escapeHtml(item.fileName)}</strong>
-                <p class="file-meta">${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}</p>
+                <p class="file-meta">Node: Dashboard host | ${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}</p>
               </div>
               <div style="display:flex;gap:8px;flex-shrink:0;">
                 <button class="ghost-button small-button" type="button" data-action="download-log" data-permission-needed="canViewLogs" data-file-name="${escapeHtml(item.fileName)}">Download</button>
@@ -1039,22 +1099,29 @@ function renderLogs() {
       <div class="file-row" style="margin-bottom:10px;">
         <div>
           <strong>Node: ${escapeHtml(group.hostLabel)}</strong>
-          <p class="file-meta">${escapeHtml(group.items.length)} log file(s)</p>
+          <p class="file-meta">${escapeHtml(group.items.length)} log file(s)${group.botNames.length ? ` | Bots: ${escapeHtml(group.botNames.join(', '))}` : ''}</p>
         </div>
       </div>
-      ${group.items.map((item) => `
+      ${group.items.length ? group.items.map((item) => `
         <article class="file-item">
           <div class="file-row">
             <div>
               <strong>${escapeHtml(item.fileName)}</strong>
-              <p class="file-meta">${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}</p>
+              <p class="file-meta">Node: ${escapeHtml(group.hostLabel)} | ${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}</p>
             </div>
             <div style="display:flex;gap:8px;flex-shrink:0;">
               <button class="ghost-button small-button" type="button" data-action="download-node-log" data-permission-needed="canViewLogs" data-host-label="${escapeHtml(group.hostLabel)}" data-file-name="${escapeHtml(item.fileName)}">Download</button>
             </div>
           </div>
         </article>
-      `).join('')}
+      `).join('') : `
+        <article class="file-item">
+          <div>
+            <strong>No node logs reported</strong>
+            <p class="file-meta">Node: ${escapeHtml(group.hostLabel)} | Wait for a bot heartbeat from this node.</p>
+          </div>
+        </article>
+      `}
     </section>
   `).join('')
 
@@ -1107,7 +1174,9 @@ function renderOperators() {
 }
 
 function renderConfigs() {
-  const sig = JSON.stringify({ canAdmin: hasPermission('canManageOperators'), configs: state.configs })
+  const configNodes = buildConfigNodeMap()
+  const configRows = buildConfigRows(configNodes)
+  const sig = JSON.stringify({ canAdmin: hasPermission('canManageOperators'), configRows })
   if (state.renderCache.configs === sig) return
   state.renderCache.configs = sig
 
@@ -1120,27 +1189,87 @@ function renderConfigs() {
     return
   }
 
-  if (!state.configs.length) {
+  if (!configRows.length) {
     elements.configFilesList.innerHTML = `
       <article class="empty-card">
         <h3>No config files found</h3>
-        <p>Make sure DASHBOARD_CONFIG_DIR points to the _configs directory.</p>
+        <p>Make sure DASHBOARD_CONFIG_DIR points to the _configs directory or wait for nodes to report their config.</p>
       </article>`
     return
   }
 
-  elements.configFilesList.innerHTML = state.configs.map((configFile) => `
-    <article class="file-item">
-      <div class="file-row">
-        <div>
-          <strong>${escapeHtml(configFile.name)}</strong>
-          <p class="file-meta">${formatFileSize(configFile.sizeBytes)} | modified ${escapeHtml(formatTime(configFile.modifiedAt))}</p>
+  elements.configFilesList.innerHTML = configRows.map((configFile) => {
+    const nodes = configNodes[configFile.name] || []
+    const nodeText = nodes.length ? ` | Nodes: ${nodes.join(', ')}` : ' | Nodes: not currently reported'
+    const localActions = configFile.local ? `
+      <button class="ghost-button small-button" type="button"
+        data-action="download-config" data-permission-needed="canManageOperators"
+        data-config-name="${escapeHtml(configFile.name)}">Download Local</button>
+      <button class="ghost-button small-button" type="button"
+        data-action="edit-config" data-permission-needed="canManageOperators"
+        data-config-name="${escapeHtml(configFile.name)}">Edit</button>
+    ` : '<span class="tag status-neutral">Node only</span>'
+    const nodeActions = nodes.map((hostLabel) => `
+      <button class="ghost-button small-button" type="button"
+        data-action="download-node-config" data-permission-needed="canManageOperators"
+        data-host-label="${escapeHtml(hostLabel)}"
+        data-config-name="${escapeHtml(configFile.name)}"
+        title="Download ${escapeHtml(configFile.name)} from ${escapeHtml(hostLabel)}">Download ${escapeHtml(hostLabel)}</button>
+    `).join('')
+    const modifiedText = configFile.local
+      ? `${formatFileSize(configFile.sizeBytes)} | modified ${formatTime(configFile.modifiedAt)}`
+      : 'reported by node heartbeat'
+    return `
+      <article class="file-item">
+        <div class="file-row">
+          <div>
+            <strong>${escapeHtml(configFile.name)}</strong>
+            <p class="file-meta">${escapeHtml(modifiedText)}${escapeHtml(nodeText)}</p>
+          </div>
+          <div class="file-actions">
+            ${localActions}
+            ${nodeActions}
+          </div>
         </div>
-        <button class="ghost-button small-button" type="button"
-          data-action="edit-config" data-permission-needed="canManageOperators"
-          data-config-name="${escapeHtml(configFile.name)}">Edit</button>
-      </div>
-    </article>`).join('')
+      </article>`
+  }).join('')
+}
+
+function buildConfigRows(configNodes) {
+  const byName = new Map()
+  for (const configFile of state.configs) {
+    byName.set(configFile.name, { ...configFile, local: true })
+  }
+  for (const fileName of Object.keys(configNodes)) {
+    if (!byName.has(fileName)) {
+      byName.set(fileName, {
+        name: fileName,
+        sizeBytes: null,
+        modifiedAt: null,
+        local: false
+      })
+    }
+  }
+  return Array.from(byName.values())
+    .sort((left, right) => String(left.name).localeCompare(String(right.name), undefined, { sensitivity: 'base' }))
+}
+
+function buildConfigNodeMap() {
+  const configNodes = {}
+  for (const node of state.nodes) {
+    const hostLabel = String(node.hostLabel || '').trim()
+    if (!hostLabel) continue
+    for (const fileName of Array.isArray(node.configFiles) ? node.configFiles : []) {
+      const safeName = String(fileName || '').trim()
+      if (!safeName) continue
+      if (!configNodes[safeName]) configNodes[safeName] = []
+      if (!configNodes[safeName].includes(hostLabel)) configNodes[safeName].push(hostLabel)
+    }
+  }
+  for (const nodes of Object.values(configNodes)) {
+    nodes.sort((left, right) => String(left).localeCompare(String(right), undefined, { sensitivity: 'base' }))
+  }
+  return configNodes
 }
 
 function renderDataFiles() {
@@ -1673,6 +1802,12 @@ document.addEventListener('click', async (event) => {
       pushEvent('info', `Downloaded log ${button.dataset.fileName || ''}`)
     } else if (button.dataset.action === 'delete-log') {
       await onDeleteLog(button.dataset.fileName || '')
+    } else if (button.dataset.action === 'download-config') {
+      await downloadConfigFile(button.dataset.configName || '')
+      pushEvent('info', `Downloaded config ${button.dataset.configName || ''}`)
+    } else if (button.dataset.action === 'download-node-config') {
+      await downloadNodeConfigFile(button.dataset.hostLabel || '', button.dataset.configName || '')
+      pushEvent('info', `Downloaded config ${button.dataset.configName || ''} from ${button.dataset.hostLabel || 'node'}`)
     } else if (button.dataset.action === 'verify-done') {
       await onVerifyBot(button.dataset.botName || '', 'verified')
     } else if (button.dataset.action === 'verify-refresh') {

@@ -41,6 +41,20 @@ const STATIC_TYPES = {
   '.svg': 'image/svg+xml; charset=utf-8'
 }
 
+function installTimestampedConsole() {
+  const original = {
+    log: console.log,
+    warn: console.warn,
+    error: console.error
+  }
+  const formatArgs = (args) => [`[${new Date().toISOString()}]`, ...args]
+  console.log = (...args) => original.log(...formatArgs(args))
+  console.warn = (...args) => original.warn(...formatArgs(args))
+  console.error = (...args) => original.error(...formatArgs(args))
+}
+
+installTimestampedConsole()
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
@@ -212,6 +226,8 @@ function reqIsDataManagementPath(pathname) {
 function reqIsConfigManagementPath(pathname) {
   return pathname === '/api/dashboard/config'
     || Boolean(matchPath(pathname, '/api/dashboard/config/:fileName'))
+    || Boolean(matchPath(pathname, '/api/dashboard/config/:fileName/download'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/config/:fileName/download'))
 }
 
 function reqIsDashboardOperationPath(pathname, method) {
@@ -695,6 +711,24 @@ async function route(req, res) {
     return sendJson(res, 200, { files, configDir: CONFIG_DIR })
   }
 
+  const configDownloadParams = matchPath(pathname, '/api/dashboard/config/:fileName/download')
+  if (configDownloadParams) {
+    if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
+    if (req.method !== 'GET') return methodNotAllowed(res)
+    const safeName = path.basename(String(configDownloadParams.fileName || '').trim())
+    if (!safeName || !safeName.toLowerCase().endsWith('.json')) return notFound(res)
+    const filePath = path.join(CONFIG_DIR, safeName)
+    if (!ensureWithinDir(filePath, CONFIG_DIR)) return notFound(res)
+    if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return notFound(res)
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-disposition': `attachment; filename="${safeName}"`,
+      'cache-control': 'no-store'
+    })
+    fs.createReadStream(filePath).pipe(res)
+    return
+  }
+
   const configFileParams = matchPath(pathname, '/api/dashboard/config/:fileName')
   if (configFileParams) {
     if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
@@ -891,6 +925,26 @@ async function route(req, res) {
     return sendJson(res, 200, { ok: true })
   }
 
+  params = matchPath(pathname, '/api/nodes/:hostLabel/config/:commandId/result')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const fileName = path.basename(String(body?.fileName || '').trim())
+    const contentBase64 = String(body?.contentBase64 || '')
+    if (!fileName || !fileName.toLowerCase().endsWith('.json')) return badRequest(res, 'fileName must end in .json')
+    if (!contentBase64) return badRequest(res, 'contentBase64 is required')
+    const command = store.getCommand(params.commandId)
+    if (!command || command.targetHostLabel !== params.hostLabel || command.commandType !== 'download-node-config') return notFound(res)
+    store.saveNodeLogDownload({
+      commandId: params.commandId,
+      hostLabel: params.hostLabel,
+      botName: body?.botName || null,
+      fileName,
+      contentBase64
+    })
+    return sendJson(res, 200, { ok: true })
+  }
+
   if (req.method === 'GET' && pathname === '/api/dashboard/bots') {
     return sendJson(res, 200, { items: store.listBots().map(summarizeBot) })
   }
@@ -931,6 +985,33 @@ async function route(req, res) {
     res.writeHead(200, {
       'content-type': 'text/plain; charset=utf-8',
       'content-disposition': `attachment; filename="${downloaded.fileName}"`,
+      'cache-control': 'no-store'
+    })
+    fs.createReadStream(downloaded.filePath).pipe(res)
+    return
+  }
+
+  params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/config/:fileName/download')
+  if (params) {
+    if (req.method !== 'GET') return methodNotAllowed(res)
+    const node = store.listNodes().find((item) => item.hostLabel === params.hostLabel)
+    if (!node) return notFound(res)
+    const fileName = path.basename(String(params.fileName || '').trim())
+    if (!fileName || !fileName.toLowerCase().endsWith('.json')) return notFound(res)
+    const command = store.createCommand({
+      targetHostLabel: params.hostLabel,
+      commandType: 'download-node-config',
+      fileName,
+      requestedBy: actor?.username || 'unknown'
+    })
+    const downloaded = await waitForNodeLogDownload(store, command.commandId, 15000)
+    if (!downloaded?.filePath || !fs.existsSync(downloaded.filePath)) {
+      return sendJson(res, 504, { error: `Timed out waiting for node config ${fileName} from ${params.hostLabel}` })
+    }
+    const downloadName = `${params.hostLabel}-${downloaded.fileName}`.replace(/[^a-zA-Z0-9._-]+/g, '-')
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-disposition': `attachment; filename="${downloadName}"`,
       'cache-control': 'no-store'
     })
     fs.createReadStream(downloaded.filePath).pipe(res)

@@ -4,6 +4,20 @@ const appConfig = require('../../config.json')
 
 const RANDOM_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890'
 
+function installTimestampedConsole () {
+  const original = {
+    log: console.log,
+    warn: console.warn,
+    error: console.error
+  }
+  const withTimestamp = (args) => [`[${new Date().toISOString()}]`, ...args]
+  console.log = (...args) => original.log(...withTimestamp(args))
+  console.warn = (...args) => original.warn(...withTimestamp(args))
+  console.error = (...args) => original.error(...withTimestamp(args))
+}
+
+installTimestampedConsole()
+
 const state = {
   offline: 'offline',
   online: 'online',

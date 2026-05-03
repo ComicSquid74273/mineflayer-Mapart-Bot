@@ -199,13 +199,16 @@
       </section>
 
       <section class="panel panel-wide">
-        <div class="panel-header">
-          <div>
-            <p class="panel-kicker">Activity</p>
-            <h2>Operator Log</h2>
-          </div>
-        </div>
-        <div id="eventLog" class="event-log"></div>
+        <details class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Activity</p>
+              <h2>Operator Log</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div id="eventLog" class="event-log collapsible-content"></div>
+        </details>
       </section>
     </main>
   </div>

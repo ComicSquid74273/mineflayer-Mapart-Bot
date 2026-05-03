@@ -587,6 +587,14 @@ button:disabled {
   gap: 10px;
 }
 
+.file-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
 #uploadAssignmentsList {
   max-height: min(620px, 65vh);
   overflow-y: auto;
