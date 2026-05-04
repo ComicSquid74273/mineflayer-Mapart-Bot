@@ -15,7 +15,7 @@ const NBT_DIR = process.env.DASHBOARD_NBT_DIR || path.resolve(__dirname, '..', '
 const store = createStore(DATA_DIR)
 const SESSION_COOKIE_NAME = 'mapart_dashboard_session'
 const SESSION_MAX_AGE_SECONDS = Math.max(3600, Number(process.env.DASHBOARD_SESSION_MAX_AGE_SECONDS || 7 * 24 * 60 * 60))
-const SNAPSHOT_CACHE_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_CACHE_MS || 3000))
+const SNAPSHOT_CACHE_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_CACHE_MS || 10000))
 const SNAPSHOT_SLOW_STEP_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_SLOW_STEP_MS || 500))
 const SLOW_ROUTE_MS = Math.max(0, Number(process.env.DASHBOARD_SLOW_ROUTE_MS || 750))
 const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
@@ -788,6 +788,7 @@ function listNodeReprintCommands(hostLabel) {
 }
 
 function listUploadAssignments(limit = 150) {
+  const commandCutoffMs = Date.now() - (60 * 60 * 1000)
   const fileAssignments = store.listFiles()
     .filter((item) => item.queueMode === true || item.assignedBotName || item.assignedHostLabel || item.claimedByBotName || item.deliveryStatus !== 'unassigned')
     .map((item) => ({
@@ -808,7 +809,12 @@ function listUploadAssignments(limit = 150) {
       completedAt: item.deliveredAt || null,
       resultMessage: item.failedReason || null
     }))
-  const commandAssignments = store.listCommands((item) => item.commandType === 'upload-node-file')
+  const commandAssignments = store.listCommands((item) => {
+    if (item.commandType !== 'upload-node-file') return false
+    if (item.status === 'pending' || item.status === 'claimed') return true
+    const completedMs = new Date(item.completedAt || item.createdAt || 0).getTime()
+    return Number.isFinite(completedMs) && completedMs >= commandCutoffMs
+  })
     .map((item) => ({
       id: item.commandId,
       source: 'node-command',
@@ -1324,7 +1330,8 @@ async function route(req, res) {
     auditOperatorAction(actor, 'upload-nbt', `Queued direct node upload for ${fileName} to ${nbtUploadParams.hostLabel}.`, {
       hostLabel: nbtUploadParams.hostLabel, targetBotName: targetBotName || null, fileName, sizeBytes: buffer.length, commandId: command.commandId
     })
-    return sendJson(res, 201, { ok: true, queued: true, command, fileName, sizeBytes: buffer.length })
+    const { contentBase64: _contentBase64, ...commandSummary } = command
+    return sendJson(res, 201, { ok: true, queued: true, command: commandSummary, fileName, sizeBytes: buffer.length })
   }
 
   if (req.method === 'POST' && pathname === '/api/dashboard/uploads') {

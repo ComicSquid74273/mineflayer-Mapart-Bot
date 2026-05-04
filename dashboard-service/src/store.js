@@ -2,6 +2,8 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 
+const jsonCache = new Map()
+
 function nowIso() {
   return new Date().toISOString()
 }
@@ -13,9 +15,12 @@ function ensureDir(dirPath) {
 }
 
 function readJson(filePath, fallback) {
+  if (jsonCache.has(filePath)) return jsonCache.get(filePath)
   if (!fs.existsSync(filePath)) return fallback
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+    jsonCache.set(filePath, parsed)
+    return parsed
   } catch {
     return fallback
   }
@@ -24,8 +29,9 @@ function readJson(filePath, fallback) {
 function writeJson(filePath, value) {
   ensureDir(path.dirname(filePath))
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
-  fs.writeFileSync(tempPath, JSON.stringify(value, null, 2), 'utf8')
+  fs.writeFileSync(tempPath, JSON.stringify(value), 'utf8')
   fs.renameSync(tempPath, filePath)
+  jsonCache.set(filePath, value)
 }
 
 function toNumber(value, fallback) {
@@ -47,8 +53,10 @@ function createStore(baseDir) {
   const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
   const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
   const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
+  const NODE_TIMING_RECONCILE_MS = Math.max(1000, Number(process.env.DASHBOARD_NODE_TIMING_RECONCILE_MS || 10000))
   const COUNTED_NODE_PHASES = new Set(['printing', 'repair', 'rescan', 'post-print', 'cleanup'])
   const HOLD_NODE_PHASES = new Set([])
+  const nextNodeTimingReconcileAtByHost = new Map()
 
   function defaultOperators() {
     if (String(process.env.DASHBOARD_SEED_DEMO_OPERATORS || '').trim().toLowerCase() !== 'true') {
@@ -841,7 +849,15 @@ function createStore(baseDir) {
     }
     bots[status.botName] = next
     writeJson(botsFile, bots)
-    reconcileHostNodeTiming(next.hostLabel, bots)
+    const normalizedHost = String(next.hostLabel || '').trim()
+    if (normalizedHost) {
+      const nowMs = Date.now()
+      const nextReconcileAt = nextNodeTimingReconcileAtByHost.get(normalizedHost) || 0
+      if (nowMs >= nextReconcileAt) {
+        nextNodeTimingReconcileAtByHost.set(normalizedHost, nowMs + NODE_TIMING_RECONCILE_MS)
+        reconcileHostNodeTiming(normalizedHost, bots)
+      }
+    }
     return next
   }
 
@@ -854,8 +870,28 @@ function createStore(baseDir) {
     return listCommands((item) => item.commandId === commandId)[0] || null
   }
 
+  function compactCommandRecord(item) {
+    if (!item || typeof item !== 'object') return item
+    const status = String(item.status || '').trim().toLowerCase()
+    if (item.commandType === 'upload-node-file' && status !== 'pending' && status !== 'claimed' && Object.prototype.hasOwnProperty.call(item, 'contentBase64')) {
+      const { contentBase64, ...rest } = item
+      return rest
+    }
+    return item
+  }
+
+  function compactCommandList(items) {
+    let changed = false
+    const compacted = (Array.isArray(items) ? items : []).map((item) => {
+      const next = compactCommandRecord(item)
+      if (next !== item) changed = true
+      return next
+    })
+    return { items: compacted, changed }
+  }
+
   function saveCommands(items) {
-    writeJson(commandsFile, items)
+    writeJson(commandsFile, compactCommandList(items).items)
   }
 
   function createCommand(input) {
@@ -906,12 +942,12 @@ function createStore(baseDir) {
     const index = items.findIndex((item) => item.commandId === commandId && item.targetBotName === botName)
     if (index < 0) return null
     const current = items[index]
-    items[index] = {
+    items[index] = compactCommandRecord({
       ...current,
       status,
       resultMessage: resultMessage || null,
       completedAt: nowIso()
-    }
+    })
     saveCommands(items)
     return items[index]
   }
@@ -1361,12 +1397,12 @@ function createStore(baseDir) {
     if (normalizedBot && current.claimedByBotName && current.claimedByBotName !== normalizedBot) {
       return null
     }
-    items[index] = {
+    items[index] = compactCommandRecord({
       ...current,
       status,
       resultMessage: resultMessage || null,
       completedAt: nowIso()
-    }
+    })
     saveCommands(items)
     return items[index]
   }
@@ -1410,6 +1446,10 @@ function createStore(baseDir) {
     if (!item) return null
     return path.join(filesDir, item.storedName)
   }
+
+  const existingCommands = readJson(commandsFile, [])
+  const compactedCommands = compactCommandList(existingCommands)
+  if (compactedCommands.changed) writeJson(commandsFile, compactedCommands.items)
 
   reconcileAllNodeTiming(readBotMap())
 
