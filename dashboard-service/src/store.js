@@ -42,7 +42,11 @@ function createStore(baseDir) {
   const eventsFile = path.join(dataDir, 'events.json')
   const operatorsFile = path.join(dataDir, 'operators.json')
   const nodeStatsFile = path.join(dataDir, 'node-stats.json')
+  const nodeInventoryFile = path.join(dataDir, 'node-inventory.json')
   const nodeLogDownloadsDir = path.join(dataDir, 'node-log-downloads')
+  const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
+  const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
+  const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
   const COUNTED_NODE_PHASES = new Set(['printing', 'repair', 'rescan', 'post-print', 'cleanup'])
   const HOLD_NODE_PHASES = new Set([])
 
@@ -106,6 +110,7 @@ function createStore(baseDir) {
   if (!fs.existsSync(eventsFile)) writeJson(eventsFile, [])
   if (!fs.existsSync(operatorsFile)) writeJson(operatorsFile, defaultOperators())
   if (!fs.existsSync(nodeStatsFile)) writeJson(nodeStatsFile, {})
+  if (!fs.existsSync(nodeInventoryFile)) writeJson(nodeInventoryFile, {})
 
   function toTimestamp(value) {
     const ms = new Date(value || 0).getTime()
@@ -115,6 +120,15 @@ function createStore(baseDir) {
   function readBotMap() {
     const bots = readJson(botsFile, {})
     return bots && typeof bots === 'object' && !Array.isArray(bots) ? bots : {}
+  }
+
+  function readNodeInventoryMap() {
+    const items = readJson(nodeInventoryFile, {})
+    return items && typeof items === 'object' && !Array.isArray(items) ? items : {}
+  }
+
+  function writeNodeInventoryMap(items) {
+    writeJson(nodeInventoryFile, items && typeof items === 'object' && !Array.isArray(items) ? items : {})
   }
 
   function readNodeStatsMap() {
@@ -271,6 +285,31 @@ function createStore(baseDir) {
       errorCount: 0,
       remainingMaps: 0
     }
+  }
+
+  function timestampMs(value) {
+    const parsed = new Date(value || 0).getTime()
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+
+  function isRecentTimestamp(value, ttlMs, now = Date.now()) {
+    const parsed = timestampMs(value)
+    if (!parsed) return false
+    const age = now - parsed
+    return age >= 0 && age <= ttlMs
+  }
+
+  function hasRecentBotError(bot, now = Date.now()) {
+    const text = String(bot?.lastError || '').trim()
+    if (!text) return false
+    return isRecentTimestamp(bot?.lastErrorAt, ALERT_ERROR_TTL_MS, now)
+  }
+
+  function countRecentWarnings(warnings, now = Date.now()) {
+    return (Array.isArray(warnings) ? warnings : []).filter((warning) => {
+      const lastSeenAt = warning?.lastSeenAt || warning?.firstSeenAt
+      return isRecentTimestamp(lastSeenAt, ALERT_WARNING_TTL_MS, now)
+    }).length
   }
 
   function sanitizeTimingRun(input) {
@@ -677,13 +716,18 @@ function createStore(baseDir) {
 
   function listNodesFromMap(botMapInput) {
     const botMap = botMapInput && typeof botMapInput === 'object' ? botMapInput : {}
+    const nowMs = Date.now()
+    const nodeInventoryMap = readNodeInventoryMap()
     const timingByHost = readNodeStatsMap()
     const assignmentStatsByHost = buildAssignmentStatsByHost(botMap)
     const byHost = new Map()
     for (const bot of Object.values(botMap)) {
       const hostLabel = String(bot.hostLabel || '').trim() || 'unknown-host'
-      const botFinishedMapFiles = Array.isArray(bot.finishedMapFiles) ? bot.finishedMapFiles : []
-      const reportedFinishedMapCount = Math.max(0, toNumber(bot.finishedMapCount, botFinishedMapFiles.length))
+      const inventory = nodeInventoryMap[bot.botName] && String(nodeInventoryMap[bot.botName].hostLabel || '').trim() === hostLabel
+        ? nodeInventoryMap[bot.botName]
+        : bot
+      const botFinishedMapFiles = Array.isArray(inventory.finishedMapFiles) ? inventory.finishedMapFiles : []
+      const reportedFinishedMapCount = Math.max(0, toNumber(inventory.finishedMapCount, botFinishedMapFiles.length))
       const current = byHost.get(hostLabel) || {
         hostLabel,
         botCount: 0,
@@ -704,9 +748,10 @@ function createStore(baseDir) {
         operationalStats: createNodeOperationalStats()
       }
       current.botCount += 1
-      const botLastStatusMs = new Date(bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
-      const botAgeMs = Number.isFinite(botLastStatusMs) ? Math.max(0, Date.now() - botLastStatusMs) : Number.POSITIVE_INFINITY
-      if (botAgeMs <= 30000 && bot.online === true) current.onlineCount += 1
+      const botLastStatusMs = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
+      const botAgeMs = Number.isFinite(botLastStatusMs) ? Math.max(0, nowMs - botLastStatusMs) : Number.POSITIVE_INFINITY
+      const botOnline = botAgeMs <= BOT_FRESH_MS && bot.online === true
+      if (botOnline) current.onlineCount += 1
       current.botNames.push(bot.botName)
       const configFileName = path.basename(String(bot.configFileName || '').trim())
       if (configFileName && !current.configFiles.includes(configFileName)) {
@@ -715,20 +760,22 @@ function createStore(baseDir) {
       }
       current.operationalStats.reconnectCount += Math.max(0, toNumber(bot.reconnectCount, 0))
       if (String(bot.reconnectState || '').trim().toLowerCase() === 'reconnecting') current.operationalStats.reconnectingCount += 1
-      if (String(bot.activeState || '').trim().toLowerCase() === 'stale') current.operationalStats.staleBotCount += 1
-      if (String(bot.lastError || '').trim()) current.operationalStats.errorCount += 1
-      current.operationalStats.warningCount += Array.isArray(bot.warnings) ? bot.warnings.length : 0
-      addNodeFileEntries(current._nodeFilesByName, bot.nodeFiles)
-      addNodeFileEntries(current._nodeLogsByName, bot.nodeLogs)
+      if (botOnline && String(bot.activeState || '').trim().toLowerCase() === 'stale') current.operationalStats.staleBotCount += 1
+      if (botOnline && hasRecentBotError(bot, nowMs)) current.operationalStats.errorCount += 1
+      current.operationalStats.warningCount += botOnline ? countRecentWarnings(bot.warnings, nowMs) : 0
+      addNodeFileEntries(current._nodeFilesByName, inventory.nodeFiles)
+      addNodeFileEntries(current._nodeLogsByName, inventory.nodeLogs)
       addNodeFileEntries(current._finishedMapFilesByName, botFinishedMapFiles)
-      if (botLastStatusMs >= current.latestFinishedMapStatusAtMs && (Object.prototype.hasOwnProperty.call(bot, 'finishedMapCount') || botFinishedMapFiles.length > 0)) {
-        current.latestFinishedMapStatusAtMs = botLastStatusMs
+      const inventoryStatusMs = timestampMs(inventory.nodeInventoryAt || inventory.serverStatusAt || inventory.lastStatusAt || bot.serverStatusAt || bot.lastStatusAt || bot.heartbeatAt)
+      if (inventoryStatusMs >= current.latestFinishedMapStatusAtMs && (Object.prototype.hasOwnProperty.call(inventory, 'finishedMapCount') || botFinishedMapFiles.length > 0)) {
+        current.latestFinishedMapStatusAtMs = inventoryStatusMs
         current.finishedMapCount = reportedFinishedMapCount
       } else if (!current.latestFinishedMapStatusAtMs) {
         current.finishedMapCount = current._finishedMapFilesByName.size
       }
-      if (!current.lastStatusAt || String(bot.lastStatusAt || '') > String(current.lastStatusAt || '')) {
-        current.lastStatusAt = bot.lastStatusAt || null
+      const botStatusAt = bot.serverStatusAt || bot.lastStatusAt || null
+      if (!current.lastStatusAt || String(botStatusAt || '') > String(current.lastStatusAt || '')) {
+        current.lastStatusAt = botStatusAt
       }
       byHost.set(hostLabel, current)
     }
@@ -762,9 +809,35 @@ function createStore(baseDir) {
 
   function upsertBotStatus(status) {
     const bots = readBotMap()
+    const previous = bots[status.botName] || {}
+    const receivedAt = nowIso()
     const next = {
+      ...previous,
       ...status,
-      lastStatusAt: status.lastStatusAt || nowIso()
+      reportedLastStatusAt: status.lastStatusAt || null,
+      reportedHeartbeatAt: status.heartbeatAt || null,
+      serverStatusAt: receivedAt,
+      lastStatusAt: receivedAt
+    }
+    const inventoryFields = ['nodeFiles', 'nodeLogs', 'finishedMapFiles', 'finishedMapCount', 'nodeInventoryAt']
+    const hasInventoryPayload = inventoryFields.some((field) => Object.prototype.hasOwnProperty.call(status, field))
+    if (hasInventoryPayload) {
+      const inventory = readNodeInventoryMap()
+      inventory[status.botName] = {
+        botName: status.botName,
+        hostLabel: status.hostLabel,
+        nodeFiles: Array.isArray(status.nodeFiles) ? status.nodeFiles : [],
+        nodeLogs: Array.isArray(status.nodeLogs) ? status.nodeLogs : [],
+        finishedMapFiles: Array.isArray(status.finishedMapFiles) ? status.finishedMapFiles : [],
+        finishedMapCount: Math.max(0, toNumber(status.finishedMapCount, Array.isArray(status.finishedMapFiles) ? status.finishedMapFiles.length : 0)),
+        nodeInventoryAt: status.nodeInventoryAt || next.lastStatusAt,
+        serverStatusAt: receivedAt,
+        updatedAt: receivedAt
+      }
+      writeNodeInventoryMap(inventory)
+    }
+    for (const field of inventoryFields) {
+      delete next[field]
     }
     bots[status.botName] = next
     writeJson(botsFile, bots)
@@ -1138,8 +1211,11 @@ function createStore(baseDir) {
     const next = sortedIndexes.find(({ item }) => {
       const status = getQueueStatus(item)
       if (isTerminalQueueStatus(status)) return false
-      if (item.claimedByBotName && item.claimedByBotName !== normalizedBot) return false
-      return status === 'pending' || status === 'failed'
+      if (['claimed', 'downloaded', 'printing'].includes(status) && item.claimedByBotName && item.claimedByBotName !== normalizedBot) return false
+      if (status !== 'pending' && status !== 'failed') return false
+      const attemptCount = Math.max(0, toNumber(item.attemptCount, 0))
+      const maxAttempts = Math.max(1, toNumber(item.maxAttempts, 3))
+      return attemptCount < maxAttempts
     })
     if (!next) return null
 

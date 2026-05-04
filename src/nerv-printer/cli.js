@@ -721,10 +721,13 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     currentNbtStartedAt: null,
     activeQueueFile: null,
     lastError: '',
+    lastErrorAt: null,
     warnings: [],
     alerts: [],
     nodeInventoryCache: {
       nextScanAt: 0,
+      scannedAt: null,
+      reportPending: true,
       nodeFiles: [],
       nodeLogs: [],
       finishedMapFiles: []
@@ -763,8 +766,52 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return readProgressState(filePath)
   }
 
+  function isFinishedDashboardProgress(progress) {
+    const rawPhase = String(progress?.phase || '').trim().toLowerCase()
+    return rawPhase === 'finished' || rawPhase === 'done' || rawPhase === 'completed' || rawPhase === 'complete'
+  }
+
+  function progressSourceExists(progress) {
+    if (!progress || typeof progress !== 'object') return false
+    const sourcePath = String(progress.sourcePath || '').trim()
+    if (sourcePath && fs.existsSync(path.resolve(process.cwd(), sourcePath))) return true
+    const sourceName = path.basename(String(progress.sourceName || '').trim())
+    if (!sourceName) return false
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    return fs.existsSync(path.join(folder, sourceName))
+  }
+
+  function progressBlocksQueue(progress) {
+    if (!progress || isFinishedDashboardProgress(progress)) return false
+    const phase = normalizeResumePhase(progress.phase)
+    if (phase === 'post_print') return true
+    if (phase === 'printing' || phase === 'repair') return progressSourceExists(progress)
+    return false
+  }
+
+  function currentProgressSourceName() {
+    const progress = currentProgress()
+    if (!progressBlocksQueue(progress)) return null
+    return String(progress.sourceName || '').trim() || null
+  }
+
+  function currentAssignmentSourceName() {
+    if (runtimeControl?.isRunActive?.() !== true) return null
+    return String(currentAssignment()?.sourceName || '').trim() || null
+  }
+
+  function isDashboardBotOnline() {
+    if (bot.__nervSessionActive === false) return false
+    const clientState = String(bot?._client?.state || '').trim().toLowerCase()
+    if (!bot?._client) return false
+    if (clientState === 'disconnected' || clientState === 'ended' || clientState === 'end') return false
+    if (clientState === 'play') return true
+    if (bot?.entity || bot?.player) return true
+    return Boolean(clientState)
+  }
+
   function currentSourceName() {
-    return String(state.currentNbt || currentProgress()?.sourceName || currentAssignment()?.sourceName || '').trim() || null
+    return String(state.currentNbt || currentProgressSourceName() || currentAssignmentSourceName() || '').trim() || null
   }
 
   function currentRuntimeLocation() {
@@ -848,6 +895,8 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const nodeLogs = listNodeLogFiles()
     state.nodeInventoryCache = {
       nextScanAt: now + dashboard.nodeInventoryScanMs,
+      scannedAt: new Date().toISOString(),
+      reportPending: true,
       nodeFiles,
       nodeLogs,
       finishedMapFiles
@@ -857,6 +906,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
   function invalidateNodeInventoryCache() {
     state.nodeInventoryCache.nextScanAt = 0
+    state.nodeInventoryCache.reportPending = true
   }
 
   function buildStatusPayload(onlineOverride = null) {
@@ -875,7 +925,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const health = Number.isFinite(Number(bot?.health)) ? Number(bot.health) : 20
     const hunger = Number.isFinite(Number(bot?.food)) ? Number(bot.food) : 20
     const idle = phase === 'idle' || (now - state.lastActivityAt >= dashboard.idleWindowMs && !['printing', 'repair', 'rescan', 'post-print', 'cleanup', 'starting', 'waiting-spawn'].includes(phase))
-    const activeState = !idle && now - state.lastActivityAt >= dashboard.staleMs ? 'stale' : 'active'
+    const progressUpdatedAt = new Date(progress?.updatedAt || 0).getTime()
+    const recentProgressAt = Number.isFinite(progressUpdatedAt) && progressBlocksQueue(progress) ? progressUpdatedAt : 0
+    const lastWorkActivityAt = Math.max(state.lastActivityAt, recentProgressAt)
+    const activeState = !idle && now - lastWorkActivityAt >= dashboard.staleMs ? 'stale' : 'active'
     const role = currentRole()
     const assignedInterval = currentAssignment()?.interval ? {
       start: toNumber(currentAssignment().interval.start, 0),
@@ -883,7 +936,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     } : null
     const clientState = String(bot?._client?.state || '').toLowerCase()
     const isOnline = onlineOverride == null
-      ? (bot.__nervSessionActive !== false && clientState === 'play')
+      ? isDashboardBotOnline()
       : onlineOverride
     const runtimeLocation = currentRuntimeLocation()
     const location = mapDashboardLocation(runtimeLocation)
@@ -901,10 +954,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       : undefined
 
     const inventory = getCachedNodeInventory()
-    const nodeFiles = inventory.nodeFiles
-    const finishedMapFiles = inventory.finishedMapFiles
+    const includeInventory = inventory.reportPending === true
+    const nodeFiles = includeInventory ? inventory.nodeFiles : undefined
+    const finishedMapFiles = includeInventory ? inventory.finishedMapFiles : undefined
 
-    return {
+    const payload = {
       botName,
       runtime: 'nerv-printer',
       hostLabel: dashboard.hostLabel,
@@ -926,12 +980,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       reconnectStreak: state.reconnectState === 'reconnecting' ? Math.max(0, toNumber(sessionNumber, 1) - 1) : 0,
       currentNbt: currentSourceName(),
       lastStatusAt: new Date().toISOString(),
-      nodeFiles,
-      nodeLogs: inventory.nodeLogs,
-      finishedMapCount: finishedMapFiles.length,
-      finishedMapFiles,
       progress: progressPayload,
       lastError: state.lastError || null,
+      lastErrorAt: state.lastError ? state.lastErrorAt : null,
       warnings: state.warnings.slice(-5),
       alerts: state.alerts.filter((item) => item.active === true).slice(-8),
       assignedInterval,
@@ -943,11 +994,23 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       latencyMs: getBotLatencyMs(bot),
       tpaTarget: getTpaTarget(config)
     }
+    if (clientState) payload.clientState = clientState
+    if (includeInventory) {
+      payload.nodeFiles = nodeFiles
+      payload.nodeLogs = inventory.nodeLogs
+      payload.finishedMapCount = finishedMapFiles.length
+      payload.finishedMapFiles = finishedMapFiles
+      payload.nodeInventoryAt = inventory.scannedAt || new Date().toISOString()
+    }
+    return { payload, inventoryReported: includeInventory }
   }
 
   async function postStatus(onlineOverride = null) {
     try {
-      await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/status`, 'POST', buildStatusPayload(onlineOverride))
+      const status = buildStatusPayload(onlineOverride)
+      await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/status`, 'POST', status.payload)
+      if (status.inventoryReported) state.nodeInventoryCache.reportPending = false
+      await flushQueueResultOutbox()
     } catch (err) {
       logThrottled(`dashboard-status-${botName}`, `[DASHBOARD-WARN] status post failed for ${botName}: ${err?.message || err}`, {
         intervalMs: 30000,
@@ -1062,12 +1125,108 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return path.join(folder, '.dashboard-queue.json')
   }
 
+  function queueResultOutboxPath() {
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    return path.join(folder, '.dashboard-queue-results.json')
+  }
+
   function readQueueState() {
     return readOptionalJson(queueStatePath()) || {}
   }
 
   function writeQueueState(next) {
     writeJson(queueStatePath(), next && typeof next === 'object' ? next : {})
+  }
+
+  function readQueueResultOutbox() {
+    const items = readOptionalJson(queueResultOutboxPath())
+    return Array.isArray(items) ? items.filter((item) => item?.fileId) : []
+  }
+
+  function writeQueueResultOutbox(items) {
+    writeJson(queueResultOutboxPath(), Array.isArray(items) ? items : [])
+  }
+
+  function removeQueueResultOutboxItem(fileId) {
+    const wanted = String(fileId || '').trim()
+    if (!wanted) return
+    const next = readQueueResultOutbox().filter((item) => String(item.fileId || '') !== wanted)
+    writeQueueResultOutbox(next)
+  }
+
+  function hasPendingQueueResults() {
+    return readQueueResultOutbox().length > 0
+  }
+
+  function enqueueQueueResult(fileInfo, deliveryStatus, failedReason = null, reportError = null) {
+    const fileId = String(fileInfo?.fileId || '').trim()
+    if (!fileId) return
+    const now = new Date().toISOString()
+    const items = readQueueResultOutbox()
+    const index = items.findIndex((item) => String(item.fileId || '') === fileId)
+    const previous = index >= 0 ? items[index] : {}
+    const attemptCount = Math.max(0, toNumber(previous.reportAttemptCount, 0))
+    const next = {
+      ...previous,
+      fileId,
+      fileName: path.basename(String(fileInfo.fileName || fileInfo.originalName || `${fileId}.nbt`)),
+      originalName: path.basename(String(fileInfo.originalName || fileInfo.fileName || `${fileId}.nbt`)),
+      deliveryStatus,
+      failedReason,
+      queuedAt: previous.queuedAt || now,
+      updatedAt: now,
+      reportAttemptCount: attemptCount,
+      nextReportAt: previous.nextReportAt || now,
+      lastReportError: reportError ? String(reportError?.message || reportError) : previous.lastReportError || null
+    }
+    if (index >= 0) {
+      items[index] = next
+    } else {
+      items.push(next)
+    }
+    writeQueueResultOutbox(items)
+  }
+
+  async function flushQueueResultOutbox() {
+    const now = Date.now()
+    const items = readQueueResultOutbox()
+    if (!items.length) return false
+    const remaining = []
+    let reportedAny = false
+    let changed = false
+    for (const item of items) {
+      const nextReportMs = new Date(item.nextReportAt || 0).getTime()
+      if (Number.isFinite(nextReportMs) && nextReportMs > now) {
+        remaining.push(item)
+        continue
+      }
+      try {
+        await reportQueueFileResult(item.fileId, item.deliveryStatus || 'placed', item.failedReason || null)
+        forgetQueueFile(item.fileName || item.originalName)
+        if (state.activeQueueFile?.fileId === item.fileId) state.activeQueueFile = null
+        reportedAny = true
+        changed = true
+      } catch (error) {
+        const attemptCount = Math.max(0, toNumber(item.reportAttemptCount, 0)) + 1
+        const retryDelayMs = Math.min(60000, 5000 * Math.pow(2, Math.min(5, attemptCount - 1)))
+        changed = true
+        remaining.push({
+          ...item,
+          reportAttemptCount: attemptCount,
+          updatedAt: new Date().toISOString(),
+          nextReportAt: new Date(Date.now() + retryDelayMs).toISOString(),
+          lastReportError: error?.message || String(error)
+        })
+        logThrottled(`dashboard-queue-result-${botName}`, `[DASHBOARD-WARN] queue result report pending for ${botName}: ${error?.message || error}`, {
+          intervalMs: 30000,
+          level: 'warn'
+        })
+        for (const later of items.slice(items.indexOf(item) + 1)) remaining.push(later)
+        break
+      }
+    }
+    if (changed) writeQueueResultOutbox(remaining)
+    return reportedAny
   }
 
   function rememberQueueFile(fileName, item) {
@@ -1265,11 +1424,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
   function hasLocalNbtWorkPending() {
     if (runtimeControl?.isRunActive?.() === true) return true
-    if (currentSourceName()) return true
+    if (state.currentNbt) return true
+    if (progressBlocksQueue(currentProgress())) return true
     return listNodeNbtFiles().length > 0
   }
 
   async function handleQueueFileAssignment() {
+    await flushQueueResultOutbox()
+    if (hasPendingQueueResults()) return false
     if (hasLocalNbtWorkPending()) return false
     const item = await claimNextQueueFile()
     if (!item) return false
@@ -1278,27 +1440,42 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const targetPath = resolveUniqueFilePath(path.join(folder, fileName))
     try {
       await downloadDashboardFile(`${dashboard.serviceUrl}/api/files/${encodeURIComponent(item.fileId)}/download`, targetPath)
-      await reportQueueFileResult(item.fileId, 'downloaded')
-      const localName = path.basename(targetPath)
-      state.currentNbt = localName
-      state.activeQueueFile = {
-        fileId: item.fileId,
-        fileName: localName,
-        originalName: fileName
-      }
-      rememberQueueFile(localName, item)
-      printingIntentActive = true
-      runtimeControl?.requestStart('dashboard-queue')
-      state.startRequested = true
-      state.stopRequested = false
-      invalidateNodeInventoryCache()
-      noteActivity()
-      await reportQueueFileResult(item.fileId, 'printing')
-      return true
     } catch (error) {
-      await reportQueueFileResult(item.fileId, 'failed', error?.message || String(error))
+      try {
+        await reportQueueFileResult(item.fileId, 'failed', error?.message || String(error))
+      } catch (reportError) {
+        enqueueQueueResult({
+          fileId: item.fileId,
+          fileName,
+          originalName: fileName
+        }, 'failed', error?.message || String(error), reportError)
+      }
       throw error
     }
+    const localName = path.basename(targetPath)
+    state.currentNbt = localName
+    state.activeQueueFile = {
+      fileId: item.fileId,
+      fileName: localName,
+      originalName: fileName
+    }
+    rememberQueueFile(localName, item)
+    printingIntentActive = true
+    runtimeControl?.requestStart('dashboard-queue')
+    state.startRequested = true
+    state.stopRequested = false
+    invalidateNodeInventoryCache()
+    noteActivity()
+    try {
+      await reportQueueFileResult(item.fileId, 'downloaded')
+      await reportQueueFileResult(item.fileId, 'printing')
+    } catch (error) {
+      logThrottled(`dashboard-queue-progress-${botName}`, `[DASHBOARD-WARN] queue progress report will catch up on final result: ${error?.message || error}`, {
+        intervalMs: 30000,
+        level: 'warn'
+      })
+    }
+    return true
   }
 
   async function handleAssignNbt(command) {
@@ -1409,6 +1586,8 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     if (state.commandBusy || state.stopped) return
     state.commandBusy = true
     try {
+      await flushQueueResultOutbox()
+      if (hasPendingQueueResults()) return
       const handledNodeFile = await handleNodeFileAssignment()
       if (handledNodeFile) return
       const nodeCommand = await claimNextNodeCommand()
@@ -1475,7 +1654,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       state.reconnectState = String(nextState || 'idle')
     },
     setLastError(message) {
-      state.lastError = String(message || '').trim()
+      const text = String(message || '').trim()
+      state.lastError = text
+      state.lastErrorAt = text ? new Date().toISOString() : null
+      noteActivity()
+    },
+    clearLastError() {
+      state.lastError = ''
+      state.lastErrorAt = null
       noteActivity()
     },
     reportWarning(category, message, details = {}) {
@@ -1544,10 +1730,20 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     async completeActiveQueueFile(status = 'placed', reason = null) {
       const active = state.activeQueueFile
       if (!active?.fileId) return false
-      await reportQueueFileResult(active.fileId, status, reason)
-      forgetQueueFile(active.fileName || active.originalName)
-      state.activeQueueFile = null
-      return true
+      try {
+        await reportQueueFileResult(active.fileId, status, reason)
+        removeQueueResultOutboxItem(active.fileId)
+        forgetQueueFile(active.fileName || active.originalName)
+        state.activeQueueFile = null
+        return true
+      } catch (error) {
+        enqueueQueueResult(active, status, reason, error)
+        logThrottled(`dashboard-queue-complete-${botName}`, `[DASHBOARD-WARN] queued dashboard result for retry: ${error?.message || error}`, {
+          intervalMs: 30000,
+          level: 'warn'
+        })
+        return false
+      }
     },
     restoreQueueFileForNbt(filePathOrName) {
       return restoreQueueFileForNbt(filePathOrName)
@@ -1599,6 +1795,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
     try {
       config.__runtimeControl = runtimeControl || null
       const runInfo = await runPrint(bot, config, dashboardRuntime)
+      dashboardRuntime?.clearLastError?.()
       dashboardRuntime?.setCurrentNbt(runInfo?.sourceName || null)
 
       if (runInfo?.sourceType !== 'nbt') {

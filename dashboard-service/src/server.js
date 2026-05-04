@@ -18,6 +18,9 @@ const SESSION_MAX_AGE_SECONDS = Math.max(3600, Number(process.env.DASHBOARD_SESS
 const SNAPSHOT_CACHE_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_CACHE_MS || 3000))
 const SNAPSHOT_SLOW_STEP_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_SLOW_STEP_MS || 500))
 const SLOW_ROUTE_MS = Math.max(0, Number(process.env.DASHBOARD_SLOW_ROUTE_MS || 750))
+const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
+const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
+const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
 const MAX_REQUEST_BODY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_REQUEST_BYTES || 64 * 1024 * 1024))
 const MAX_UPLOAD_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_UPLOAD_BYTES || 512 * 1024 * 1024))
 const MAX_ZIP_ENTRY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_ZIP_ENTRY_BYTES || 64 * 1024 * 1024))
@@ -661,10 +664,39 @@ function validateBotStatus(body) {
   return ''
 }
 
+function timestampMs(value) {
+  const parsed = new Date(value || 0).getTime()
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function isRecentTimestamp(value, ttlMs, now = Date.now()) {
+  const parsed = timestampMs(value)
+  if (!parsed) return false
+  const age = now - parsed
+  return age >= 0 && age <= ttlMs
+}
+
+function filterRecentWarnings(warnings, now = Date.now()) {
+  return (Array.isArray(warnings) ? warnings : [])
+    .filter((warning) => {
+      const lastSeenAt = warning?.lastSeenAt || warning?.firstSeenAt
+      return isRecentTimestamp(lastSeenAt, ALERT_WARNING_TTL_MS, now)
+    })
+    .slice(-5)
+}
+
+function hasRecentBotError(bot, now = Date.now()) {
+  const text = String(bot?.lastError || '').trim()
+  if (!text) return false
+  return isRecentTimestamp(bot?.lastErrorAt, ALERT_ERROR_TTL_MS, now)
+}
+
 function summarizeBot(bot) {
-  const lastStatusAt = new Date(bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
+  const lastStatusAt = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
   const ageMs = Number.isFinite(lastStatusAt) ? Math.max(0, Date.now() - lastStatusAt) : Number.POSITIVE_INFINITY
-  const fresh = ageMs <= 30000
+  const fresh = ageMs <= BOT_FRESH_MS
+  const online = fresh ? bot.online === true : false
+  const activeState = fresh ? bot.activeState : 'offline'
   const currentNbt = String(bot?.currentNbt || '').trim()
   const statusDetail = bot.statusDetail || bot.phase || null
   const spawnDetail = /^spawn-\d+$/i.test(String(statusDetail || '').trim())
@@ -672,17 +704,19 @@ function summarizeBot(bot) {
   const activeNbtRun = fresh && currentNbt && currentNbt.toLowerCase() !== 'none' && bot?.currentNbtStartedAt
   const displayPhase = activeNbtRun && (spawnPhase || spawnDetail) ? 'printing' : bot.phase
   const displayStatusDetail = activeNbtRun && (spawnPhase || spawnDetail) ? 'printing' : statusDetail
+  const warnings = online ? filterRecentWarnings(bot.warnings) : []
+  const recentError = online && hasRecentBotError(bot)
   return {
     botName: bot.botName,
     runtime: bot.runtime,
     hostLabel: bot.hostLabel,
     configFileName: bot.configFileName || null,
-    online: fresh ? bot.online === true : false,
+    online,
     phase: displayPhase,
     statusDetail: displayStatusDetail,
     health: bot.health,
     hunger: bot.hunger,
-    activeState: fresh ? bot.activeState : 'stale',
+    activeState,
     location: bot.location,
     locationDetail: bot.locationDetail || bot.location || null,
     idle: bot.idle,
@@ -693,10 +727,12 @@ function summarizeBot(bot) {
     reconnectCount: Number.isFinite(Number(bot.reconnectCount)) ? Number(bot.reconnectCount) : 0,
     reconnectStreak: Number.isFinite(Number(bot.reconnectStreak)) ? Number(bot.reconnectStreak) : 0,
     currentNbt,
-    lastStatusAt: bot.lastStatusAt,
-    lastError: bot.lastError || null,
-    warnings: Array.isArray(bot.warnings) ? bot.warnings.slice(-5) : [],
-    alerts: Array.isArray(bot.alerts) ? bot.alerts.filter((item) => item && item.active === true).slice(-8) : [],
+    lastStatusAt: bot.serverStatusAt || bot.lastStatusAt,
+    reportedLastStatusAt: bot.reportedLastStatusAt || bot.lastStatusAt || null,
+    lastError: recentError ? bot.lastError : null,
+    lastErrorAt: recentError ? bot.lastErrorAt : null,
+    warnings,
+    alerts: fresh ? (Array.isArray(bot.alerts) ? bot.alerts.filter((item) => item && item.active === true).slice(-8) : []) : [],
     progress: bot.progress || null,
     verificationCode: bot.verificationCode || null,
     tokenWaiting: bot.tokenWaiting === true,
@@ -704,6 +740,7 @@ function summarizeBot(bot) {
     currentNbtStartedAt: bot.currentNbtStartedAt || null,
     latencyMs: typeof bot.latencyMs === 'number' ? bot.latencyMs : null,
     tpaTarget: bot.tpaTarget || null,
+    clientState: bot.clientState || null,
     recentChat: Array.isArray(bot.recentChat) ? bot.recentChat : []
   }
 }
@@ -809,7 +846,7 @@ function createAlert(level, category, title, message, details = {}) {
 
 function buildDashboardAlerts(bots, nodes, assignments) {
   const alerts = []
-  const staleBots = bots.filter((bot) => bot.activeState === 'stale')
+  const staleBots = bots.filter((bot) => bot.online === true && bot.activeState === 'stale')
   const offlineBots = bots.filter((bot) => bot.online !== true)
   const offlineNodes = nodes.filter((node) => Number(node.onlineCount || 0) <= 0)
   const errorBots = bots.filter((bot) => String(bot.lastError || '').trim())
@@ -829,7 +866,7 @@ function buildDashboardAlerts(bots, nodes, assignments) {
   const activeWaterBots = bots.filter((bot) =>
     Array.isArray(bot.alerts) && bot.alerts.some((alert) => alert?.active === true && String(alert.category || '') === 'platform-water')
   )
-  const stockWarnings = bots.flatMap((bot) => (Array.isArray(bot.warnings) ? bot.warnings : [])
+  const stockWarnings = bots.filter((bot) => bot.online === true).flatMap((bot) => (Array.isArray(bot.warnings) ? bot.warnings : [])
     .filter((warning) => /stock|material|food|map|xp|bottle/i.test(`${warning.category || ''} ${warning.message || ''}`))
     .map((warning) => ({ bot, warning })))
 
