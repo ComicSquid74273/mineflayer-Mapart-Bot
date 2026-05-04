@@ -18,7 +18,8 @@ const state = {
     attention: 0,
     localNodeFiles: 0,
     nodeFinishedMapCount: 0,
-    completed: 0
+    completed: 0,
+    eta: null
   },
   alerts: [],
   nbtSearch: '',
@@ -97,6 +98,7 @@ const elements = {
   queueRemainingValue: document.getElementById('queueRemainingValue'),
   queueCompletedValue: document.getElementById('queueCompletedValue'),
   queueTotalValue: document.getElementById('queueTotalValue'),
+  queueEtaValue: document.getElementById('queueEtaValue'),
   queueRemainingMeta: document.getElementById('queueRemainingMeta'),
   queueTracker: document.getElementById('queueTracker'),
   serviceStatus: document.getElementById('serviceStatus'),
@@ -190,6 +192,35 @@ function formatDuration(value) {
   if (minutes > 0) parts.push(`${minutes}m`)
   if (!parts.length || (parts.length < 2 && seconds > 0 && days === 0)) parts.push(`${seconds}s`)
   return parts.slice(0, 2).join(' ')
+}
+
+function formatQueueEta(eta) {
+  if (!eta || typeof eta !== 'object') return 'Waiting'
+  if (eta.available === true) {
+    const ms = Number(eta.ms)
+    if (!Number.isFinite(ms)) return 'Waiting'
+    if (ms <= 0) return 'Done'
+    return `~${formatDuration(ms)}`
+  }
+  const reason = String(eta.reason || '').toLowerCase()
+  if (reason === 'no-online-nodes') return 'Paused'
+  return 'Waiting'
+}
+
+function describeQueueEta(eta) {
+  if (!eta || typeof eta !== 'object') return 'ETA waiting for print history'
+  const reason = String(eta.reason || '').toLowerCase()
+  if (eta.available === true) {
+    if (reason === 'complete') return 'ETA complete'
+    const estimatedNodes = Math.max(0, Number(eta.estimatedNodeCount || 0))
+    const onlineNodes = Math.max(0, Number(eta.onlineNodeCount || 0))
+    const fallbackNodes = Math.max(0, Number(eta.fallbackNodeCount || 0))
+    const nodeText = estimatedNodes || onlineNodes
+    const suffix = fallbackNodes > 0 ? `; ${fallbackNodes} using fleet avg` : ''
+    return `ETA ${formatQueueEta(eta)} from ${nodeText} online node(s)${suffix}`
+  }
+  if (reason === 'no-online-nodes') return 'ETA paused: no online nodes'
+  return 'ETA waiting for print history'
 }
 
 function formatFileSize(bytes) {
@@ -1019,7 +1050,7 @@ function renderUploadAssignments() {
 }
 
 function renderQueueSummary() {
-  if (!elements.queueRemainingValue || !elements.queueCompletedValue || !elements.queueTotalValue || !elements.queueRemainingMeta) return
+  if (!elements.queueRemainingValue || !elements.queueCompletedValue || !elements.queueTotalValue || !elements.queueEtaValue || !elements.queueRemainingMeta) return
   const summary = state.queueSummary || {}
   const sig = JSON.stringify(summary)
   if (state.renderCache.queueSummary === sig) return
@@ -1037,13 +1068,16 @@ function renderQueueSummary() {
   const remaining = Math.max(0, Number(summary.combinedRemaining ?? (centralRemaining + localNodeFiles)))
   const completed = Math.max(0, Number(summary.combinedCompleted ?? Math.max(centralCompleted, nodeFinishedMapCount)))
   const total = Math.max(0, Number(summary.combinedTotal ?? (remaining + completed)))
+  const eta = summary.eta || null
   const parts = [`Queue ${centralRemaining} left/${centralCompleted} done`, `local ${localNodeFiles}`, `finished ${nodeFinishedMapCount}`]
   if (pending || active || retrying || requeued) parts.push(`${pending} pending/${active} active/${requeued} requeued/${retrying} retry-needed`)
   if (attention) parts.push(`${attention} attention`)
+  parts.push(describeQueueEta(eta))
 
   elements.queueRemainingValue.textContent = String(remaining)
   elements.queueCompletedValue.textContent = String(completed)
   elements.queueTotalValue.textContent = String(total)
+  elements.queueEtaValue.textContent = formatQueueEta(eta)
   elements.queueRemainingMeta.textContent = parts.join(' · ')
   if (elements.queueTracker) {
     elements.queueTracker.classList.toggle('queue-tracker-warn', attention > 0 || retrying > 0)

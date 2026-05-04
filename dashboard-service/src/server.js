@@ -838,6 +838,98 @@ function getAssignmentDisplayStatus(item) {
   return String(item.queueStatus || item.status || '').trim().toLowerCase()
 }
 
+function medianNumber(values) {
+  const sorted = values
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .sort((left, right) => left - right)
+  if (!sorted.length) return null
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 1
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2
+}
+
+function nodeAverageDurationMs(node) {
+  const timing = node?.timing || {}
+  const samples = Number(timing.totalCompletedMaps || 0)
+  const averageMs = Number(timing.averageDurationMs || 0)
+  return samples > 0 && Number.isFinite(averageMs) && averageMs > 0 ? averageMs : null
+}
+
+function buildQueueEta(remainingCount, nodes = []) {
+  const remaining = Math.max(0, Number(remainingCount || 0))
+  const allNodes = Array.isArray(nodes) ? nodes : []
+  const onlineNodes = allNodes.filter((node) => Number(node?.onlineCount || 0) > 0)
+  const knownDurations = allNodes.map(nodeAverageDurationMs).filter((value) => Number.isFinite(value) && value > 0)
+  const medianDurationMs = medianNumber(knownDurations)
+
+  if (remaining <= 0) {
+    return {
+      available: true,
+      reason: 'complete',
+      ms: 0,
+      onlineNodeCount: onlineNodes.length,
+      estimatedNodeCount: 0,
+      timedNodeCount: knownDurations.length,
+      fallbackNodeCount: 0,
+      medianDurationMs
+    }
+  }
+
+  if (!onlineNodes.length) {
+    return {
+      available: false,
+      reason: 'no-online-nodes',
+      ms: null,
+      onlineNodeCount: 0,
+      estimatedNodeCount: 0,
+      timedNodeCount: knownDurations.length,
+      fallbackNodeCount: 0,
+      medianDurationMs
+    }
+  }
+
+  let throughputPerMs = 0
+  let estimatedNodeCount = 0
+  let directNodeCount = 0
+  let fallbackNodeCount = 0
+
+  for (const node of onlineNodes) {
+    const directDurationMs = nodeAverageDurationMs(node)
+    const durationMs = directDurationMs || medianDurationMs
+    if (!Number.isFinite(durationMs) || durationMs <= 0) continue
+    throughputPerMs += 1 / durationMs
+    estimatedNodeCount += 1
+    if (directDurationMs) directNodeCount += 1
+    else fallbackNodeCount += 1
+  }
+
+  if (throughputPerMs <= 0 || estimatedNodeCount <= 0) {
+    return {
+      available: false,
+      reason: 'waiting-for-history',
+      ms: null,
+      onlineNodeCount: onlineNodes.length,
+      estimatedNodeCount: 0,
+      timedNodeCount: knownDurations.length,
+      fallbackNodeCount: 0,
+      medianDurationMs
+    }
+  }
+
+  return {
+    available: true,
+    reason: fallbackNodeCount > 0 ? 'partial-history' : 'history',
+    ms: Math.round(remaining / throughputPerMs),
+    onlineNodeCount: onlineNodes.length,
+    estimatedNodeCount,
+    timedNodeCount: directNodeCount,
+    fallbackNodeCount,
+    medianDurationMs
+  }
+}
+
 function buildQueueSummary(assignments, nodes = []) {
   const summary = {
     total: 0,
@@ -853,7 +945,8 @@ function buildQueueSummary(assignments, nodes = []) {
     nodeFinishedMapCount: 0,
     combinedRemaining: 0,
     combinedCompleted: 0,
-    combinedTotal: 0
+    combinedTotal: 0,
+    eta: null
   }
   const activeStatuses = new Set(['claimed', 'downloaded', 'printing'])
   const completedStatuses = new Set(['placed', 'completed', 'succeeded'])
@@ -890,6 +983,7 @@ function buildQueueSummary(assignments, nodes = []) {
   summary.combinedRemaining = summary.remaining + summary.localNodeFiles
   summary.combinedCompleted = Math.max(summary.completed, summary.nodeFinishedMapCount)
   summary.combinedTotal = summary.combinedRemaining + summary.combinedCompleted
+  summary.eta = buildQueueEta(summary.combinedRemaining, nodes)
   return summary
 }
 

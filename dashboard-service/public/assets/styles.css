@@ -93,7 +93,7 @@ h1 {
 }
 
 .queue-tracker {
-  min-width: 300px;
+  min-width: 420px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -127,7 +127,7 @@ h1 {
 
 .queue-tracker-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-top: 6px;
 }
@@ -849,6 +849,10 @@ button:disabled {
   .queue-tracker {
     width: 100%;
     min-width: 0;
+  }
+
+  .queue-tracker-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .auth-box input {
