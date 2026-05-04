@@ -92,6 +92,44 @@ h1 {
   justify-content: end;
 }
 
+.alerts-bar {
+  display: grid;
+  gap: 10px;
+  margin: -12px 0 18px;
+}
+
+.alert-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(14, 28, 40, 0.92);
+}
+
+.alert-item p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.alert-critical {
+  border-color: rgba(181, 73, 56, 0.42);
+  background: rgba(181, 73, 56, 0.14);
+}
+
+.alert-warn {
+  border-color: rgba(209, 154, 42, 0.38);
+  background: rgba(209, 154, 42, 0.12);
+}
+
+.alert-info {
+  border-color: rgba(28, 143, 114, 0.32);
+  background: rgba(28, 143, 114, 0.12);
+}
+
 .auth-box {
   display: flex;
   gap: 10px;

@@ -1,6 +1,8 @@
 const http = require('http')
 const path = require('path')
 const fs = require('fs')
+const crypto = require('crypto')
+const zlib = require('zlib')
 const { createStore } = require('./store')
 
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0'
@@ -11,6 +13,15 @@ const LOGS_DIR = process.env.DASHBOARD_LOGS_DIR || path.resolve(__dirname, '..',
 const CONFIG_DIR = process.env.DASHBOARD_CONFIG_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config', '_configs')
 const NBT_DIR = process.env.DASHBOARD_NBT_DIR || path.resolve(__dirname, '..', '..', 'nerv-printer-config')
 const store = createStore(DATA_DIR)
+const SESSION_COOKIE_NAME = 'mapart_dashboard_session'
+const SESSION_MAX_AGE_SECONDS = Math.max(3600, Number(process.env.DASHBOARD_SESSION_MAX_AGE_SECONDS || 7 * 24 * 60 * 60))
+const SNAPSHOT_CACHE_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_CACHE_MS || 1000))
+const SLOW_ROUTE_MS = Math.max(0, Number(process.env.DASHBOARD_SLOW_ROUTE_MS || 750))
+const MAX_REQUEST_BODY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_REQUEST_BYTES || 64 * 1024 * 1024))
+const MAX_UPLOAD_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_UPLOAD_BYTES || 512 * 1024 * 1024))
+const MAX_ZIP_ENTRY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_ZIP_ENTRY_BYTES || 64 * 1024 * 1024))
+const MAX_ZIP_TOTAL_BYTES = Math.max(MAX_ZIP_ENTRY_BYTES, Number(process.env.DASHBOARD_MAX_ZIP_TOTAL_BYTES || MAX_UPLOAD_BYTES))
+const MAX_ZIP_ENTRIES = Math.max(1, Number(process.env.DASHBOARD_MAX_ZIP_ENTRIES || 1000))
 const PROTECTED_DATA_FILES = new Set(['operators.json'])
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
@@ -55,10 +66,11 @@ function installTimestampedConsole() {
 
 installTimestampedConsole()
 
-function sendJson(res, statusCode, payload) {
+function sendJson(res, statusCode, payload, extraHeaders = {}) {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store'
+    'cache-control': 'no-store',
+    ...extraHeaders
   })
   res.end(JSON.stringify(payload, null, 2))
 }
@@ -176,6 +188,7 @@ function actorHasPermission(actor, requiredPermission) {
 }
 
 function getAuthRequirement(pathname, method) {
+  if (pathname === '/api/dashboard/auth/login' || pathname === '/api/dashboard/auth/logout') return null
   if (pathname === '/api/dashboard/auth/me') return 'authenticated'
   if (reqIsLogPath(pathname, method)) return 'canViewLogs'
   if (reqIsLogDeletePath(pathname, method)) return 'canManageOperators'
@@ -187,6 +200,77 @@ function getAuthRequirement(pathname, method) {
   if (reqIsNodeDeletePath(pathname, method)) return 'canDeleteNodeFiles'
   if (reqIsDashboardOperationPath(pathname, method)) return 'canOperate'
   return null
+}
+
+function parseCookies(req) {
+  const header = String(req.headers.cookie || '')
+  const cookies = {}
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=')
+    if (index < 0) continue
+    const key = part.slice(0, index).trim()
+    const value = part.slice(index + 1).trim()
+    if (!key) continue
+    cookies[key] = decodeURIComponent(value)
+  }
+  return cookies
+}
+
+function getSessionSecret() {
+  const envSecret = String(process.env.DASHBOARD_SESSION_SECRET || '').trim()
+  if (envSecret) return envSecret
+  const secretPath = path.join(DATA_DIR, 'session-secret.txt')
+  try {
+    if (fs.existsSync(secretPath)) {
+      const existing = fs.readFileSync(secretPath, 'utf8').trim()
+      if (existing) return existing
+    }
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+    const generated = crypto.randomBytes(32).toString('base64url')
+    fs.writeFileSync(secretPath, generated, { encoding: 'utf8', flag: 'wx' })
+    return generated
+  } catch {
+    return crypto.createHash('sha256').update(`${DATA_DIR}:${PORT}:mapart-dashboard`).digest('hex')
+  }
+}
+
+const SESSION_SECRET = getSessionSecret()
+
+function signSessionPayload(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url')
+  return `${body}.${sig}`
+}
+
+function verifySessionToken(token) {
+  const value = String(token || '').trim()
+  const [body, sig] = value.split('.')
+  if (!body || !sig) return null
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url')
+  const expectedBuffer = Buffer.from(expected)
+  const sigBuffer = Buffer.from(sig)
+  if (expectedBuffer.length !== sigBuffer.length || !crypto.timingSafeEqual(expectedBuffer, sigBuffer)) return null
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
+    if (Number(payload?.exp || 0) < Date.now()) return null
+    return payload
+  } catch {
+    return null
+  }
+}
+
+function createSessionCookie(username) {
+  const token = signSessionPayload({
+    username,
+    iat: Date.now(),
+    exp: Date.now() + SESSION_MAX_AGE_SECONDS * 1000
+  })
+  const secure = String(process.env.DASHBOARD_COOKIE_SECURE || '').trim().toLowerCase() === 'true'
+  return `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}${secure ? '; Secure' : ''}`
+}
+
+function clearSessionCookie() {
+  return `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`
 }
 
 function reqIsLogPath(pathname, method) {
@@ -209,7 +293,7 @@ function reqIsLogDeletePath(pathname, method) {
 }
 
 function reqIsDashboardFileReadPath(pathname, method) {
-  return method === 'GET' && pathname === '/api/dashboard/files'
+  return method === 'GET' && (pathname === '/api/dashboard/files' || pathname === '/api/dashboard/queue')
 }
 
 function reqIsOperatorManagementPath(pathname) {
@@ -235,6 +319,7 @@ function reqIsDashboardOperationPath(pathname, method) {
   return pathname === '/api/dashboard/commands/start-all'
     || pathname === '/api/dashboard/commands/stop-all'
     || pathname === '/api/dashboard/files'
+    || pathname === '/api/dashboard/uploads'
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/stop'))
@@ -246,6 +331,8 @@ function reqIsDashboardOperationPath(pathname, method) {
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/disconnect'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/reconnect'))
     || Boolean(matchPath(pathname, '/api/dashboard/files/:fileId/assign'))
+    || Boolean(matchPath(pathname, '/api/dashboard/queue/:fileId/release'))
+    || Boolean(matchPath(pathname, '/api/dashboard/queue/:fileId/retry'))
 }
 
 function ensureWithinDir(filePath, dirPath) {
@@ -337,6 +424,19 @@ function projectOperatorAccount(existing, input) {
 }
 
 function getAuthorizedActor(req) {
+  const cookies = parseCookies(req)
+  const session = verifySessionToken(cookies[SESSION_COOKIE_NAME])
+  if (session?.username) {
+    const account = store.getOperator(session.username, true)
+    if (account) {
+      return {
+        username: account.username,
+        role: normalizeRole(account.role, 'viewer'),
+        permissions: getEffectivePermissions(account)
+      }
+    }
+  }
+
   const auth = parseBasicAuth(req)
   if (!auth) return null
   const match = store.listOperatorCredentials().find((item) => item.username === auth.username && item.password === auth.password)
@@ -378,9 +478,26 @@ function matchPath(pathname, pattern) {
   return params
 }
 
-async function readBody(req) {
+function payloadTooLarge(message) {
+  const error = new Error(message)
+  error.statusCode = 413
+  error.code = 'PAYLOAD_TOO_LARGE'
+  return error
+}
+
+async function readBody(req, options = {}) {
+  const maxBytes = Math.max(1, Number(options.maxBytes || MAX_REQUEST_BODY_BYTES))
+  const contentLength = Number(req.headers['content-length'] || 0)
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw payloadTooLarge(`request body exceeds ${maxBytes} bytes`)
+  }
   const chunks = []
+  let total = 0
   for await (const chunk of req) {
+    total += chunk.length
+    if (total > maxBytes) {
+      throw payloadTooLarge(`request body exceeds ${maxBytes} bytes`)
+    }
     chunks.push(chunk)
   }
   const raw = Buffer.concat(chunks)
@@ -390,6 +507,131 @@ async function readBody(req) {
     return JSON.parse(raw.toString('utf8'))
   }
   return raw
+}
+
+function parseMultipartBody(buffer, contentType) {
+  const boundaryMatch = String(contentType || '').match(/boundary=(?:"([^"]+)"|([^;]+))/i)
+  const boundary = boundaryMatch ? (boundaryMatch[1] || boundaryMatch[2] || '').trim() : ''
+  if (!boundary) throw new Error('multipart boundary is missing')
+  const delimiter = Buffer.from(`--${boundary}`)
+  const parts = []
+  let cursor = buffer.indexOf(delimiter)
+  while (cursor >= 0) {
+    cursor += delimiter.length
+    if (buffer.slice(cursor, cursor + 2).toString() === '--') break
+    if (buffer.slice(cursor, cursor + 2).toString() === '\r\n') cursor += 2
+    const headerEnd = buffer.indexOf(Buffer.from('\r\n\r\n'), cursor)
+    if (headerEnd < 0) break
+    const rawHeaders = buffer.slice(cursor, headerEnd).toString('utf8')
+    let bodyStart = headerEnd + 4
+    let next = buffer.indexOf(delimiter, bodyStart)
+    if (next < 0) break
+    let bodyEnd = next
+    if (bodyEnd >= 2 && buffer.slice(bodyEnd - 2, bodyEnd).toString() === '\r\n') bodyEnd -= 2
+    const headers = {}
+    for (const line of rawHeaders.split('\r\n')) {
+      const index = line.indexOf(':')
+      if (index < 0) continue
+      headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim()
+    }
+    const disposition = headers['content-disposition'] || ''
+    const name = disposition.match(/name="([^"]+)"/i)?.[1] || ''
+    const filename = disposition.match(/filename="([^"]*)"/i)?.[1] || ''
+    parts.push({
+      name,
+      filename: filename ? path.basename(filename) : '',
+      contentType: headers['content-type'] || '',
+      data: buffer.slice(bodyStart, bodyEnd)
+    })
+    cursor = next
+  }
+  return parts
+}
+
+async function readMultipartForm(req) {
+  const raw = await readBody(req, { maxBytes: MAX_UPLOAD_BYTES })
+  const parts = parseMultipartBody(Buffer.isBuffer(raw) ? raw : Buffer.alloc(0), req.headers['content-type'])
+  const fields = {}
+  const files = []
+  for (const part of parts) {
+    if (part.filename) {
+      files.push(part)
+    } else if (part.name) {
+      fields[part.name] = part.data.toString('utf8')
+    }
+  }
+  return { fields, files }
+}
+
+function readUInt32(buffer, offset) {
+  return offset >= 0 && offset + 4 <= buffer.length ? buffer.readUInt32LE(offset) : 0
+}
+
+function readUInt16(buffer, offset) {
+  return offset >= 0 && offset + 2 <= buffer.length ? buffer.readUInt16LE(offset) : 0
+}
+
+function findZipEndOfCentralDirectory(buffer) {
+  const minOffset = Math.max(0, buffer.length - 22 - 65535)
+  for (let offset = buffer.length - 22; offset >= minOffset; offset -= 1) {
+    if (readUInt32(buffer, offset) === 0x06054b50) return offset
+  }
+  return -1
+}
+
+function extractNbtFilesFromZip(buffer, archiveName) {
+  const eocd = findZipEndOfCentralDirectory(buffer)
+  if (eocd < 0) throw new Error(`${archiveName}: invalid zip file`)
+  const entryCount = readUInt16(buffer, eocd + 10)
+  if (entryCount > MAX_ZIP_ENTRIES) {
+    throw new Error(`${archiveName}: zip contains too many entries (${entryCount}/${MAX_ZIP_ENTRIES})`)
+  }
+  const centralDirOffset = readUInt32(buffer, eocd + 16)
+  const items = []
+  let totalUncompressedBytes = 0
+  let offset = centralDirOffset
+  for (let index = 0; index < entryCount; index += 1) {
+    if (readUInt32(buffer, offset) !== 0x02014b50) break
+    const compression = readUInt16(buffer, offset + 10)
+    const compressedSize = readUInt32(buffer, offset + 20)
+    const uncompressedSize = readUInt32(buffer, offset + 24)
+    const fileNameLength = readUInt16(buffer, offset + 28)
+    const extraLength = readUInt16(buffer, offset + 30)
+    const commentLength = readUInt16(buffer, offset + 32)
+    const localHeaderOffset = readUInt32(buffer, offset + 42)
+    const rawName = buffer.slice(offset + 46, offset + 46 + fileNameLength).toString('utf8')
+    const fileName = path.basename(rawName)
+    offset += 46 + fileNameLength + extraLength + commentLength
+    if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) continue
+    if (uncompressedSize > MAX_ZIP_ENTRY_BYTES) {
+      throw new Error(`${archiveName}: ${fileName} exceeds max entry size ${MAX_ZIP_ENTRY_BYTES} bytes`)
+    }
+    totalUncompressedBytes += uncompressedSize
+    if (totalUncompressedBytes > MAX_ZIP_TOTAL_BYTES) {
+      throw new Error(`${archiveName}: extracted NBT total exceeds ${MAX_ZIP_TOTAL_BYTES} bytes`)
+    }
+    if (readUInt32(buffer, localHeaderOffset) !== 0x04034b50) continue
+    const localNameLength = readUInt16(buffer, localHeaderOffset + 26)
+    const localExtraLength = readUInt16(buffer, localHeaderOffset + 28)
+    const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength
+    const compressed = buffer.slice(dataStart, dataStart + compressedSize)
+    let data
+    if (compression === 0) {
+      data = compressed
+    } else if (compression === 8) {
+      data = zlib.inflateRawSync(compressed)
+    } else {
+      throw new Error(`${archiveName}: unsupported zip compression method ${compression} for ${fileName}`)
+    }
+    if (uncompressedSize && data.length !== uncompressedSize) {
+      throw new Error(`${archiveName}: size mismatch for ${fileName}`)
+    }
+    if (data.length > MAX_ZIP_ENTRY_BYTES) {
+      throw new Error(`${archiveName}: ${fileName} exceeds max entry size ${MAX_ZIP_ENTRY_BYTES} bytes`)
+    }
+    items.push({ fileName, data })
+  }
+  return items
 }
 
 function validateBotStatus(body) {
@@ -453,6 +695,7 @@ function summarizeBot(bot) {
     lastStatusAt: bot.lastStatusAt,
     lastError: bot.lastError || null,
     warnings: Array.isArray(bot.warnings) ? bot.warnings.slice(-5) : [],
+    alerts: Array.isArray(bot.alerts) ? bot.alerts.filter((item) => item && item.active === true).slice(-8) : [],
     progress: bot.progress || null,
     verificationCode: bot.verificationCode || null,
     tokenWaiting: bot.tokenWaiting === true,
@@ -509,16 +752,21 @@ function listNodeReprintCommands(hostLabel) {
 
 function listUploadAssignments() {
   const fileAssignments = store.listFiles()
-    .filter((item) => item.assignedBotName || item.assignedHostLabel || item.claimedByBotName || item.deliveryStatus !== 'unassigned')
+    .filter((item) => item.queueMode === true || item.assignedBotName || item.assignedHostLabel || item.claimedByBotName || item.deliveryStatus !== 'unassigned')
     .map((item) => ({
       id: item.fileId,
-      source: 'stored-file',
+      source: item.source || (item.queueMode === true ? 'queue' : 'stored-file'),
+      batchId: item.batchId || null,
       fileName: item.originalName || item.storedName || item.fileId,
       sizeBytes: item.sizeBytes,
-      targetBotName: item.assignedBotName || null,
-      targetHostLabel: item.assignedHostLabel || null,
+      targetBotName: item.targetBotName || item.assignedBotName || null,
+      targetHostLabel: item.targetHostLabel || item.assignedHostLabel || null,
       claimedByBotName: item.claimedByBotName || null,
+      claimedByHostLabel: item.claimedByHostLabel || null,
       status: item.deliveryStatus || 'unknown',
+      queueStatus: item.queueStatus || null,
+      attemptCount: Number.isFinite(Number(item.attemptCount)) ? Number(item.attemptCount) : 0,
+      maxAttempts: Number.isFinite(Number(item.maxAttempts)) ? Number(item.maxAttempts) : 3,
       createdAt: item.uploadedAt || null,
       completedAt: item.deliveredAt || null,
       resultMessage: item.failedReason || null
@@ -540,6 +788,127 @@ function listUploadAssignments() {
   return [...commandAssignments, ...fileAssignments]
     .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
     .slice(0, 150)
+}
+
+function getAssignmentDisplayStatus(item) {
+  return String(item.queueStatus || item.status || '').trim().toLowerCase()
+}
+
+function createAlert(level, category, title, message, details = {}) {
+  return {
+    id: `${category}:${crypto.createHash('sha1').update(`${title}:${message}`).digest('hex').slice(0, 10)}`,
+    level,
+    category,
+    title,
+    message,
+    details,
+    createdAt: new Date().toISOString()
+  }
+}
+
+function buildDashboardAlerts(bots, nodes, assignments) {
+  const alerts = []
+  const staleBots = bots.filter((bot) => bot.activeState === 'stale')
+  const offlineBots = bots.filter((bot) => bot.online !== true)
+  const offlineNodes = nodes.filter((node) => Number(node.onlineCount || 0) <= 0)
+  const errorBots = bots.filter((bot) => String(bot.lastError || '').trim())
+  const heldAssignments = assignments.filter((item) => {
+    const status = getAssignmentDisplayStatus(item)
+    if (!['claimed', 'downloaded', 'printing'].includes(status)) return false
+    if (!item.claimedByBotName) return false
+    const bot = bots.find((entry) => entry.botName === item.claimedByBotName)
+    return !bot || bot.online !== true || bot.activeState === 'stale'
+  })
+  const finalFailures = assignments.filter((item) => getAssignmentDisplayStatus(item) === 'failed-final')
+  const retryingFailures = assignments.filter((item) => {
+    const status = getAssignmentDisplayStatus(item)
+    return status === 'failed' || (status === 'pending' && Number(item.attemptCount || 0) > 0)
+  })
+
+  const activeWaterBots = bots.filter((bot) =>
+    Array.isArray(bot.alerts) && bot.alerts.some((alert) => alert?.active === true && String(alert.category || '') === 'platform-water')
+  )
+  const stockWarnings = bots.flatMap((bot) => (Array.isArray(bot.warnings) ? bot.warnings : [])
+    .filter((warning) => /stock|material|food|map|xp|bottle/i.test(`${warning.category || ''} ${warning.message || ''}`))
+    .map((warning) => ({ bot, warning })))
+
+  if (activeWaterBots.length) {
+    alerts.push(createAlert('critical', 'platform-water', 'Water on platform', `${activeWaterBots.length} bot(s) are paused until water is removed from the carpet layer.`, {
+      botNames: activeWaterBots.map((bot) => bot.botName)
+    }))
+  }
+  if (offlineNodes.length) {
+    alerts.push(createAlert('warn', 'offline-nodes', 'Offline nodes', `${offlineNodes.length} node(s) have no online bots.`, {
+      hostLabels: offlineNodes.map((node) => node.hostLabel)
+    }))
+  }
+  if (offlineBots.length) {
+    alerts.push(createAlert('warn', 'offline-bots', 'Offline bots', `${offlineBots.length}/${bots.length} bot(s) are offline.`, {
+      botNames: offlineBots.map((bot) => bot.botName).slice(0, 20)
+    }))
+  }
+  if (staleBots.length) {
+    alerts.push(createAlert('warn', 'stale-bots', 'Stale bots', `${staleBots.length} bot(s) stopped sending fresh activity.`, {
+      botNames: staleBots.map((bot) => bot.botName)
+    }))
+  }
+  if (errorBots.length) {
+    alerts.push(createAlert('critical', 'bot-errors', 'Bot errors', `${errorBots.length} bot(s) reported a last error.`, {
+      botNames: errorBots.map((bot) => bot.botName)
+    }))
+  }
+  if (stockWarnings.length) {
+    alerts.push(createAlert('warn', 'stock-warnings', 'Missing stock warnings', `${stockWarnings.length} active material/food/map/XP warning(s).`, {
+      botNames: [...new Set(stockWarnings.map((item) => item.bot.botName))]
+    }))
+  }
+  if (heldAssignments.length) {
+    alerts.push(createAlert('warn', 'queue-held', 'Held queue files', `${heldAssignments.length} queue file(s) are held for an offline or stale bot.`, {
+      files: heldAssignments.slice(0, 20).map((item) => ({ fileName: item.fileName, botName: item.claimedByBotName }))
+    }))
+  }
+  if (retryingFailures.length) {
+    alerts.push(createAlert('warn', 'queue-retrying', 'Queue retries', `${retryingFailures.length} file(s) are waiting for another attempt.`, {
+      files: retryingFailures.slice(0, 20).map((item) => item.fileName)
+    }))
+  }
+  if (finalFailures.length) {
+    alerts.push(createAlert('critical', 'queue-final-failure', 'Queue failures', `${finalFailures.length} file(s) reached max attempts and need operator action.`, {
+      files: finalFailures.slice(0, 20).map((item) => item.fileName)
+    }))
+  }
+
+  const levelRank = { critical: 0, warn: 1, info: 2 }
+  return alerts.sort((left, right) => (levelRank[left.level] ?? 9) - (levelRank[right.level] ?? 9))
+}
+
+let snapshotCache = { expiresAt: 0, payload: null }
+
+function buildDashboardSnapshot(actor = null) {
+  const now = Date.now()
+  const cacheKey = actor?.permissions?.canOperate === true ? 'operate' : 'public'
+  if (snapshotCache.payload?.cacheKey === cacheKey && snapshotCache.expiresAt > now) {
+    return snapshotCache.payload.body
+  }
+  const bots = store.listBots().map(summarizeBot)
+  const nodes = store.listNodes().map(summarizeNode)
+  const events = store.listEvents(150)
+  const assignments = actor?.permissions?.canOperate ? listUploadAssignments() : []
+  const alerts = buildDashboardAlerts(bots, nodes, listUploadAssignments())
+  const body = {
+    ok: true,
+    health: { ok: true },
+    bots,
+    nodes,
+    events,
+    alerts,
+    uploadAssignments: assignments
+  }
+  snapshotCache = {
+    expiresAt: now + SNAPSHOT_CACHE_MS,
+    payload: { cacheKey, body }
+  }
+  return body
 }
 
 async function waitForNodeLogDownload(store, commandId, timeoutMs = 15000) {
@@ -570,6 +939,41 @@ async function route(req, res) {
 
   if (req.method === 'GET' && pathname === '/health') {
     return sendJson(res, 200, { ok: true })
+  }
+
+  if (req.method === 'GET' && pathname === '/api/dashboard/snapshot') {
+    return sendJson(res, 200, buildDashboardSnapshot(actor))
+  }
+
+  if (req.method === 'POST' && pathname === '/api/dashboard/auth/login') {
+    const body = await readBody(req)
+    const username = String(body?.username || '').trim()
+    const password = String(body?.password || '')
+    if (!username || !password) return unauthorized(res)
+    const match = store.listOperatorCredentials().find((item) => item.username === username && item.password === password)
+    if (!match) return unauthorized(res)
+    const signedActor = {
+      username: match.username,
+      role: normalizeRole(match.role, 'viewer'),
+      permissions: getEffectivePermissions(match)
+    }
+    auditOperatorAction(signedActor, 'login', `Operator ${match.username} logged in.`, { role: signedActor.role })
+    return sendJson(res, 200, {
+      ok: true,
+      operator: signedActor.username,
+      role: signedActor.role,
+      permissions: {
+        ...signedActor.permissions,
+        canAdmin: Boolean(signedActor.permissions?.canManageOperators || signedActor.permissions?.canDeleteNodeFiles)
+      }
+    }, {
+      'set-cookie': createSessionCookie(match.username)
+    })
+  }
+
+  if (req.method === 'POST' && pathname === '/api/dashboard/auth/logout') {
+    if (actor) auditOperatorAction(actor, 'logout', `Operator ${actor.username} logged out.`, { role: actor.role })
+    return sendJson(res, 200, { ok: true }, { 'set-cookie': clearSessionCookie() })
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/auth/me') {
@@ -810,6 +1214,87 @@ async function route(req, res) {
     return sendJson(res, 201, { ok: true, queued: true, command, fileName, sizeBytes: buffer.length })
   }
 
+  if (req.method === 'POST' && pathname === '/api/dashboard/uploads') {
+    const contentType = String(req.headers['content-type'] || '').toLowerCase()
+    if (!contentType.includes('multipart/form-data')) {
+      return badRequest(res, 'multipart/form-data upload is required')
+    }
+    const { fields, files } = await readMultipartForm(req)
+    if (!files.length) return badRequest(res, 'at least one .nbt or .zip file is required')
+
+    const targetBotName = String(fields.targetBotName || '').trim()
+    const targetHostLabel = String(fields.targetHostLabel || '').trim()
+    const notes = String(fields.notes || '').trim() || null
+    const maxAttempts = Math.max(1, Math.min(20, Number(fields.maxAttempts || 3) || 3))
+    if (targetBotName && !store.listBots().some((b) => b.botName === targetBotName)) {
+      return badRequest(res, `unknown targetBotName: ${targetBotName}`)
+    }
+    if (targetHostLabel && !store.listBotsForHost(targetHostLabel).length) {
+      return badRequest(res, `unknown targetHostLabel: ${targetHostLabel}`)
+    }
+
+    const batchId = crypto.randomUUID()
+    const errors = []
+    const queuedInputs = []
+    for (const file of files) {
+      const fileName = path.basename(String(file.filename || '').trim())
+      const lower = fileName.toLowerCase()
+      try {
+        if (lower.endsWith('.nbt')) {
+          queuedInputs.push({ fileName, data: file.data, source: 'upload' })
+        } else if (lower.endsWith('.zip')) {
+          const extracted = extractNbtFilesFromZip(file.data, fileName)
+          if (!extracted.length) {
+            errors.push({ fileName, error: 'zip contained no .nbt files' })
+          } else {
+            for (const entry of extracted) {
+              queuedInputs.push({ fileName: entry.fileName, data: entry.data, source: `zip:${fileName}` })
+            }
+          }
+        } else {
+          errors.push({ fileName, error: 'only .nbt and .zip uploads are accepted' })
+        }
+      } catch (error) {
+        errors.push({ fileName, error: error?.message || String(error) })
+      }
+    }
+
+    const items = []
+    for (const entry of queuedInputs) {
+      try {
+        const item = store.createFileUpload({
+          originalName: entry.fileName,
+          contentBuffer: entry.data,
+          uploadedBy: actor.username,
+          notes,
+          targetHostLabel: targetHostLabel || null,
+          targetBotName: targetBotName || null,
+          batchId,
+          source: entry.source,
+          queueMode: true,
+          maxAttempts
+        })
+        items.push(item)
+      } catch (error) {
+        errors.push({ fileName: entry.fileName, error: error?.message || String(error) })
+      }
+    }
+
+    if (!items.length) {
+      return sendJson(res, 400, { ok: false, error: 'no files were queued', errors })
+    }
+
+    auditOperatorAction(actor, 'upload-queue', `Queued ${items.length} NBT file(s) in dashboard queue.`, {
+      batchId,
+      fileCount: items.length,
+      errors,
+      targetBotName: targetBotName || null,
+      targetHostLabel: targetHostLabel || null,
+      maxAttempts
+    }, errors.length ? 'warn' : 'info')
+    return sendJson(res, 201, { ok: true, batchId, items, errors })
+  }
+
   if (req.method === 'POST' && pathname === '/api/bots/status') {
     const body = await readBody(req)
     const error = validateBotStatus(body)
@@ -861,6 +1346,15 @@ async function route(req, res) {
     return sendJson(res, 200, { item })
   }
 
+  params = matchPath(pathname, '/api/nodes/:hostLabel/queue/claim-next')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    if (!body?.botName) return badRequest(res, 'botName is required')
+    const item = store.claimNextQueueFile(params.hostLabel, body.botName)
+    return sendJson(res, 200, { item })
+  }
+
   params = matchPath(pathname, '/api/nodes/:hostLabel/commands/claim-next')
   if (params) {
     if (req.method !== 'POST') return methodNotAllowed(res)
@@ -907,6 +1401,30 @@ async function route(req, res) {
     }
     const item = store.completeNodeFileDelivery(params.hostLabel, params.fileId, deliveryStatus, body?.failedReason, body?.botName || null)
     if (!item) return notFound(res)
+    return sendJson(res, 200, { ok: true, item })
+  }
+
+  params = matchPath(pathname, '/api/nodes/:hostLabel/queue/:fileId/result')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const deliveryStatus = String(body?.deliveryStatus || '').trim().toLowerCase()
+    if (!['downloaded', 'printing', 'placed', 'completed', 'failed'].includes(deliveryStatus)) {
+      return badRequest(res, 'deliveryStatus must be downloaded, printing, placed, completed, or failed')
+    }
+    const item = store.completeQueueFileDelivery(params.hostLabel, body?.botName || '', params.fileId, deliveryStatus, body?.failedReason)
+    if (!item) return notFound(res)
+    if (deliveryStatus === 'failed' || item.queueStatus === 'failed-final') {
+      store.addEvent({
+        operator: `bot:${body?.botName || params.hostLabel}`,
+        action: item.queueStatus === 'failed-final' ? 'queue-file-failed-final' : 'queue-file-retry',
+        message: item.queueStatus === 'failed-final'
+          ? `${item.originalName || params.fileId} reached max queue attempts.`
+          : `${item.originalName || params.fileId} failed and will be retried.`,
+        details: { fileId: params.fileId, hostLabel: params.hostLabel, botName: body?.botName || null, failedReason: body?.failedReason || null },
+        level: item.queueStatus === 'failed-final' ? 'error' : 'warn'
+      })
+    }
     return sendJson(res, 200, { ok: true, item })
   }
 
@@ -1282,12 +1800,50 @@ async function route(req, res) {
     return sendJson(res, 200, { items: store.listFiles(), assignments: listUploadAssignments() })
   }
 
+  if (req.method === 'GET' && pathname === '/api/dashboard/queue') {
+    return sendJson(res, 200, { items: store.listFiles().filter((item) => item.queueMode === true || item.queueStatus), assignments: listUploadAssignments() })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/queue/:fileId/release')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const item = store.releaseQueueFile(params.fileId, body?.reason || 'operator release')
+    if (!item) return notFound(res)
+    auditOperatorAction(actor, 'queue-release', `Released queue file ${item.originalName || params.fileId}.`, {
+      fileId: params.fileId,
+      reason: body?.reason || null
+    }, 'warn')
+    return sendJson(res, 200, { item })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/queue/:fileId/retry')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const item = store.retryQueueFile(params.fileId, body?.reason || 'operator retry')
+    if (!item) return notFound(res)
+    auditOperatorAction(actor, 'queue-retry', `Retried queue file ${item.originalName || params.fileId}.`, {
+      fileId: params.fileId,
+      reason: body?.reason || null
+    })
+    return sendJson(res, 200, { item })
+  }
+
   return notFound(res)
 }
 
 const server = http.createServer((req, res) => {
+  const startedAt = Date.now()
+  res.on('finish', () => {
+    const elapsed = Date.now() - startedAt
+    if (SLOW_ROUTE_MS > 0 && elapsed >= SLOW_ROUTE_MS) {
+      console.warn(`[dashboard-service] slow route ${req.method} ${req.url} status=${res.statusCode} elapsed=${elapsed}ms`)
+    }
+  })
   route(req, res).catch((error) => {
-    sendJson(res, 500, { error: error?.message || String(error) })
+    const statusCode = Number.isFinite(Number(error?.statusCode)) ? Number(error.statusCode) : 500
+    sendJson(res, statusCode, { error: error?.message || String(error) })
   })
 })
 

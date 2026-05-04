@@ -6,6 +6,7 @@ const state = {
   configs: [],
   dataFiles: [],
   uploadAssignments: [],
+  alerts: [],
   nbtSearch: '',
   localReprintCommands: [],
   configEditor: { name: null, content: '', dirty: false },
@@ -26,6 +27,7 @@ const state = {
     dataFiles: '',
     uploadAssignments: '',
     events: '',
+    alerts: '',
     auth: ''
   },
   events: [],
@@ -52,6 +54,7 @@ const UI_ACTIVITY_HOLD_MS = 15000
 
 const elements = {
   authStatus: document.getElementById('authStatus'),
+  alertsBar: document.getElementById('alertsBar'),
   botsGrid: document.getElementById('botsGrid'),
   botSummary: document.getElementById('botSummary'),
   eventLog: document.getElementById('eventLog'),
@@ -294,8 +297,7 @@ function loadStoredRefreshInterval() {
 
 function persistAuth() {
   window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
-    operator: state.auth.operator,
-    password: state.auth.password
+    operator: state.auth.operator
   }))
 }
 
@@ -396,6 +398,7 @@ async function requestJson(url, options = {}) {
 
   const response = await fetch(url, {
     cache: 'no-store',
+    credentials: 'same-origin',
     headers,
     ...options
   })
@@ -408,33 +411,26 @@ async function requestJson(url, options = {}) {
   return body
 }
 
-async function verifyOperatorAuth() {
-  if (!state.auth.operator || !state.auth.password) {
-    state.auth.verified = false
-    state.auth.role = 'public'
-    state.auth.permissions = {
-      canViewLogs: false,
-      canOperate: false,
-      canDeleteNodeFiles: false,
-      canManageOperators: false,
-      canAdmin: false
-    }
-    renderAuthState()
-    return false
+function applyAuthResult(result) {
+  state.auth.verified = result?.ok === true
+  state.auth.operator = String(result?.operator || state.auth.operator || '')
+  state.auth.role = String(result?.role || 'viewer')
+  state.auth.permissions = result?.permissions || {
+    canViewLogs: false,
+    canOperate: false,
+    canDeleteNodeFiles: false,
+    canManageOperators: false,
+    canAdmin: false
   }
+  state.auth.password = ''
+  persistAuth()
+  renderAuthState()
+}
+
+async function verifyOperatorAuth() {
   try {
     const result = await requestJson('/api/dashboard/auth/me', { requireAuth: true })
-    state.auth.verified = result.ok === true
-    state.auth.role = String(result.role || 'viewer')
-    state.auth.permissions = result.permissions || {
-      canViewLogs: false,
-      canOperate: false,
-      canDeleteNodeFiles: false,
-      canManageOperators: false,
-      canAdmin: false
-    }
-    persistAuth()
-    renderAuthState()
+    applyAuthResult(result)
     return state.auth.verified
   } catch {
     state.auth.verified = false
@@ -455,6 +451,7 @@ async function downloadLogFile(fileName) {
   const response = await fetch(`/api/dashboard/logs/${encodeURIComponent(fileName)}/download`, {
     method: 'GET',
     cache: 'no-store',
+    credentials: 'same-origin',
     headers: {
       authorization: authHeaderValue()
     }
@@ -485,6 +482,7 @@ async function downloadNodeLogFile(hostLabel, fileName) {
   const response = await fetch(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/logs/${encodeURIComponent(fileName)}/download`, {
     method: 'GET',
     cache: 'no-store',
+    credentials: 'same-origin',
     headers: {
       authorization: authHeaderValue()
     }
@@ -515,6 +513,7 @@ async function downloadConfigFile(fileName) {
   const response = await fetch(`/api/dashboard/config/${encodeURIComponent(fileName)}/download`, {
     method: 'GET',
     cache: 'no-store',
+    credentials: 'same-origin',
     headers: {
       authorization: authHeaderValue()
     }
@@ -545,6 +544,7 @@ async function downloadNodeConfigFile(hostLabel, fileName) {
   const response = await fetch(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/config/${encodeURIComponent(fileName)}/download`, {
     method: 'GET',
     cache: 'no-store',
+    credentials: 'same-origin',
     headers: {
       authorization: authHeaderValue()
     }
@@ -633,6 +633,34 @@ function renderSummary() {
       <span class="summary-value">${escapeHtml(value)}</span>
     </article>
   `).join('')
+}
+
+function renderAlerts() {
+  if (!elements.alertsBar) return
+  const sig = JSON.stringify(state.alerts || [])
+  if (state.renderCache.alerts === sig) return
+  state.renderCache.alerts = sig
+
+  if (!state.alerts.length) {
+    elements.alertsBar.innerHTML = ''
+    elements.alertsBar.classList.add('hidden')
+    return
+  }
+
+  elements.alertsBar.classList.remove('hidden')
+  elements.alertsBar.innerHTML = state.alerts.slice(0, 8).map((alert) => {
+    const level = String(alert.level || 'info').toLowerCase()
+    const className = level === 'critical' || level === 'error' ? 'alert-critical'
+      : (level === 'warn' ? 'alert-warn' : 'alert-info')
+    return `
+      <article class="alert-item ${className}">
+        <div>
+          <strong>${escapeHtml(alert.title || alert.category || 'Alert')}</strong>
+          <p>${escapeHtml(alert.message || '')}</p>
+        </div>
+        <span class="tag ${className === 'alert-critical' ? 'status-offline' : 'status-neutral'}">${escapeHtml(alert.category || level)}</span>
+      </article>`
+  }).join('')
 }
 
 function renderNodeTimingMetrics(node) {
@@ -872,9 +900,7 @@ function renderFiles() {
     elements.uploadTargetSelectText.textContent = targetType === 'bot' ? 'Target bot' : 'Target node'
   }
   if (elements.distributeLabel) {
-    elements.distributeLabel.textContent = targetType === 'bot'
-      ? 'Distribute equally across all online bots'
-      : 'Distribute equally across all nodes'
+    elements.distributeLabel.textContent = 'Use central queue: any eligible bot can poll later'
   }
 
   // Group bots by hostLabel so related bots appear together
@@ -944,19 +970,26 @@ function renderUploadAssignments() {
     const target = item.targetBotName
       ? `Bot: ${item.targetBotName}`
       : (item.targetHostLabel ? `Node: ${item.targetHostLabel}` : 'Unassigned')
-    const status = String(item.status || 'unknown')
-    const statusClass = ['succeeded', 'placed', 'downloaded'].includes(status) ? 'status-online'
-      : (['failed'].includes(status) ? 'status-offline' : 'status-neutral')
+    const status = String(item.queueStatus || item.status || 'unknown')
+    const statusClass = ['succeeded', 'placed', 'completed'].includes(status) ? 'status-online'
+      : (['failed', 'failed-final'].includes(status) ? 'status-offline' : 'status-neutral')
     const claimed = item.claimedByBotName ? ` | claimed by ${item.claimedByBotName}` : ''
     const result = item.resultMessage ? ` | ${item.resultMessage}` : ''
+    const attempts = Number(item.maxAttempts || 0) > 0 ? ` | attempts ${Number(item.attemptCount || 0)}/${Number(item.maxAttempts || 0)}` : ''
+    const canRelease = ['claimed', 'downloaded', 'printing', 'failed-final'].includes(status)
+    const canRetry = ['failed-final', 'failed'].includes(status)
     return `
       <article class="file-item compact-file-item">
         <div class="file-row">
           <div>
             <strong>${escapeHtml(item.fileName || 'unknown.nbt')}</strong>
-            <p class="file-meta">${escapeHtml(target)}${escapeHtml(claimed)} | ${escapeHtml(formatTime(item.createdAt))}${escapeHtml(result)}</p>
+            <p class="file-meta">${escapeHtml(target)}${escapeHtml(claimed)} | ${escapeHtml(formatTime(item.createdAt))}${escapeHtml(attempts)}${escapeHtml(result)}</p>
           </div>
-          <span class="tag ${statusClass}">${escapeHtml(status)}</span>
+          <div class="file-actions">
+            <span class="tag ${statusClass}">${escapeHtml(status)}</span>
+            ${canRelease ? `<button class="ghost-button small-button" type="button" data-action="queue-release" data-permission-needed="canOperate" data-file-id="${escapeHtml(item.id)}">Release</button>` : ''}
+            ${canRetry ? `<button class="accent-button small-button" type="button" data-action="queue-retry" data-permission-needed="canOperate" data-file-id="${escapeHtml(item.id)}">Retry</button>` : ''}
+          </div>
         </div>
       </article>`
   }).join('')
@@ -1515,12 +1548,7 @@ async function refreshData(options = {}) {
 
   state.busy = true
   try {
-    const [health, bots, nodes, events] = await Promise.all([
-      requestJson('/health'),
-      requestJson('/api/dashboard/bots'),
-      requestJson('/api/dashboard/nodes'),
-      requestJson('/api/dashboard/events')
-    ])
+    const snapshot = await requestJson('/api/dashboard/snapshot', { requireAuth: state.auth.verified })
     const logs = state.auth.verified && hasPermission('canViewLogs')
       ? await requestJson('/api/dashboard/logs', { requireAuth: true })
       : { items: [] }
@@ -1533,26 +1561,25 @@ async function refreshData(options = {}) {
     const dataFiles = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/data', { requireAuth: true })
       : { files: [] }
-    const uploadFiles = state.auth.verified && hasPermission('canOperate')
-      ? await requestJson('/api/dashboard/files', { requireAuth: true })
-      : { assignments: [] }
-    state.bots = Array.isArray(bots.items) ? bots.items : []
-    state.nodes = Array.isArray(nodes.items) ? nodes.items : []
+    state.bots = Array.isArray(snapshot.bots) ? snapshot.bots : []
+    state.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : []
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = Array.isArray(configs.files) ? configs.files : []
     state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
-    state.uploadAssignments = Array.isArray(uploadFiles.assignments) ? uploadFiles.assignments : []
-    state.events = Array.isArray(events.items) ? events.items : []
+    state.uploadAssignments = Array.isArray(snapshot.uploadAssignments) ? snapshot.uploadAssignments : []
+    state.events = Array.isArray(snapshot.events) ? snapshot.events : []
+    state.alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : []
     // Clear dismissed banners for bots that are no longer verifying
     for (const botName of [...state.dismissedVerify]) {
       if (!state.bots.some((b) => b.botName === botName && b.tokenWaiting)) {
         state.dismissedVerify.delete(botName)
       }
     }
-    elements.serviceStatus.textContent = health.ok ? 'Service online' : 'Service unknown'
-    elements.serviceStatus.className = `status-pill ${health.ok ? 'status-online' : 'status-neutral'}`
+    elements.serviceStatus.textContent = snapshot.ok ? 'Service online' : 'Service unknown'
+    elements.serviceStatus.className = `status-pill ${snapshot.ok ? 'status-online' : 'status-neutral'}`
     elements.lastRefresh.textContent = formatTime(new Date().toISOString())
+    renderAlerts()
     renderSummary()
     renderBots()
     renderFiles()
@@ -1605,81 +1632,50 @@ async function onUpload(event) {
   const distribute = elements.distributeCheckbox.checked
   const targetType = elements.uploadTargetType?.value === 'bot' ? 'bot' : 'node'
 
-  // Build the per-file assignment list.
-  let fileAssignments // Array of { file, target }
-  if (distribute) {
-    const targets = targetType === 'bot'
-      ? state.bots
-          .filter((bot) => bot.online)
-          .map((bot) => ({
-            target: String(bot.botName || '').trim(),
-            hostLabel: String(bot.hostLabel || 'unknown').trim() || 'unknown'
-          }))
-          .filter((item) => item.target)
-      : [...new Map(
-          state.bots.map((b) => [String(b.hostLabel || 'unknown').trim() || 'unknown', true])
-        ).keys()].map((hostLabel) => ({ target: hostLabel, hostLabel }))
-    if (!targets.length) {
-      pushEvent('warn', `No ${targetType}s are available to distribute to.`)
-      return
-    }
-    fileAssignments = files.map((file, i) => ({ file, ...targets[i % targets.length] }))
-  } else {
-    const selectedTarget = elements.uploadNodeSelect.value
-    if (!selectedTarget) {
-      pushEvent('warn', `Select a target ${targetType} before uploading.`)
-      return
-    }
-    const selectedBot = targetType === 'bot'
-      ? state.bots.find((bot) => String(bot.botName || '').trim() === selectedTarget)
-      : null
-    const hostLabel = targetType === 'bot'
-      ? (String(selectedBot?.hostLabel || 'unknown').trim() || 'unknown')
-      : selectedTarget
-    fileAssignments = files.map((file) => ({ file, target: selectedTarget, hostLabel }))
-  }
-
   state.uploadBusy = true
-  let completed = 0
-  let failed = 0
-  let firstError = ''
 
   try {
-    for (const { file, target, hostLabel } of fileAssignments) {
-      elements.uploadStatus.textContent = `Uploading ${completed + failed + 1}/${files.length}: ${file.name} -> ${target}`
-      try {
-        const base64 = await fileToBase64(file)
-        await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/nbt/upload`, {
-          fileName: file.name,
-          contentBase64: base64,
-          targetBotName: targetType === 'bot' ? target : null
-        })
-        completed += 1
-      } catch (error) {
-        failed += 1
-        if (!firstError) firstError = error.message
-        pushEvent('error', `Upload failed for ${file.name} -> ${target}: ${error.message}`)
+    const form = new FormData()
+    for (const file of files) form.append('files', file, file.name)
+    form.append('maxAttempts', '3')
+
+    let targetText = 'central queue'
+    if (!distribute) {
+      const selectedTarget = elements.uploadNodeSelect.value
+      if (!selectedTarget) {
+        pushEvent('warn', `Select a target ${targetType} before uploading, or enable the central queue option.`)
+        return
+      }
+      if (targetType === 'bot') {
+        form.append('targetBotName', selectedTarget)
+        targetText = `bot ${selectedTarget}`
+      } else {
+        form.append('targetHostLabel', selectedTarget)
+        targetText = `node ${selectedTarget}`
       }
     }
 
-    if (distribute) {
-      const targets = [...new Set(fileAssignments.map((a) => a.target))]
-      elements.uploadStatus.textContent = failed > 0
-        ? `Upload finished: ${completed} succeeded, ${failed} failed across ${targets.length} ${targetType}(s). First error: ${firstError || 'unknown'}`
-        : `${completed} file(s) distributed across ${targets.length} ${targetType}(s).`
-      pushEvent('info', `Distributed ${completed}/${files.length} files across ${targetType}s: ${targets.join(', ')}${failed ? ` (${failed} failed)` : ''}`)
-    } else {
-      const target = fileAssignments[0]?.target || ''
-      elements.uploadStatus.textContent = failed > 0
-        ? `Upload finished: ${completed} succeeded, ${failed} failed. First error: ${firstError || 'unknown'}`
-        : `${completed} file(s) uploaded and assigned to ${targetType} ${target}.`
-      pushEvent('info', `Uploaded -> ${target}: ${completed}/${files.length} succeeded${failed ? `, ${failed} failed` : ''}`)
-    }
+    elements.uploadStatus.textContent = `Uploading ${files.length} file(s) to ${targetText}...`
+    const response = await fetch('/api/dashboard/uploads', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: authHeaderValue() ? { authorization: authHeaderValue() } : {},
+      body: form
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result?.error || `Upload failed: ${response.status}`)
 
+    const queued = Array.isArray(result.items) ? result.items.length : 0
+    const errors = Array.isArray(result.errors) ? result.errors : []
+    elements.uploadStatus.textContent = errors.length
+      ? `Queued ${queued} NBT file(s); ${errors.length} import error(s).`
+      : `Queued ${queued} NBT file(s) for polling.`
+    pushEvent(errors.length ? 'warn' : 'info', `Queued ${queued} NBT file(s)${errors.length ? ` with ${errors.length} import error(s)` : ''}.`)
     elements.uploadForm.reset()
     if (elements.uploadTargetType) elements.uploadTargetType.value = targetType
-    elements.uploadTargetSelectLabel.style.display = ''
-    elements.uploadNodeSelect.required = true
+    elements.distributeCheckbox.checked = true
+    elements.uploadTargetSelectLabel.style.display = 'none'
+    elements.uploadNodeSelect.required = false
     state.renderCache.files = ''
     renderFiles()
     await refreshData()
@@ -1761,6 +1757,26 @@ async function onReprintFinishedMap(hostLabel, fileName) {
     renderNodes()
     throw error
   }
+}
+
+async function onQueueRelease(fileId) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before releasing queue files.')
+    return
+  }
+  await submitJson(`/api/dashboard/queue/${encodeURIComponent(fileId)}/release`, { reason: 'dashboard-ui release' })
+  pushEvent('warn', 'Released queue file back to pending')
+  await refreshData()
+}
+
+async function onQueueRetry(fileId) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before retrying queue files.')
+    return
+  }
+  await submitJson(`/api/dashboard/queue/${encodeURIComponent(fileId)}/retry`, { reason: 'dashboard-ui retry' })
+  pushEvent('info', 'Queued file for retry')
+  await refreshData()
 }
 
 async function onDeleteLog(fileName) {
@@ -1895,6 +1911,10 @@ document.addEventListener('click', async (event) => {
       await onDeleteFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
     } else if (button.dataset.action === 'reprint-finished-map') {
       await onReprintFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
+    } else if (button.dataset.action === 'queue-release') {
+      await onQueueRelease(button.dataset.fileId || '')
+    } else if (button.dataset.action === 'queue-retry') {
+      await onQueueRetry(button.dataset.fileId || '')
     } else if (button.dataset.action === 'download-node-log') {
       await downloadNodeLogFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
       pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
@@ -1983,18 +2003,33 @@ elements.refreshButton.addEventListener('click', () => {
 elements.loginButton.addEventListener('click', async () => {
   state.auth.operator = elements.operatorUsername.value.trim()
   state.auth.password = elements.operatorPassword.value
-  const ok = await verifyOperatorAuth()
-  if (ok) {
+  try {
+    const result = await requestJson('/api/dashboard/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: state.auth.operator,
+        password: state.auth.password
+      }),
+      requireAuth: true
+    })
+    applyAuthResult(result)
     pushEvent('info', `Operator authenticated as ${state.auth.operator}`)
-  } else {
-    pushEvent('error', 'Operator authentication failed')
+    await refreshData()
+  } catch (error) {
+    pushEvent('error', error.message || 'Operator authentication failed')
   }
 })
 
-elements.logoutButton.addEventListener('click', () => {
+elements.logoutButton.addEventListener('click', async () => {
   const previous = state.auth.operator || 'operator'
+  try {
+    await requestJson('/api/dashboard/auth/logout', { method: 'POST', body: JSON.stringify({}) })
+  } catch {
+    // Local logout still clears browser state if the service is not reachable.
+  }
   clearAuth()
   pushEvent('info', `Logged out ${previous}`)
+  await refreshData()
 })
 
 elements.startAllButton.addEventListener('click', async () => {

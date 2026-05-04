@@ -23,7 +23,9 @@ function readJson(filePath, fallback) {
 
 function writeJson(filePath, value) {
   ensureDir(path.dirname(filePath))
-  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8')
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`
+  fs.writeFileSync(tempPath, JSON.stringify(value, null, 2), 'utf8')
+  fs.renameSync(tempPath, filePath)
 }
 
 function toNumber(value, fallback) {
@@ -183,11 +185,11 @@ function createStore(baseDir) {
   function addAssignmentStatus(stats, status) {
     stats.assignedTotal += 1
     const normalized = String(status || '').trim().toLowerCase()
-    if (normalized === 'failed') {
+    if (normalized === 'failed' || normalized === 'failed-final') {
       stats.assignedFailed += 1
-    } else if (normalized === 'placed' || normalized === 'succeeded') {
+    } else if (normalized === 'placed' || normalized === 'succeeded' || normalized === 'completed') {
       stats.assignedCompleted += 1
-    } else if (normalized === 'assigned' || normalized === 'claimed' || normalized === 'downloaded') {
+    } else if (normalized === 'pending' || normalized === 'assigned' || normalized === 'claimed' || normalized === 'downloaded' || normalized === 'printing') {
       stats.assignedPending += 1
     }
     return stats
@@ -632,7 +634,6 @@ function createStore(baseDir) {
 
   function listNodes() {
     const botMap = readBotMap()
-    reconcileAllNodeTiming(botMap)
     const timingByHost = readNodeStatsMap()
     const assignmentStatsByHost = buildAssignmentStatsByHost(botMap)
     const byHost = new Map()
@@ -795,6 +796,34 @@ function createStore(baseDir) {
     writeJson(uploadsFile, items)
   }
 
+  function normalizeFileStatus(status, fallback = 'pending') {
+    const normalized = String(status || '').trim().toLowerCase()
+    return normalized || fallback
+  }
+
+  function isQueueFile(item) {
+    return item?.queueMode === true || Boolean(item?.queueStatus) || Boolean(item?.batchId)
+  }
+
+  function getQueueStatus(item) {
+    return normalizeFileStatus(item?.queueStatus || item?.deliveryStatus, 'pending')
+  }
+
+  function isTerminalQueueStatus(status) {
+    const normalized = normalizeFileStatus(status, '')
+    return normalized === 'placed' || normalized === 'completed' || normalized === 'succeeded' || normalized === 'failed-final' || normalized === 'cancelled'
+  }
+
+  function queueFileMatchesWorker(item, hostLabel, botName) {
+    const normalizedHost = String(hostLabel || '').trim()
+    const normalizedBot = String(botName || '').trim()
+    const targetHost = String(item?.targetHostLabel || item?.assignedHostLabel || '').trim()
+    const targetBot = String(item?.targetBotName || item?.assignedBotName || '').trim()
+    if (targetHost && targetHost !== normalizedHost) return false
+    if (targetBot && targetBot !== normalizedBot) return false
+    return true
+  }
+
   function listEvents(limit = 100) {
     const items = readJson(eventsFile, [])
     return items.slice(-Math.max(1, Number(limit) || 100)).reverse()
@@ -817,14 +846,31 @@ function createStore(baseDir) {
     return event
   }
 
-  function createFileUpload({ originalName, contentBase64, uploadedBy, notes, targetHostLabel }) {
-    const buffer = Buffer.from(String(contentBase64 || ''), 'base64')
+  function createFileUpload({
+    originalName,
+    contentBase64,
+    contentBuffer,
+    uploadedBy,
+    notes,
+    targetHostLabel,
+    targetBotName,
+    batchId,
+    source,
+    queueMode,
+    maxAttempts
+  }) {
+    const buffer = Buffer.isBuffer(contentBuffer)
+      ? contentBuffer
+      : Buffer.from(String(contentBase64 || ''), 'base64')
     const fileId = crypto.randomUUID()
     const extension = path.extname(originalName || '').toLowerCase() || '.nbt'
     const storedName = `${fileId}${extension}`
     const sha256 = crypto.createHash('sha256').update(buffer).digest('hex')
     const duplicateCount = listFiles().filter((item) => String(item.originalName || '').toLowerCase() === String(originalName || '').toLowerCase()).length
     const assignedHostLabel = String(targetHostLabel || '').trim() || null
+    const assignedBotName = String(targetBotName || '').trim() || null
+    const queued = queueMode === true
+    const initialStatus = queued ? 'pending' : (assignedHostLabel ? 'assigned' : 'unassigned')
     fs.writeFileSync(path.join(filesDir, storedName), buffer)
 
     const item = {
@@ -834,15 +880,29 @@ function createStore(baseDir) {
       uploadedAt: nowIso(),
       sizeBytes: buffer.length,
       sha256,
-      assignedBotName: null,
+      assignedBotName,
       assignedHostLabel,
+      targetBotName: assignedBotName,
+      targetHostLabel: assignedHostLabel,
       claimedByBotName: null,
+      claimedByHostLabel: null,
       claimedAt: null,
-      deliveryStatus: assignedHostLabel ? 'assigned' : 'unassigned',
+      claimHeartbeatAt: null,
+      deliveryStatus: initialStatus,
+      queueMode: queued,
+      queueStatus: queued ? 'pending' : null,
+      batchId: String(batchId || '').trim() || null,
+      source: String(source || 'upload').trim() || 'upload',
+      attemptCount: 0,
+      claimCount: 0,
+      maxAttempts: Math.max(1, toNumber(maxAttempts, 3)),
+      failureHistory: [],
       uploadedBy: uploadedBy || null,
       notes: notes || null,
       nameConflictCount: duplicateCount,
       deliveredAt: null,
+      downloadedAt: null,
+      lastAttemptAt: null,
       failedReason: null
     }
 
@@ -985,6 +1045,181 @@ function createStore(baseDir) {
     return items[index]
   }
 
+  function claimNextQueueFile(hostLabel, botName) {
+    const normalizedHost = String(hostLabel || '').trim()
+    const normalizedBot = String(botName || '').trim()
+    if (!normalizedHost || !normalizedBot) return null
+
+    const items = listFiles()
+    const sortedIndexes = items
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => isQueueFile(item) && queueFileMatchesWorker(item, normalizedHost, normalizedBot))
+      .sort((left, right) => String(left.item.uploadedAt || '').localeCompare(String(right.item.uploadedAt || '')))
+
+    const held = sortedIndexes.find(({ item }) => {
+      const status = getQueueStatus(item)
+      return item.claimedByBotName === normalizedBot && ['claimed', 'downloaded', 'printing'].includes(status)
+    })
+    if (held) {
+      const current = items[held.index]
+      items[held.index] = {
+        ...current,
+        claimedByHostLabel: normalizedHost,
+        claimHeartbeatAt: nowIso()
+      }
+      saveFiles(items)
+      return items[held.index]
+    }
+
+    const next = sortedIndexes.find(({ item }) => {
+      const status = getQueueStatus(item)
+      if (isTerminalQueueStatus(status)) return false
+      if (item.claimedByBotName && item.claimedByBotName !== normalizedBot) return false
+      return status === 'pending' || status === 'failed'
+    })
+    if (!next) return null
+
+    const current = items[next.index]
+    const attemptCount = Math.max(0, toNumber(current.attemptCount, 0))
+    const maxAttempts = Math.max(1, toNumber(current.maxAttempts, 3))
+    if (attemptCount >= maxAttempts) return null
+
+    items[next.index] = {
+      ...current,
+      claimedByBotName: normalizedBot,
+      claimedByHostLabel: normalizedHost,
+      claimedAt: nowIso(),
+      claimHeartbeatAt: nowIso(),
+      deliveryStatus: 'claimed',
+      queueStatus: 'claimed',
+      queueMode: true,
+      claimCount: Math.max(0, toNumber(current.claimCount, 0)) + 1,
+      lastAttemptAt: nowIso(),
+      failedReason: null
+    }
+    saveFiles(items)
+    return items[next.index]
+  }
+
+  function completeQueueFileDelivery(hostLabel, botName, fileId, deliveryStatus, failedReason = null) {
+    const normalizedHost = String(hostLabel || '').trim()
+    const normalizedBot = String(botName || '').trim()
+    const status = normalizeFileStatus(deliveryStatus, '')
+    const items = listFiles()
+    const index = items.findIndex((item) => item.fileId === fileId && isQueueFile(item))
+    if (index < 0) return null
+
+    const current = items[index]
+    if (current.claimedByBotName && current.claimedByBotName !== normalizedBot) return null
+    if (current.claimedByHostLabel && current.claimedByHostLabel !== normalizedHost) return null
+
+    if (status === 'downloaded' || status === 'printing') {
+      items[index] = {
+        ...current,
+        claimedByBotName: normalizedBot || current.claimedByBotName || null,
+        claimedByHostLabel: normalizedHost || current.claimedByHostLabel || null,
+        claimHeartbeatAt: nowIso(),
+        deliveryStatus: status,
+        queueStatus: status,
+        queueMode: true,
+        downloadedAt: status === 'downloaded' ? nowIso() : current.downloadedAt || null,
+        failedReason: null
+      }
+      saveFiles(items)
+      return items[index]
+    }
+
+    if (status === 'placed' || status === 'completed' || status === 'succeeded') {
+      items[index] = {
+        ...current,
+        claimedByBotName: normalizedBot || current.claimedByBotName || null,
+        claimedByHostLabel: normalizedHost || current.claimedByHostLabel || null,
+        claimHeartbeatAt: nowIso(),
+        deliveryStatus: 'placed',
+        queueStatus: 'completed',
+        queueMode: true,
+        deliveredAt: nowIso(),
+        failedReason: null
+      }
+      saveFiles(items)
+      return items[index]
+    }
+
+    if (status === 'failed') {
+      const attemptCount = Math.max(0, toNumber(current.attemptCount, 0)) + 1
+      const maxAttempts = Math.max(1, toNumber(current.maxAttempts, 3))
+      const finalFailure = attemptCount >= maxAttempts
+      const history = Array.isArray(current.failureHistory) ? current.failureHistory.slice(-19) : []
+      history.push({
+        botName: normalizedBot || current.claimedByBotName || null,
+        hostLabel: normalizedHost || current.claimedByHostLabel || null,
+        failedAt: nowIso(),
+        reason: failedReason || null,
+        attempt: attemptCount
+      })
+      items[index] = {
+        ...current,
+        claimedByBotName: finalFailure ? (normalizedBot || current.claimedByBotName || null) : null,
+        claimedByHostLabel: finalFailure ? (normalizedHost || current.claimedByHostLabel || null) : null,
+        claimedAt: finalFailure ? current.claimedAt || nowIso() : null,
+        claimHeartbeatAt: null,
+        deliveryStatus: finalFailure ? 'failed-final' : 'failed',
+        queueStatus: finalFailure ? 'failed-final' : 'pending',
+        queueMode: true,
+        attemptCount,
+        failedReason: failedReason || null,
+        failureHistory: history
+      }
+      saveFiles(items)
+      return items[index]
+    }
+
+    return null
+  }
+
+  function releaseQueueFile(fileId, reason = null) {
+    const items = listFiles()
+    const index = items.findIndex((item) => item.fileId === fileId && isQueueFile(item))
+    if (index < 0) return null
+    const current = items[index]
+    if (isTerminalQueueStatus(getQueueStatus(current)) && getQueueStatus(current) !== 'failed-final') return current
+    items[index] = {
+      ...current,
+      claimedByBotName: null,
+      claimedByHostLabel: null,
+      claimedAt: null,
+      claimHeartbeatAt: null,
+      deliveryStatus: 'pending',
+      queueStatus: 'pending',
+      queueMode: true,
+      attemptCount: getQueueStatus(current) === 'failed-final' ? 0 : Math.max(0, toNumber(current.attemptCount, 0)),
+      failedReason: reason || current.failedReason || null
+    }
+    saveFiles(items)
+    return items[index]
+  }
+
+  function retryQueueFile(fileId, reason = null) {
+    const items = listFiles()
+    const index = items.findIndex((item) => item.fileId === fileId && isQueueFile(item))
+    if (index < 0) return null
+    const current = items[index]
+    items[index] = {
+      ...current,
+      claimedByBotName: null,
+      claimedByHostLabel: null,
+      claimedAt: null,
+      claimHeartbeatAt: null,
+      deliveryStatus: 'pending',
+      queueStatus: 'pending',
+      queueMode: true,
+      attemptCount: 0,
+      failedReason: reason || null
+    }
+    saveFiles(items)
+    return items[index]
+  }
+
   function completeNodeCommand(hostLabel, commandId, status, resultMessage, botName = null) {
     const normalizedHost = String(hostLabel || '').trim()
     const normalizedBot = botName ? String(botName).trim() : null
@@ -1074,9 +1309,13 @@ function createStore(baseDir) {
     assignFileToNode,
     getNextAssignedFile,
     claimNextNodeFile,
+    claimNextQueueFile,
     claimNextNodeCommand,
     completeFileDelivery,
     completeNodeFileDelivery,
+    completeQueueFileDelivery,
+    releaseQueueFile,
+    retryQueueFile,
     completeNodeCommand,
     saveNodeLogDownload,
     getNodeLogDownload,

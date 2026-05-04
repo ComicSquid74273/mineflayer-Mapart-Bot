@@ -433,6 +433,20 @@ function reportDashboardWarning(config, category, message, details = {}) {
   }
 }
 
+function setDashboardAlert(config, category, message, details = {}, level = 'warn') {
+  const runtime = config?.__dashboardRuntime
+  if (runtime && typeof runtime.setAlert === 'function') {
+    runtime.setAlert(category, message, details, level)
+  }
+}
+
+function clearDashboardAlert(config, category) {
+  const runtime = config?.__dashboardRuntime
+  if (runtime && typeof runtime.clearAlert === 'function') {
+    runtime.clearAlert(category)
+  }
+}
+
 function reportSupportStockWarning(config, message, details = {}) {
   console.log(`[SUPPORT-STOCK-WARN] ${message}`)
   reportDashboardWarning(config, 'support-stock', message, details)
@@ -448,6 +462,7 @@ function getDashboardConfig(config) {
     hostLabel: String(raw?.hostLabel || process.env.NERV_DASHBOARD_HOST_LABEL || process.env.COMPUTERNAME || os.hostname() || 'unknown-host').trim(),
     heartbeatMs: Math.max(1000, toNumber(raw?.heartbeatMs, 5000)),
     commandPollMs: Math.max(1000, toNumber(raw?.commandPollMs, 3000)),
+    nodeInventoryScanMs: Math.max(5000, toNumber(raw?.nodeInventoryScanMs, 60000)),
     idleWindowMs: Math.max(3000, toNumber(raw?.idleWindowMs, 15000)),
     staleMs: Math.max(5000, toNumber(raw?.staleMs, 20000))
   }
@@ -704,8 +719,16 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     reconnectState: sessionNumber > 1 ? 'reconnecting' : 'idle',
     currentNbt: null,
     currentNbtStartedAt: null,
+    activeQueueFile: null,
     lastError: '',
     warnings: [],
+    alerts: [],
+    nodeInventoryCache: {
+      nextScanAt: 0,
+      nodeFiles: [],
+      nodeLogs: [],
+      finishedMapFiles: []
+    },
     lastActivityAt: Date.now(),
     startRequested: false,
     stopRequested: false,
@@ -817,6 +840,25 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     }
   }
 
+  function getCachedNodeInventory() {
+    const now = Date.now()
+    if (state.nodeInventoryCache.nextScanAt > now) return state.nodeInventoryCache
+    const nodeFiles = listNodeNbtFiles()
+    const finishedMapFiles = listFinishedMapFiles()
+    const nodeLogs = listNodeLogFiles()
+    state.nodeInventoryCache = {
+      nextScanAt: now + dashboard.nodeInventoryScanMs,
+      nodeFiles,
+      nodeLogs,
+      finishedMapFiles
+    }
+    return state.nodeInventoryCache
+  }
+
+  function invalidateNodeInventoryCache() {
+    state.nodeInventoryCache.nextScanAt = 0
+  }
+
   function buildStatusPayload(onlineOverride = null) {
     const now = Date.now()
     const progress = currentProgress()
@@ -858,8 +900,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         }
       : undefined
 
-    const nodeFiles = listNodeNbtFiles()
-    const finishedMapFiles = listFinishedMapFiles()
+    const inventory = getCachedNodeInventory()
+    const nodeFiles = inventory.nodeFiles
+    const finishedMapFiles = inventory.finishedMapFiles
 
     return {
       botName,
@@ -884,12 +927,13 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       currentNbt: currentSourceName(),
       lastStatusAt: new Date().toISOString(),
       nodeFiles,
-      nodeLogs: listNodeLogFiles(),
+      nodeLogs: inventory.nodeLogs,
       finishedMapCount: finishedMapFiles.length,
       finishedMapFiles,
       progress: progressPayload,
       lastError: state.lastError || null,
       warnings: state.warnings.slice(-5),
+      alerts: state.alerts.filter((item) => item.active === true).slice(-8),
       assignedInterval,
       staleReason: activeState === 'stale' ? (progress ? 'progress-frozen' : 'heartbeat-missed') : undefined,
       verificationCode: stdinCommandState.status?.verificationCode || null,
@@ -953,8 +997,23 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     })
   }
 
+  async function reportQueueFileResult(fileId, deliveryStatus, failedReason = null) {
+    await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/queue/${encodeURIComponent(fileId)}/result`, 'POST', {
+      deliveryStatus,
+      failedReason,
+      botName
+    })
+  }
+
   async function claimNextNodeFile() {
     const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/files/claim-next`, 'POST', {
+      botName
+    })
+    return response.body?.item || null
+  }
+
+  async function claimNextQueueFile() {
+    const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/queue/claim-next`, 'POST', {
       botName
     })
     return response.body?.item || null
@@ -998,6 +1057,56 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return path.join(folder, safeName)
   }
 
+  function queueStatePath() {
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    return path.join(folder, '.dashboard-queue.json')
+  }
+
+  function readQueueState() {
+    return readOptionalJson(queueStatePath()) || {}
+  }
+
+  function writeQueueState(next) {
+    writeJson(queueStatePath(), next && typeof next === 'object' ? next : {})
+  }
+
+  function rememberQueueFile(fileName, item) {
+    const safeName = path.basename(String(fileName || '').trim())
+    if (!safeName || !item?.fileId) return
+    const stateFile = readQueueState()
+    stateFile[safeName] = {
+      fileId: item.fileId,
+      fileName: safeName,
+      originalName: item.originalName || item.storedName || safeName,
+      rememberedAt: new Date().toISOString()
+    }
+    writeQueueState(stateFile)
+  }
+
+  function restoreQueueFileForNbt(filePathOrName) {
+    const safeName = path.basename(String(filePathOrName || '').trim())
+    if (!safeName) return null
+    const entry = readQueueState()[safeName] || null
+    if (entry?.fileId) {
+      state.activeQueueFile = {
+        fileId: entry.fileId,
+        fileName: safeName,
+        originalName: entry.originalName || safeName
+      }
+      return state.activeQueueFile
+    }
+    return null
+  }
+
+  function forgetQueueFile(fileName) {
+    const safeName = path.basename(String(fileName || '').trim())
+    if (!safeName) return
+    const stateFile = readQueueState()
+    if (!stateFile[safeName]) return
+    delete stateFile[safeName]
+    writeQueueState(stateFile)
+  }
+
   function resolveFinishedMapPath(fileName) {
     const folder = path.resolve(process.cwd(), config.files?.finishedFolder || './finished-maps')
     const safeName = path.basename(String(fileName || '').trim())
@@ -1024,6 +1133,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           const buffer = Buffer.from(contentBase64, 'base64')
           fs.mkdirSync(path.dirname(targetPath), { recursive: true })
           fs.writeFileSync(targetPath, buffer)
+          invalidateNodeInventoryCache()
           noteActivity()
           await reportNodeCommandResult(command.commandId, 'succeeded', `uploaded ${fileName}`)
         } catch (error) {
@@ -1079,6 +1189,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           return true
         }
         fs.unlinkSync(targetPath)
+        invalidateNodeInventoryCache()
         if (path.basename(String(state.currentNbt || '')) === path.basename(String(command.fileName || ''))) {
           state.currentNbt = null
         }
@@ -1112,6 +1223,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           const targetPath = resolveUniqueFilePath(resolveNodeNbtPath(fileName))
           fs.mkdirSync(path.dirname(targetPath), { recursive: true })
           fs.copyFileSync(fromPath, targetPath)
+          invalidateNodeInventoryCache()
           state.currentNbt = path.basename(targetPath)
           printingIntentActive = true
           runtimeControl?.requestStart('dashboard-reprint')
@@ -1132,6 +1244,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   }
 
   async function handleNodeFileAssignment() {
+    if (hasLocalNbtWorkPending()) return false
     const item = await claimNextNodeFile()
     if (!item) return false
     const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
@@ -1141,10 +1254,49 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       await downloadDashboardFile(`${dashboard.serviceUrl}/api/files/${encodeURIComponent(item.fileId)}/download`, targetPath)
       await reportNodeFileResult(item.fileId, 'placed')
       state.currentNbt = fileName
+      invalidateNodeInventoryCache()
       noteActivity()
       return true
     } catch (error) {
       await reportNodeFileResult(item.fileId, 'failed', error?.message || String(error))
+      throw error
+    }
+  }
+
+  function hasLocalNbtWorkPending() {
+    if (runtimeControl?.isRunActive?.() === true) return true
+    if (currentSourceName()) return true
+    return listNodeNbtFiles().length > 0
+  }
+
+  async function handleQueueFileAssignment() {
+    if (hasLocalNbtWorkPending()) return false
+    const item = await claimNextQueueFile()
+    if (!item) return false
+    const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+    const fileName = path.basename(String(item.originalName || item.storedName || `${item.fileId}.nbt`))
+    const targetPath = resolveUniqueFilePath(path.join(folder, fileName))
+    try {
+      await downloadDashboardFile(`${dashboard.serviceUrl}/api/files/${encodeURIComponent(item.fileId)}/download`, targetPath)
+      await reportQueueFileResult(item.fileId, 'downloaded')
+      const localName = path.basename(targetPath)
+      state.currentNbt = localName
+      state.activeQueueFile = {
+        fileId: item.fileId,
+        fileName: localName,
+        originalName: fileName
+      }
+      rememberQueueFile(localName, item)
+      printingIntentActive = true
+      runtimeControl?.requestStart('dashboard-queue')
+      state.startRequested = true
+      state.stopRequested = false
+      invalidateNodeInventoryCache()
+      noteActivity()
+      await reportQueueFileResult(item.fileId, 'printing')
+      return true
+    } catch (error) {
+      await reportQueueFileResult(item.fileId, 'failed', error?.message || String(error))
       throw error
     }
   }
@@ -1268,6 +1420,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       const items = Array.isArray(response.body?.items) ? response.body.items : []
       if (items.length) {
         await executeCommand(items[0])
+        return
+      }
+      const handledQueueFile = await handleQueueFileAssignment()
+      if (handledQueueFile) {
+        return
       }
     } finally {
       state.commandBusy = false
@@ -1346,6 +1503,58 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       noteActivity()
       void postStatus()
     },
+    setAlert(category, message, details = {}, level = 'warn') {
+      const key = String(category || 'runtime-alert').trim() || 'runtime-alert'
+      const text = String(message || '').trim()
+      if (!text) return
+      const now = new Date().toISOString()
+      const existing = state.alerts.find((entry) => entry.category === key)
+      if (existing) {
+        existing.message = text
+        existing.details = details && typeof details === 'object' ? details : {}
+        existing.level = String(level || existing.level || 'warn')
+        existing.active = true
+        existing.lastSeenAt = now
+      } else {
+        state.alerts.push({
+          category: key,
+          message: text,
+          details: details && typeof details === 'object' ? details : {},
+          level: String(level || 'warn'),
+          active: true,
+          firstSeenAt: now,
+          lastSeenAt: now
+        })
+      }
+      if (state.alerts.length > 20) state.alerts = state.alerts.slice(-20)
+      state.statusDetail = text
+      noteActivity()
+      void postStatus()
+    },
+    clearAlert(category) {
+      const key = String(category || '').trim()
+      if (!key) return
+      const now = new Date().toISOString()
+      state.alerts = state.alerts.map((entry) => entry.category === key
+        ? { ...entry, active: false, resolvedAt: now }
+        : entry)
+      noteActivity()
+      void postStatus()
+    },
+    async completeActiveQueueFile(status = 'placed', reason = null) {
+      const active = state.activeQueueFile
+      if (!active?.fileId) return false
+      await reportQueueFileResult(active.fileId, status, reason)
+      forgetQueueFile(active.fileName || active.originalName)
+      state.activeQueueFile = null
+      return true
+    },
+    restoreQueueFileForNbt(filePathOrName) {
+      return restoreQueueFileForNbt(filePathOrName)
+    },
+    getActiveQueueFile() {
+      return state.activeQueueFile
+    },
     consumeStartRequest() {
       if (!state.startRequested) return false
       state.startRequested = false
@@ -1384,6 +1593,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
 
     const nextNbt = getNextNbtFile(config)
     runtimeControl?.markRunStarted('runtime')
+    dashboardRuntime?.restoreQueueFileForNbt?.(nextNbt)
     dashboardRuntime?.setCurrentNbt(nextNbt ? path.basename(nextNbt) : null)
     dashboardRuntime?.setPhase('printing')
     try {
@@ -1392,15 +1602,21 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       dashboardRuntime?.setCurrentNbt(runInfo?.sourceName || null)
 
       if (runInfo?.sourceType !== 'nbt') {
+        dashboardRuntime?.setCurrentNbt(null)
         dashboardRuntime?.setPhase('idle')
         await delay(1000)
         continue
       }
 
       if (runInfo?.didWork === false) {
+        dashboardRuntime?.setCurrentNbt(null)
         dashboardRuntime?.setPhase('idle')
         await delay(1000)
         continue
+      }
+
+      if (!runInfo?.postPrintPending) {
+        await dashboardRuntime?.completeActiveQueueFile?.('placed', 'printed and post-print workflow completed')
       }
 
       const nextQueuedNbt = config.files?.moveToFinishedFolder === true ? getNextNbtFile(config) : null
@@ -1412,6 +1628,9 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
         continue
       }
 
+      if (!runInfo?.postPrintPending) {
+        dashboardRuntime?.setCurrentNbt(null)
+      }
       dashboardRuntime?.setPhase('idle')
       if (config.files?.moveToFinishedFolder === true) {
         console.log('[STATE] No queued NBT files found. Waiting idle.')
@@ -1430,10 +1649,13 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       const noMoreInput = text.includes('No NBT files found in folder:') || text.includes('No input found.')
       if (noMoreInput) {
         console.log('[STATE] No more map files found. Waiting idle.')
+        await dashboardRuntime?.completeActiveQueueFile?.('failed', text)
+        dashboardRuntime?.setCurrentNbt(null)
         dashboardRuntime?.setPhase('idle')
         await delay(1000)
         continue
       }
+      await dashboardRuntime?.completeActiveQueueFile?.('failed', text)
       throw err
     } finally {
       runtimeControl?.markRunCompleted()
@@ -7814,9 +8036,15 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     await waitForPlatformReady(bot, config, 'before-place')
   }
 
+  await waitForPlatformWaterClear(bot, config, config.__platformWaterGuardTargets || [target], 'before-place')
+
   const { targetPos } = resolveTargetPlacementPosition(bot, target, config)
 
-  const blockAtTarget = bot.blockAt(targetPos)
+  let blockAtTarget = bot.blockAt(targetPos)
+  if (isWaterBlockName(blockAtTarget?.name)) {
+    await waitForPlatformWaterClear(bot, config, config.__platformWaterGuardTargets || [target], 'water-at-target', { force: true })
+    blockAtTarget = bot.blockAt(targetPos)
+  }
 
   if (blockAtTarget?.name === target.blockName) {
     return { state: 'already' }
@@ -9927,6 +10155,10 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   const northToSouth = printer.northToSouth !== false
   const placeWhileSprinting = printer.placeWhileSprinting === true
   const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
+  config.__platformWaterGuardTargets = orderedTargets
+  const checkPlatformWater = async (reason) => {
+    await waitForPlatformWaterClear(bot, config, orderedTargets, reason)
+  }
   let resumeFrom = 0
   let resumePhase = 'printing'  // tracks which bot phase to resume after crash
   let resumePostPrintStep = 'withdraw'
@@ -9969,6 +10201,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   }
 
   const pending = orderedTargets.slice(resumeFrom)
+  await checkPlatformWater('startup-water-check')
   const makePostPrintContext = (extra = {}) => ({
     sourceName: input.sourceName,
     sourcePath: input.sourcePath,
@@ -10081,6 +10314,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     let already = 0
     const errorList = []
 
+    await checkPlatformWater('before-completed-build-verification')
     for (const target of orderedTargets) {
       setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-verification')
       checkRuntimeStop()
@@ -10109,6 +10343,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     }
     const Vec3_Final = bot.entity.position.constructor
     const fullMapErrors = []
+    await checkPlatformWater('before-final-scan')
     for (const target of orderedTargets) {
       setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-final-scan')
       checkRuntimeStop()
@@ -10136,6 +10371,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
         setRuntimeStopCheckpoint('repair', 'dashboard-stop-during-repair', { pass, maxPasses: maxRepairPasses, errorCount: errorList.length })
         checkRuntimeStop()
+        await checkPlatformWater('before-repair-pass')
         console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
         if (progressEnabled) {
           writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
@@ -10378,6 +10614,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   for (let i = 0; i < colTraversal.length; i += printChunkLines) {
     setRuntimeStopCheckpoint('printing', 'dashboard-stop-before-inventory-window', { colIndex: i })
     checkRuntimeStop()
+    await checkPlatformWater('before-inventory-window')
     const inventoryCols = colTraversal.slice(i, i + printChunkLines)
     const inventoryRowOrder = startOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
     const inventoryTargets = []
@@ -10415,6 +10652,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     for (let j = 0; j < inventoryCols.length; j += Math.max(1, toNumber(linesPerRun, 1))) {
       setRuntimeStopCheckpoint('printing', 'dashboard-stop-before-placement-batch', { colBatch: inventoryCols.slice(j, j + Math.max(1, toNumber(linesPerRun, 1))).join(',') })
       checkRuntimeStop()
+      await checkPlatformWater('before-placement-batch')
       const colBatch = inventoryCols.slice(j, j + Math.max(1, toNumber(linesPerRun, 1)))
       const rowOrder = batchStartOnNorthSide ? sortedRowsAsc : [...sortedRowsAsc].reverse()
       const batchTargets = []
@@ -10660,6 +10898,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
       setRuntimeStopCheckpoint('repair', 'dashboard-stop-during-repair', { pass, maxPasses: maxRepairPasses, errorCount: errorList.length })
       checkRuntimeStop()
+      await checkPlatformWater('before-repair-pass')
       console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
       if (progressEnabled) {
         writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
@@ -13370,6 +13609,159 @@ function getPlatformBounds(config) {
     maxX: Math.max(cx, cx + mw, cx - mw) + 30,
     minZ: Math.min(cz, cz + mh, cz - mh) - 30,
     maxZ: Math.max(cz, cz + mh, cz - mh) + 30
+  }
+}
+
+function getPlatformWaterLayerY(config, targets = null) {
+  const explicit = toNumber(config.advanced?.platformWaterLayerY, NaN)
+  if (Number.isFinite(explicit)) return Math.floor(explicit)
+  if (Array.isArray(targets) && targets.length) {
+    const counts = new Map()
+    for (const target of targets) {
+      const y = Math.floor(toNumber(target?.position?.y, NaN))
+      if (!Number.isFinite(y)) continue
+      counts.set(y, (counts.get(y) || 0) + 1)
+    }
+    const common = [...counts.entries()].sort((left, right) => right[1] - left[1])[0]
+    if (common) return common[0]
+  }
+  const offsets = getPrintOffsets(config)
+  return Math.floor(toNumber(config.machine?.mapCorner?.y, 64) + offsets.y)
+}
+
+function getPlatformWaterScanBounds(config, targets = null) {
+  const y = getPlatformWaterLayerY(config, targets)
+  if (config.advanced?.platformWaterUseTargetBounds === true && Array.isArray(targets) && targets.length) {
+    const xs = targets.map((target) => toNumber(target?.position?.x, NaN)).filter(Number.isFinite)
+    const zs = targets.map((target) => toNumber(target?.position?.z, NaN)).filter(Number.isFinite)
+    if (xs.length && zs.length) {
+      return {
+        y,
+        minX: Math.min(...xs),
+        maxX: Math.max(...xs),
+        minZ: Math.min(...zs),
+        maxZ: Math.max(...zs)
+      }
+    }
+  }
+  const mapCorner = config.machine?.mapCorner
+  if (!mapCorner || !Number.isFinite(mapCorner.x) || !Number.isFinite(mapCorner.z)) return null
+  const offsets = getPrintOffsets(config)
+  const minX = Math.floor(toNumber(mapCorner.x, 0) + offsets.x)
+  const minZ = Math.floor(toNumber(mapCorner.z, 0) + offsets.z)
+  const width = Math.max(1, toNumber(config.machine?.mapSize?.width, 128))
+  const height = Math.max(1, toNumber(config.machine?.mapSize?.height, 128))
+  return {
+    y,
+    minX,
+    maxX: minX + width - 1,
+    minZ,
+    maxZ: minZ + height - 1
+  }
+}
+
+function isWaterBlockName(name) {
+  const text = String(name || '').toLowerCase()
+  return text === 'water' || text === 'flowing_water' || text.includes('water')
+}
+
+function scanPlatformWater(bot, config, targets = null, maxFinds = 12) {
+  if (config.advanced?.platformWaterGuardEnabled === false) {
+    return { water: [], bounds: null }
+  }
+  const bounds = getPlatformWaterScanBounds(config, targets)
+  if (!bounds) return { water: [], bounds: null }
+  const Vec3 = bot.entity.position.constructor
+  const water = []
+  for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+    for (let z = bounds.minZ; z <= bounds.maxZ; z += 1) {
+      const block = bot.blockAt(new Vec3(x, bounds.y, z))
+      if (isWaterBlockName(block?.name)) {
+        water.push({ x, y: bounds.y, z, name: block.name })
+        if (water.length >= maxFinds) return { water, bounds }
+      }
+    }
+  }
+  return { water, bounds }
+}
+
+async function waitForPlatformWaterClear(bot, config, targets = null, reason = 'platform-water-check', options = {}) {
+  if (config.advanced?.platformWaterGuardEnabled === false) return
+  if (bot.__nervPlatformWaterHoldPromise) return bot.__nervPlatformWaterHoldPromise
+  const checkIntervalMs = Math.max(1000, toNumber(config.advanced?.platformWaterCheckIntervalMs, 30000))
+  if (options.force !== true && toNumber(bot.__nervPlatformWaterLastClearAt, 0) > 0 && Date.now() - bot.__nervPlatformWaterLastClearAt < checkIntervalMs) {
+    return
+  }
+
+  const initial = scanPlatformWater(bot, config, targets, 12)
+  if (!initial.water.length) {
+    bot.__nervPlatformWaterLastClearAt = Date.now()
+    clearDashboardAlert(config, 'platform-water')
+    return
+  }
+
+  bot.__nervPlatformWaterHoldPromise = (async () => {
+    const pollMs = Math.max(1000, toNumber(config.advanced?.platformWaterPollMs, 10000))
+    const alertAfterMs = Math.max(1000, toNumber(config.advanced?.platformWaterAlertAfterMs, 150000))
+    const clearStableMs = Math.max(1000, toNumber(config.advanced?.platformWaterClearStableMs, 15000))
+    const logMs = Math.max(5000, toNumber(config.advanced?.platformWaterLogMs, 30000))
+    const startedAt = Date.now()
+    let lastLog = 0
+    let clearSince = 0
+    let alertSent = false
+
+    stopBotMovement(bot)
+    closeCurrentWindowIfOpen(bot, reason)
+    config?.__dashboardRuntime?.setPhase?.('cleanup', 'water-on-platform-hold')
+    console.log(`[PLATFORM-WATER-HOLD] Paused ${reason}; water found on carpet layer y=${initial.bounds?.y ?? 'unknown'} at ${initial.water.slice(0, 4).map((pos) => `${pos.x},${pos.y},${pos.z}`).join(' ')}`)
+
+    while (bot?._client && bot._client.state !== 'disconnected' && bot.__nervSessionActive !== false) {
+      assertRuntimeContinue(bot, config, 'stopping-during-platform-water-hold')
+      stopBotMovement(bot)
+      const scan = scanPlatformWater(bot, config, targets, 12)
+      const now = Date.now()
+      if (!scan.water.length) {
+        if (!clearSince) {
+          clearSince = now
+          console.log(`[PLATFORM-WATER-HOLD] Water cleared on carpet layer; waiting ${Math.round(clearStableMs / 1000)}s stable before resume.`)
+        }
+        if (now - clearSince >= clearStableMs) {
+          bot.__nervPlatformWaterLastClearAt = Date.now()
+          clearDashboardAlert(config, 'platform-water')
+          config?.__dashboardRuntime?.setStatusDetail?.('water-clear-resuming')
+          console.log('[PLATFORM-WATER-HOLD] Platform layer stayed clear. Resuming print.')
+          return
+        }
+      } else {
+        clearSince = 0
+        if (!alertSent && now - startedAt >= alertAfterMs) {
+          alertSent = true
+          const message = `Water on platform layer y=${scan.bounds?.y ?? 'unknown'}; waiting for real player cleanup`
+          setDashboardAlert(config, 'platform-water', message, {
+            reason,
+            y: scan.bounds?.y ?? null,
+            sample: scan.water.slice(0, 12),
+            elapsedMs: now - startedAt
+          }, 'critical')
+          reportDashboardWarning(config, 'platform-water', message, {
+            reason,
+            y: scan.bounds?.y ?? null,
+            sample: scan.water.slice(0, 12)
+          })
+        }
+        if (now - lastLog >= logMs) {
+          console.log(`[PLATFORM-WATER-HOLD] Still waiting; water=${scan.water.length}+ layerY=${scan.bounds?.y ?? 'unknown'} sample=${scan.water.slice(0, 4).map((pos) => `${pos.x},${pos.y},${pos.z}`).join(' ')}`)
+          lastLog = now
+        }
+      }
+      await delay(pollMs)
+    }
+  })()
+
+  try {
+    await bot.__nervPlatformWaterHoldPromise
+  } finally {
+    bot.__nervPlatformWaterHoldPromise = null
   }
 }
 

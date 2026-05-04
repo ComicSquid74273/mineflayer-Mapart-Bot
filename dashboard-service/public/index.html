@@ -39,6 +39,8 @@
       </div>
     </header>
 
+    <section id="alertsBar" class="alerts-bar hidden"></section>
+
     <main class="layout-grid">
       <section class="panel panel-wide">
         <div class="panel-header">
@@ -69,8 +71,8 @@
         </div>
         <form id="uploadForm" class="stack-form">
           <label>
-            <span>NBT file</span>
-            <input id="fileInput" name="file" type="file" accept=".nbt" multiple required>
+            <span>NBT or ZIP file</span>
+            <input id="fileInput" name="file" type="file" accept=".nbt,.zip" multiple required>
           </label>
           <label>
             <span>Target type</span>
@@ -80,8 +82,8 @@
             </select>
           </label>
           <label class="checkbox-row">
-            <input id="distributeCheckbox" type="checkbox">
-            <span id="distributeLabel">Distribute equally across all online bots</span>
+            <input id="distributeCheckbox" type="checkbox" checked>
+            <span id="distributeLabel">Use central queue: any eligible bot can poll later</span>
           </label>
           <label id="uploadTargetSelectLabel">
             <span id="uploadTargetSelectText">Target bot</span>
@@ -89,7 +91,7 @@
               <option value="">Select bot</option>
             </select>
           </label>
-          <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload NBT</button>
+          <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload To Queue</button>
           <p id="uploadStatus" class="hint">No upload in progress.</p>
         </form>
         <div id="uploadAssignmentsList" class="file-list"></div>
