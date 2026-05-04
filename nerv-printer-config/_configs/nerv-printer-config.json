@@ -447,7 +447,7 @@
   },
   "dashboard": {
     "enabled": true,
-    "serviceUrl": "http://54.83.185.104:4080",
+    "serviceUrl": "http://3.217.232.178:4080",
     "hostLabel": "Dashboard",
     "heartbeatMs": 5000,
     "commandPollMs": 3000,
