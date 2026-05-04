@@ -15,7 +15,8 @@ const NBT_DIR = process.env.DASHBOARD_NBT_DIR || path.resolve(__dirname, '..', '
 const store = createStore(DATA_DIR)
 const SESSION_COOKIE_NAME = 'mapart_dashboard_session'
 const SESSION_MAX_AGE_SECONDS = Math.max(3600, Number(process.env.DASHBOARD_SESSION_MAX_AGE_SECONDS || 7 * 24 * 60 * 60))
-const SNAPSHOT_CACHE_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_CACHE_MS || 1000))
+const SNAPSHOT_CACHE_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_CACHE_MS || 3000))
+const SNAPSHOT_SLOW_STEP_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_SLOW_STEP_MS || 500))
 const SLOW_ROUTE_MS = Math.max(0, Number(process.env.DASHBOARD_SLOW_ROUTE_MS || 750))
 const MAX_REQUEST_BODY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_REQUEST_BYTES || 64 * 1024 * 1024))
 const MAX_UPLOAD_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_UPLOAD_BYTES || 512 * 1024 * 1024))
@@ -890,11 +891,20 @@ function buildDashboardSnapshot(actor = null) {
   if (snapshotCache.payload?.cacheKey === cacheKey && snapshotCache.expiresAt > now) {
     return snapshotCache.payload.body
   }
-  const bots = store.listBots().map(summarizeBot)
-  const nodes = store.listNodes().map(summarizeNode)
-  const events = store.listEvents(150)
-  const assignments = actor?.permissions?.canOperate ? listUploadAssignments() : []
-  const alerts = buildDashboardAlerts(bots, nodes, listUploadAssignments())
+  const timings = []
+  const timed = (label, work) => {
+    const startedAt = Date.now()
+    const value = work()
+    timings.push(`${label}=${Date.now() - startedAt}ms`)
+    return value
+  }
+  const fleet = timed('fleet', () => store.listFleet())
+  const bots = timed('bots', () => fleet.bots.map(summarizeBot))
+  const nodes = timed('nodes', () => fleet.nodes.map(summarizeNode))
+  const events = timed('events', () => store.listEvents(150))
+  const allAssignments = timed('assignments', () => listUploadAssignments())
+  const assignments = actor?.permissions?.canOperate ? allAssignments : []
+  const alerts = timed('alerts', () => buildDashboardAlerts(bots, nodes, allAssignments))
   const body = {
     ok: true,
     health: { ok: true },
@@ -903,6 +913,10 @@ function buildDashboardSnapshot(actor = null) {
     events,
     alerts,
     uploadAssignments: assignments
+  }
+  const totalMs = Date.now() - now
+  if (SNAPSHOT_SLOW_STEP_MS > 0 && totalMs >= SNAPSHOT_SLOW_STEP_MS) {
+    console.warn(`[dashboard-service] slow snapshot total=${totalMs}ms ${timings.join(' ')}`)
   }
   snapshotCache = {
     expiresAt: now + SNAPSHOT_CACHE_MS,

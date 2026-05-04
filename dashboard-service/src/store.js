@@ -173,6 +173,45 @@ function createStore(baseDir) {
       .sort((left, right) => String(left.fileName).localeCompare(String(right.fileName), undefined, { numeric: true, sensitivity: 'base' }))
   }
 
+  function addNodeFileEntries(byName, incomingItems) {
+    if (!(byName instanceof Map)) return byName
+    for (const item of Array.isArray(incomingItems) ? incomingItems : []) {
+      const normalized = sanitizeNodeFileEntry(item)
+      if (!normalized) continue
+      const key = normalized.fileName.toLowerCase()
+      const existing = byName.get(key)
+      if (!existing) {
+        byName.set(key, normalized)
+        continue
+      }
+      const existingModifiedMs = toTimestamp(existing.modifiedAt)
+      const nextModifiedMs = toTimestamp(normalized.modifiedAt)
+      byName.set(key, {
+        fileName: normalized.fileName || existing.fileName,
+        sizeBytes: Math.max(toNumber(existing.sizeBytes, 0), toNumber(normalized.sizeBytes, 0)),
+        modifiedAt: nextModifiedMs >= existingModifiedMs
+          ? (normalized.modifiedAt || existing.modifiedAt)
+          : (existing.modifiedAt || normalized.modifiedAt),
+        reportedByBotNames: Array.from(new Set([
+          ...(Array.isArray(existing.reportedByBotNames) ? existing.reportedByBotNames : []),
+          ...(Array.isArray(normalized.reportedByBotNames) ? normalized.reportedByBotNames : [])
+        ]))
+      })
+    }
+    return byName
+  }
+
+  function finalizeNodeFileEntries(byName) {
+    if (!(byName instanceof Map)) return []
+    return Array.from(byName.values())
+      .map((item) => ({
+        ...item,
+        reportedByBotNames: Array.from(new Set(Array.isArray(item.reportedByBotNames) ? item.reportedByBotNames : []))
+          .sort((left, right) => String(left).localeCompare(String(right), undefined, { sensitivity: 'base' }))
+      }))
+      .sort((left, right) => String(left.fileName).localeCompare(String(right.fileName), undefined, { numeric: true, sensitivity: 'base' }))
+  }
+
   function createAssignmentStats() {
     return {
       assignedTotal: 0,
@@ -622,9 +661,13 @@ function createStore(baseDir) {
     return sanitizeOperatorRecord(removed, { includePassword: false })
   }
 
-  function listBots() {
-    const bots = readBotMap()
+  function listBotsFromMap(botMap) {
+    const bots = botMap && typeof botMap === 'object' ? botMap : {}
     return Object.values(bots).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
+  }
+
+  function listBots() {
+    return listBotsFromMap(readBotMap())
   }
 
   function getBot(botName) {
@@ -632,8 +675,8 @@ function createStore(baseDir) {
     return bots[botName] || null
   }
 
-  function listNodes() {
-    const botMap = readBotMap()
+  function listNodesFromMap(botMapInput) {
+    const botMap = botMapInput && typeof botMapInput === 'object' ? botMapInput : {}
     const timingByHost = readNodeStatsMap()
     const assignmentStatsByHost = buildAssignmentStatsByHost(botMap)
     const byHost = new Map()
@@ -652,6 +695,9 @@ function createStore(baseDir) {
         nodeLogs: [],
         finishedMapCount: 0,
         finishedMapFiles: [],
+        _nodeFilesByName: new Map(),
+        _nodeLogsByName: new Map(),
+        _finishedMapFilesByName: new Map(),
         latestFinishedMapStatusAtMs: 0,
         timing: summarizeNodeTiming(timingByHost[hostLabel]),
         assignmentStats: assignmentStatsByHost.get(hostLabel) || createAssignmentStats(),
@@ -672,14 +718,14 @@ function createStore(baseDir) {
       if (String(bot.activeState || '').trim().toLowerCase() === 'stale') current.operationalStats.staleBotCount += 1
       if (String(bot.lastError || '').trim()) current.operationalStats.errorCount += 1
       current.operationalStats.warningCount += Array.isArray(bot.warnings) ? bot.warnings.length : 0
-      current.nodeFiles = mergeNodeFileEntries(current.nodeFiles, bot.nodeFiles)
-      current.nodeLogs = mergeNodeFileEntries(current.nodeLogs, bot.nodeLogs)
-      current.finishedMapFiles = mergeNodeFileEntries(current.finishedMapFiles, botFinishedMapFiles)
+      addNodeFileEntries(current._nodeFilesByName, bot.nodeFiles)
+      addNodeFileEntries(current._nodeLogsByName, bot.nodeLogs)
+      addNodeFileEntries(current._finishedMapFilesByName, botFinishedMapFiles)
       if (botLastStatusMs >= current.latestFinishedMapStatusAtMs && (Object.prototype.hasOwnProperty.call(bot, 'finishedMapCount') || botFinishedMapFiles.length > 0)) {
         current.latestFinishedMapStatusAtMs = botLastStatusMs
         current.finishedMapCount = reportedFinishedMapCount
       } else if (!current.latestFinishedMapStatusAtMs) {
-        current.finishedMapCount = current.finishedMapFiles.length
+        current.finishedMapCount = current._finishedMapFilesByName.size
       }
       if (!current.lastStatusAt || String(bot.lastStatusAt || '') > String(current.lastStatusAt || '')) {
         current.lastStatusAt = bot.lastStatusAt || null
@@ -687,9 +733,27 @@ function createStore(baseDir) {
       byHost.set(hostLabel, current)
     }
     for (const node of byHost.values()) {
+      node.nodeFiles = finalizeNodeFileEntries(node._nodeFilesByName)
+      node.nodeLogs = finalizeNodeFileEntries(node._nodeLogsByName)
+      node.finishedMapFiles = finalizeNodeFileEntries(node._finishedMapFilesByName)
+      delete node._nodeFilesByName
+      delete node._nodeLogsByName
+      delete node._finishedMapFilesByName
       node.operationalStats.remainingMaps = Math.max(0, toNumber(node.assignmentStats?.assignedTotal, 0) - toNumber(node.finishedMapCount, 0))
     }
     return Array.from(byHost.values()).sort((left, right) => String(left.hostLabel).localeCompare(String(right.hostLabel)))
+  }
+
+  function listNodes() {
+    return listNodesFromMap(readBotMap())
+  }
+
+  function listFleet() {
+    const botMap = readBotMap()
+    return {
+      bots: listBotsFromMap(botMap),
+      nodes: listNodesFromMap(botMap)
+    }
   }
 
   function listBotsForHost(hostLabel) {
@@ -1286,6 +1350,7 @@ function createStore(baseDir) {
     listBots,
     getBot,
     listNodes,
+    listFleet,
     listBotsForHost,
     listOperators,
     listOperatorCredentials,
