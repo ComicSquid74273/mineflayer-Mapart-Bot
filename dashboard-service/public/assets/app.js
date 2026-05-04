@@ -6,6 +6,14 @@ const state = {
   configs: [],
   dataFiles: [],
   uploadAssignments: [],
+  queueSummary: {
+    remaining: 0,
+    pending: 0,
+    active: 0,
+    retrying: 0,
+    attention: 0,
+    localNodeFiles: 0
+  },
   alerts: [],
   nbtSearch: '',
   localReprintCommands: [],
@@ -26,6 +34,7 @@ const state = {
     configs: '',
     dataFiles: '',
     uploadAssignments: '',
+    queueSummary: '',
     events: '',
     alerts: '',
     auth: ''
@@ -79,6 +88,9 @@ const elements = {
   permViewLogs: document.getElementById('permViewLogs'),
   refreshButton: document.getElementById('refreshButton'),
   refreshInterval: document.getElementById('refreshInterval'),
+  queueRemainingValue: document.getElementById('queueRemainingValue'),
+  queueRemainingMeta: document.getElementById('queueRemainingMeta'),
+  queueTracker: document.getElementById('queueTracker'),
   serviceStatus: document.getElementById('serviceStatus'),
   startAllButton: document.getElementById('startAllButton'),
   stopAllButton: document.getElementById('stopAllButton'),
@@ -975,11 +987,11 @@ function renderUploadAssignments() {
       : (item.targetHostLabel ? `Node: ${item.targetHostLabel}` : 'Unassigned')
     const status = String(item.queueStatus || item.status || 'unknown')
     const statusClass = ['succeeded', 'placed', 'completed'].includes(status) ? 'status-online'
-      : (['failed', 'failed-final'].includes(status) ? 'status-offline' : 'status-neutral')
+      : (status === 'failed' ? 'status-offline' : 'status-neutral')
     const claimed = item.claimedByBotName ? ` | claimed by ${item.claimedByBotName}` : ''
     const result = item.resultMessage ? ` | ${item.resultMessage}` : ''
     const attempts = Number(item.maxAttempts || 0) > 0 ? ` | attempts ${Number(item.attemptCount || 0)}/${Number(item.maxAttempts || 0)}` : ''
-    const canRelease = ['claimed', 'downloaded', 'printing', 'failed-final'].includes(status)
+    const canRelease = ['claimed', 'downloaded', 'printing'].includes(status)
     const canRetry = ['failed-final', 'failed'].includes(status)
     return `
       <article class="file-item compact-file-item">
@@ -996,6 +1008,32 @@ function renderUploadAssignments() {
         </div>
       </article>`
   }).join('')
+}
+
+function renderQueueSummary() {
+  if (!elements.queueRemainingValue || !elements.queueRemainingMeta) return
+  const summary = state.queueSummary || {}
+  const sig = JSON.stringify(summary)
+  if (state.renderCache.queueSummary === sig) return
+  state.renderCache.queueSummary = sig
+
+  const remaining = Math.max(0, Number(summary.remaining || 0))
+  const pending = Math.max(0, Number(summary.pending || 0))
+  const active = Math.max(0, Number(summary.active || 0))
+  const retrying = Math.max(0, Number(summary.retrying || 0))
+  const attention = Math.max(0, Number(summary.attention || 0))
+  const localNodeFiles = Math.max(0, Number(summary.localNodeFiles || 0))
+  const parts = [`${pending} pending`, `${active} active`]
+  if (retrying) parts.push(`${retrying} retry`)
+  if (attention) parts.push(`${attention} attention`)
+  if (localNodeFiles) parts.push(`${localNodeFiles} local`)
+
+  elements.queueRemainingValue.textContent = String(remaining)
+  elements.queueRemainingMeta.textContent = parts.join(' · ')
+  if (elements.queueTracker) {
+    elements.queueTracker.classList.toggle('queue-tracker-warn', attention > 0 || retrying > 0)
+    elements.queueTracker.classList.toggle('queue-tracker-active', remaining > 0 && active > 0)
+  }
 }
 
 function renderNodes() {
@@ -1571,6 +1609,7 @@ async function refreshData(options = {}) {
     state.configs = Array.isArray(configs.files) ? configs.files : []
     state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
     state.uploadAssignments = Array.isArray(snapshot.uploadAssignments) ? snapshot.uploadAssignments : []
+    state.queueSummary = snapshot.queueSummary && typeof snapshot.queueSummary === 'object' ? snapshot.queueSummary : state.queueSummary
     state.events = Array.isArray(snapshot.events) ? snapshot.events : []
     state.alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : []
     // Clear dismissed banners for bots that are no longer verifying
@@ -1587,6 +1626,7 @@ async function refreshData(options = {}) {
     renderBots()
     renderFiles()
     renderUploadAssignments()
+    renderQueueSummary()
     renderNodes()
     renderLogs()
     renderOperators()
@@ -1596,6 +1636,8 @@ async function refreshData(options = {}) {
   } catch (error) {
     elements.serviceStatus.textContent = 'Service offline'
     elements.serviceStatus.className = 'status-pill status-offline'
+    if (elements.queueRemainingValue) elements.queueRemainingValue.textContent = '--'
+    if (elements.queueRemainingMeta) elements.queueRemainingMeta.textContent = 'Service offline'
     pushEvent('error', error.message)
   } finally {
     state.busy = false
@@ -2102,8 +2144,7 @@ elements.loginButton.addEventListener('click', async () => {
       body: JSON.stringify({
         username: state.auth.operator,
         password: state.auth.password
-      }),
-      requireAuth: true
+      })
     })
     applyAuthResult(result)
     pushEvent('info', `Operator authenticated as ${state.auth.operator}`)

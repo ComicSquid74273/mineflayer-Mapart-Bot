@@ -948,7 +948,7 @@ function createStore(baseDir) {
 
   function isTerminalQueueStatus(status) {
     const normalized = normalizeFileStatus(status, '')
-    return normalized === 'placed' || normalized === 'completed' || normalized === 'succeeded' || normalized === 'failed-final' || normalized === 'cancelled'
+    return normalized === 'placed' || normalized === 'completed' || normalized === 'succeeded' || normalized === 'cancelled'
   }
 
   function queueFileMatchesWorker(item, hostLabel, botName) {
@@ -1212,18 +1212,11 @@ function createStore(baseDir) {
       const status = getQueueStatus(item)
       if (isTerminalQueueStatus(status)) return false
       if (['claimed', 'downloaded', 'printing'].includes(status) && item.claimedByBotName && item.claimedByBotName !== normalizedBot) return false
-      if (status !== 'pending' && status !== 'failed') return false
-      const attemptCount = Math.max(0, toNumber(item.attemptCount, 0))
-      const maxAttempts = Math.max(1, toNumber(item.maxAttempts, 3))
-      return attemptCount < maxAttempts
+      return status === 'pending' || status === 'failed' || status === 'failed-final'
     })
     if (!next) return null
 
     const current = items[next.index]
-    const attemptCount = Math.max(0, toNumber(current.attemptCount, 0))
-    const maxAttempts = Math.max(1, toNumber(current.maxAttempts, 3))
-    if (attemptCount >= maxAttempts) return null
-
     items[next.index] = {
       ...current,
       claimedByBotName: normalizedBot,
@@ -1287,8 +1280,6 @@ function createStore(baseDir) {
 
     if (status === 'failed') {
       const attemptCount = Math.max(0, toNumber(current.attemptCount, 0)) + 1
-      const maxAttempts = Math.max(1, toNumber(current.maxAttempts, 3))
-      const finalFailure = attemptCount >= maxAttempts
       const history = Array.isArray(current.failureHistory) ? current.failureHistory.slice(-19) : []
       history.push({
         botName: normalizedBot || current.claimedByBotName || null,
@@ -1299,12 +1290,12 @@ function createStore(baseDir) {
       })
       items[index] = {
         ...current,
-        claimedByBotName: finalFailure ? (normalizedBot || current.claimedByBotName || null) : null,
-        claimedByHostLabel: finalFailure ? (normalizedHost || current.claimedByHostLabel || null) : null,
-        claimedAt: finalFailure ? current.claimedAt || nowIso() : null,
+        claimedByBotName: null,
+        claimedByHostLabel: null,
+        claimedAt: null,
         claimHeartbeatAt: null,
-        deliveryStatus: finalFailure ? 'failed-final' : 'failed',
-        queueStatus: finalFailure ? 'failed-final' : 'pending',
+        deliveryStatus: 'failed',
+        queueStatus: 'pending',
         queueMode: true,
         attemptCount,
         failedReason: failedReason || null,
@@ -1322,7 +1313,7 @@ function createStore(baseDir) {
     const index = items.findIndex((item) => item.fileId === fileId && isQueueFile(item))
     if (index < 0) return null
     const current = items[index]
-    if (isTerminalQueueStatus(getQueueStatus(current)) && getQueueStatus(current) !== 'failed-final') return current
+    if (isTerminalQueueStatus(getQueueStatus(current))) return current
     items[index] = {
       ...current,
       claimedByBotName: null,
@@ -1332,7 +1323,7 @@ function createStore(baseDir) {
       deliveryStatus: 'pending',
       queueStatus: 'pending',
       queueMode: true,
-      attemptCount: getQueueStatus(current) === 'failed-final' ? 0 : Math.max(0, toNumber(current.attemptCount, 0)),
+      attemptCount: Math.max(0, toNumber(current.attemptCount, 0)),
       failedReason: reason || current.failedReason || null
     }
     saveFiles(items)

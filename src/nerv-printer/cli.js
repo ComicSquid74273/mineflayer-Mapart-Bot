@@ -1782,6 +1782,13 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
     pendingStart = false
 
     if (!shouldStart) {
+      const localQueuedNbt = getNextNbtFile(config)
+      if (localQueuedNbt) {
+        console.log(`[DASHBOARD] Auto-starting queued local NBT: ${path.basename(localQueuedNbt)}`)
+        pendingStart = true
+        await delay(250)
+        continue
+      }
       dashboardRuntime?.setPhase('idle')
       await delay(1000)
       continue

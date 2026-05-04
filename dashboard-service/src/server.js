@@ -108,8 +108,7 @@ function methodNotAllowed(res) {
 function unauthorized(res) {
   res.writeHead(401, {
     'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store',
-    'www-authenticate': 'Basic realm="Mapart Dashboard"'
+    'cache-control': 'no-store'
   })
   res.end(JSON.stringify({ error: 'authentication required' }, null, 2))
 }
@@ -788,7 +787,7 @@ function listNodeReprintCommands(hostLabel) {
     }))
 }
 
-function listUploadAssignments() {
+function listUploadAssignments(limit = 150) {
   const fileAssignments = store.listFiles()
     .filter((item) => item.queueMode === true || item.assignedBotName || item.assignedHostLabel || item.claimedByBotName || item.deliveryStatus !== 'unassigned')
     .map((item) => ({
@@ -823,13 +822,57 @@ function listUploadAssignments() {
       completedAt: item.completedAt || null,
       resultMessage: item.resultMessage || null
     }))
-  return [...commandAssignments, ...fileAssignments]
+  const items = [...commandAssignments, ...fileAssignments]
     .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
-    .slice(0, 150)
+  const parsedLimit = Number(limit)
+  return Number.isFinite(parsedLimit) && parsedLimit > 0 ? items.slice(0, parsedLimit) : items
 }
 
 function getAssignmentDisplayStatus(item) {
   return String(item.queueStatus || item.status || '').trim().toLowerCase()
+}
+
+function buildQueueSummary(assignments, nodes = []) {
+  const summary = {
+    total: 0,
+    remaining: 0,
+    pending: 0,
+    active: 0,
+    retrying: 0,
+    completed: 0,
+    cancelled: 0,
+    attention: 0,
+    localNodeFiles: 0
+  }
+  const activeStatuses = new Set(['claimed', 'downloaded', 'printing'])
+  const completedStatuses = new Set(['placed', 'completed', 'succeeded'])
+  for (const item of assignments) {
+    if (item.source === 'node-command') continue
+    const status = getAssignmentDisplayStatus(item) || 'pending'
+    summary.total += 1
+    if (completedStatuses.has(status)) {
+      summary.completed += 1
+      continue
+    }
+    if (status === 'cancelled') {
+      summary.cancelled += 1
+      continue
+    }
+    summary.remaining += 1
+    if (activeStatuses.has(status)) {
+      summary.active += 1
+    } else if (status === 'failed' || status === 'failed-final' || Number(item.attemptCount || 0) > 0) {
+      summary.retrying += 1
+    } else {
+      summary.pending += 1
+    }
+    const maxAttempts = Math.max(1, Number(item.maxAttempts || 3) || 3)
+    if (Number(item.attemptCount || 0) >= maxAttempts) summary.attention += 1
+  }
+  summary.localNodeFiles = (Array.isArray(nodes) ? nodes : []).reduce((count, node) => {
+    return count + (Array.isArray(node.nodeFiles) ? node.nodeFiles.length : 0)
+  }, 0)
+  return summary
 }
 
 function createAlert(level, category, title, message, details = {}) {
@@ -857,10 +900,15 @@ function buildDashboardAlerts(bots, nodes, assignments) {
     const bot = bots.find((entry) => entry.botName === item.claimedByBotName)
     return !bot || bot.online !== true || bot.activeState === 'stale'
   })
-  const finalFailures = assignments.filter((item) => getAssignmentDisplayStatus(item) === 'failed-final')
   const retryingFailures = assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
-    return status === 'failed' || (status === 'pending' && Number(item.attemptCount || 0) > 0)
+    return status === 'failed' || status === 'failed-final' || (status === 'pending' && Number(item.attemptCount || 0) > 0)
+  })
+  const exceededAttempts = assignments.filter((item) => {
+    const status = getAssignmentDisplayStatus(item)
+    if (!['pending', 'failed', 'failed-final'].includes(status)) return false
+    const maxAttempts = Math.max(1, Number(item.maxAttempts || 3) || 3)
+    return Number(item.attemptCount || 0) >= maxAttempts
   })
 
   const activeWaterBots = bots.filter((bot) =>
@@ -910,9 +958,9 @@ function buildDashboardAlerts(bots, nodes, assignments) {
       files: retryingFailures.slice(0, 20).map((item) => item.fileName)
     }))
   }
-  if (finalFailures.length) {
-    alerts.push(createAlert('critical', 'queue-final-failure', 'Queue failures', `${finalFailures.length} file(s) reached max attempts and need operator action.`, {
-      files: finalFailures.slice(0, 20).map((item) => item.fileName)
+  if (exceededAttempts.length) {
+    alerts.push(createAlert('warn', 'queue-attempts', 'Queue attention', `${exceededAttempts.length} file(s) exceeded configured attempts but remain retryable.`, {
+      files: exceededAttempts.slice(0, 20).map((item) => item.fileName)
     }))
   }
 
@@ -939,8 +987,9 @@ function buildDashboardSnapshot(actor = null) {
   const bots = timed('bots', () => fleet.bots.map(summarizeBot))
   const nodes = timed('nodes', () => fleet.nodes.map(summarizeNode))
   const events = timed('events', () => store.listEvents(150))
-  const allAssignments = timed('assignments', () => listUploadAssignments())
-  const assignments = actor?.permissions?.canOperate ? allAssignments : []
+  const allAssignments = timed('assignments', () => listUploadAssignments(0))
+  const assignments = actor?.permissions?.canOperate ? allAssignments.slice(0, 150) : []
+  const queueSummary = timed('queueSummary', () => buildQueueSummary(allAssignments, nodes))
   const alerts = timed('alerts', () => buildDashboardAlerts(bots, nodes, allAssignments))
   const body = {
     ok: true,
@@ -949,6 +998,7 @@ function buildDashboardSnapshot(actor = null) {
     nodes,
     events,
     alerts,
+    queueSummary,
     uploadAssignments: assignments
   }
   const totalMs = Date.now() - now
@@ -1465,15 +1515,13 @@ async function route(req, res) {
     }
     const item = store.completeQueueFileDelivery(params.hostLabel, body?.botName || '', params.fileId, deliveryStatus, body?.failedReason)
     if (!item) return notFound(res)
-    if (deliveryStatus === 'failed' || item.queueStatus === 'failed-final') {
+    if (deliveryStatus === 'failed') {
       store.addEvent({
         operator: `bot:${body?.botName || params.hostLabel}`,
-        action: item.queueStatus === 'failed-final' ? 'queue-file-failed-final' : 'queue-file-retry',
-        message: item.queueStatus === 'failed-final'
-          ? `${item.originalName || params.fileId} reached max queue attempts.`
-          : `${item.originalName || params.fileId} failed and will be retried.`,
+        action: 'queue-file-retry',
+        message: `${item.originalName || params.fileId} failed on this bot and will stay retryable.`,
         details: { fileId: params.fileId, hostLabel: params.hostLabel, botName: body?.botName || null, failedReason: body?.failedReason || null },
-        level: item.queueStatus === 'failed-final' ? 'error' : 'warn'
+        level: 'warn'
       })
     }
     return sendJson(res, 200, { ok: true, item })

@@ -92,6 +92,47 @@ h1 {
   justify-content: end;
 }
 
+.queue-tracker {
+  min-width: 156px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(14, 28, 40, 0.82);
+  color: var(--muted);
+}
+
+.queue-tracker span,
+.queue-tracker small {
+  display: block;
+}
+
+.queue-tracker span {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.68rem;
+}
+
+.queue-tracker strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink);
+  font-size: 1.65rem;
+  line-height: 1;
+}
+
+.queue-tracker small {
+  margin-top: 5px;
+  font-size: 0.76rem;
+}
+
+.queue-tracker-active {
+  border-color: rgba(28, 143, 114, 0.42);
+}
+
+.queue-tracker-warn {
+  border-color: rgba(209, 154, 42, 0.45);
+}
+
 .alerts-bar {
   display: grid;
   gap: 10px;
