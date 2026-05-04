@@ -1404,7 +1404,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       }
 
       const nextQueuedNbt = config.files?.moveToFinishedFolder === true ? getNextNbtFile(config) : null
-      if (nextQueuedNbt && !isRuntimeStopRequested(config)) {
+      if (nextQueuedNbt && !runInfo?.postPrintPending && !isRuntimeStopRequested(config)) {
         console.log(`[STATE] Continuing with next map: ${path.basename(nextQueuedNbt)}`)
         dashboardRuntime?.setCurrentNbt(path.basename(nextQueuedNbt))
         pendingStart = true
@@ -5331,6 +5331,7 @@ async function countItemAcrossChests(bot, config, itemName, chests, label) {
   let count = 0
   let checked = 0
   let failed = 0
+  const failures = []
   for (const chest of chests) {
     assertRuntimeContinue(bot, config, 'stopping-during-stock-check')
     let container = null
@@ -5362,7 +5363,10 @@ async function countItemAcrossChests(bot, config, itemName, chests, label) {
       }
     } catch (err) {
       failed += 1
-      console.log(`[SUPPORT-STOCK-WARN] Could not check ${label} chest at ${chest.position.x} ${chest.position.y} ${chest.position.z}: ${err?.message || err}`)
+      failures.push({
+        position: chest.position,
+        message: String(err?.message || err)
+      })
     } finally {
       if (container) {
         try { container.close() } catch { }
@@ -5370,7 +5374,7 @@ async function countItemAcrossChests(bot, config, itemName, chests, label) {
     }
   }
 
-  return { count, checked, failed }
+  return { count, checked, failed, failures }
 }
 
 async function checkSupportStockWarningsOnce(bot, config, reason = 'map-run') {
@@ -5398,7 +5402,7 @@ async function checkSupportStockWarningsOnce(bot, config, reason = 'map-run') {
     const minItems = minStacks * stackSize
     const result = await countItemAcrossChests(bot, config, itemName, chests, label)
     if (result.checked <= 0) {
-      reportSupportStockWarning(config, `${label} stock could not be checked.`, { reason, item: itemName, checked: result.checked, failed: result.failed })
+      reportSupportStockWarning(config, `${label} stock could not be checked.`, { reason, item: itemName, checked: result.checked, failed: result.failed, failures: result.failures })
       return
     }
     if (result.count < minItems) {
@@ -5409,10 +5413,15 @@ async function checkSupportStockWarningsOnce(bot, config, reason = 'map-run') {
         minItems,
         minStacks,
         checkedChests: result.checked,
-        failedChests: result.failed
+        failedChests: result.failed,
+        failures: result.failures
       })
     } else {
-      console.log(`[SUPPORT-STOCK] ${label} ok: ${result.count}/${minItems} ${itemName} across ${result.checked} chest(s).`)
+      const failedText = result.failed > 0 ? `; ${result.failed} configured location(s) skipped` : ''
+      console.log(`[SUPPORT-STOCK] ${label} ok: ${result.count}/${minItems} ${itemName} across ${result.checked} chest(s)${failedText}.`)
+      if (result.failed > 0 && advanced.debugPrints) {
+        console.log(`[SUPPORT-STOCK-DEBUG] ${label} skipped locations: ${result.failures.map((entry) => `${entry.position.x},${entry.position.y},${entry.position.z} ${entry.message}`).join(' | ')}`)
+      }
     }
   }
 
@@ -10048,7 +10057,9 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         sourceType: input.sourceType,
         sourcePath: input.sourcePath,
         sourceName: input.sourceName,
-        didWork: true
+        didWork: true,
+        postPrintPending: true,
+        postPrintFailedStep: postPrintOnlyResult?.failedStep || 'unknown'
       }
     }
     await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
@@ -10215,7 +10226,9 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       sourceType: input.sourceType,
       sourcePath: input.sourcePath,
       sourceName: input.sourceName,
-      didWork: true
+      didWork: true,
+      postPrintPending: true,
+      postPrintFailedStep: postPrintResult?.failedStep || 'unknown'
     }
   }
     await delay(toNumber(config.advanced?.postBuildDelayMs, 0))
@@ -10735,7 +10748,9 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       sourceType: input.sourceType,
       sourcePath: input.sourcePath,
       sourceName: input.sourceName,
-      didWork: true
+      didWork: true,
+      postPrintPending: true,
+      postPrintFailedStep: postPrintResult?.failedStep || 'unknown'
     }
   }
 
