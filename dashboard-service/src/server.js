@@ -839,6 +839,7 @@ function buildQueueSummary(assignments, nodes = []) {
     pending: 0,
     active: 0,
     retrying: 0,
+    requeued: 0,
     completed: 0,
     cancelled: 0,
     attention: 0,
@@ -865,10 +866,11 @@ function buildQueueSummary(assignments, nodes = []) {
     summary.remaining += 1
     if (activeStatuses.has(status)) {
       summary.active += 1
-    } else if (status === 'failed' || status === 'failed-final' || Number(item.attemptCount || 0) > 0) {
+    } else if (status === 'failed' || status === 'failed-final') {
       summary.retrying += 1
     } else {
       summary.pending += 1
+      if (Number(item.attemptCount || 0) > 0) summary.requeued += 1
     }
     const maxAttempts = Math.max(1, Number(item.maxAttempts || 3) || 3)
     if (Number(item.attemptCount || 0) >= maxAttempts) summary.attention += 1
@@ -912,7 +914,7 @@ function buildDashboardAlerts(bots, nodes, assignments) {
   })
   const retryingFailures = assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
-    return status === 'failed' || status === 'failed-final' || (status === 'pending' && Number(item.attemptCount || 0) > 0)
+    return status === 'failed' || status === 'failed-final'
   })
   const exceededAttempts = assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
@@ -964,7 +966,7 @@ function buildDashboardAlerts(bots, nodes, assignments) {
     }))
   }
   if (retryingFailures.length) {
-    alerts.push(createAlert('warn', 'queue-retrying', 'Queue retries', `${retryingFailures.length} file(s) are waiting for another attempt.`, {
+    alerts.push(createAlert('warn', 'queue-retrying', 'Queue retry needed', `${retryingFailures.length} file(s) need to be requeued after a failed attempt.`, {
       files: retryingFailures.slice(0, 20).map((item) => item.fileName)
     }))
   }

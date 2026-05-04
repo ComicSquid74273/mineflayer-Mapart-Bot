@@ -14,6 +14,7 @@ const state = {
     pending: 0,
     active: 0,
     retrying: 0,
+    requeued: 0,
     attention: 0,
     localNodeFiles: 0,
     nodeFinishedMapCount: 0,
@@ -1029,6 +1030,7 @@ function renderQueueSummary() {
   const pending = Math.max(0, Number(summary.pending || 0))
   const active = Math.max(0, Number(summary.active || 0))
   const retrying = Math.max(0, Number(summary.retrying || 0))
+  const requeued = Math.max(0, Number(summary.requeued || 0))
   const attention = Math.max(0, Number(summary.attention || 0))
   const localNodeFiles = Math.max(0, Number(summary.localNodeFiles || 0))
   const nodeFinishedMapCount = Math.max(0, Number(summary.nodeFinishedMapCount || 0))
@@ -1036,7 +1038,7 @@ function renderQueueSummary() {
   const completed = Math.max(0, Number(summary.combinedCompleted ?? Math.max(centralCompleted, nodeFinishedMapCount)))
   const total = Math.max(0, Number(summary.combinedTotal ?? (remaining + completed)))
   const parts = [`Queue ${centralRemaining} left/${centralCompleted} done`, `local ${localNodeFiles}`, `finished ${nodeFinishedMapCount}`]
-  if (pending || active || retrying) parts.push(`${pending} pending/${active} active/${retrying} retry`)
+  if (pending || active || retrying || requeued) parts.push(`${pending} pending/${active} active/${requeued} requeued/${retrying} retry-needed`)
   if (attention) parts.push(`${attention} attention`)
 
   elements.queueRemainingValue.textContent = String(remaining)
