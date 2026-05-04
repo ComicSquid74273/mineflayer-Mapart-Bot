@@ -92,6 +92,14 @@
             </select>
           </label>
           <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload To Queue</button>
+          <div id="uploadProgress" class="upload-progress hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="upload-progress-head">
+              <span id="uploadProgressText">0% uploaded</span>
+            </div>
+            <div class="upload-progress-track">
+              <div id="uploadProgressFill" class="upload-progress-fill"></div>
+            </div>
+          </div>
           <p id="uploadStatus" class="hint">No upload in progress.</p>
         </form>
         <div id="uploadAssignmentsList" class="file-list"></div>

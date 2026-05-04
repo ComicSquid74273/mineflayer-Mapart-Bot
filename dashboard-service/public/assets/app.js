@@ -89,6 +89,9 @@ const elements = {
   uploadTargetSelectText: document.getElementById('uploadTargetSelectText'),
   distributeLabel: document.getElementById('distributeLabel'),
   uploadForm: document.getElementById('uploadForm'),
+  uploadProgress: document.getElementById('uploadProgress'),
+  uploadProgressFill: document.getElementById('uploadProgressFill'),
+  uploadProgressText: document.getElementById('uploadProgressText'),
   uploadStatus: document.getElementById('uploadStatus'),
   uploadAssignmentsList: document.getElementById('uploadAssignmentsList'),
   clearDataButton: document.getElementById('clearDataButton'),
@@ -1620,6 +1623,81 @@ async function fileToBase64(file) {
   })
 }
 
+function setUploadProgress(percent, text = '') {
+  const safePercent = Number.isFinite(Number(percent))
+    ? Math.max(0, Math.min(100, Math.round(Number(percent))))
+    : null
+  if (elements.uploadProgress) {
+    elements.uploadProgress.classList.remove('hidden')
+    if (safePercent != null) {
+      elements.uploadProgress.setAttribute('aria-valuenow', String(safePercent))
+    }
+  }
+  if (elements.uploadProgressFill && safePercent != null) {
+    elements.uploadProgressFill.style.width = `${safePercent}%`
+  }
+  if (elements.uploadProgressText) {
+    elements.uploadProgressText.textContent = text || (safePercent == null ? 'Uploading...' : `${safePercent}% uploaded`)
+  }
+}
+
+function resetUploadProgress() {
+  if (elements.uploadProgress) {
+    elements.uploadProgress.classList.add('hidden')
+    elements.uploadProgress.setAttribute('aria-valuenow', '0')
+  }
+  if (elements.uploadProgressFill) {
+    elements.uploadProgressFill.style.width = '0%'
+  }
+  if (elements.uploadProgressText) {
+    elements.uploadProgressText.textContent = '0% uploaded'
+  }
+}
+
+function uploadFormDataWithProgress(url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url)
+    xhr.withCredentials = true
+    const authValue = authHeaderValue()
+    if (authValue) xhr.setRequestHeader('authorization', authValue)
+
+    xhr.upload.onprogress = (event) => {
+      if (typeof onProgress !== 'function') return
+      if (event.lengthComputable && event.total > 0) {
+        onProgress({
+          loaded: event.loaded,
+          total: event.total,
+          percent: (event.loaded / event.total) * 100
+        })
+      } else {
+        onProgress({
+          loaded: event.loaded,
+          total: 0,
+          percent: null
+        })
+      }
+    }
+
+    xhr.onload = () => {
+      let body = null
+      try {
+        body = xhr.responseText ? JSON.parse(xhr.responseText) : null
+      } catch {
+        body = null
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body)
+      } else {
+        reject(new Error(body?.error || `Upload failed: ${xhr.status}`))
+      }
+    }
+    xhr.onerror = () => reject(new Error('Upload failed: network error'))
+    xhr.onabort = () => reject(new Error('Upload cancelled'))
+    xhr.send(formData)
+  })
+}
+
 async function onUpload(event) {
   event.preventDefault()
   if (!hasPermission('canOperate')) {
@@ -1635,6 +1713,7 @@ async function onUpload(event) {
   state.uploadBusy = true
 
   try {
+    resetUploadProgress()
     const form = new FormData()
     for (const file of files) form.append('files', file, file.name)
     form.append('maxAttempts', '3')
@@ -1655,18 +1734,28 @@ async function onUpload(event) {
       }
     }
 
+    const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0)
     elements.uploadStatus.textContent = `Uploading ${files.length} file(s) to ${targetText}...`
-    const response = await fetch('/api/dashboard/uploads', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: authHeaderValue() ? { authorization: authHeaderValue() } : {},
-      body: form
+    setUploadProgress(0, totalBytes > 0 ? `0% uploaded of ${formatFileSize(totalBytes)}` : 'Starting upload...')
+    const result = await uploadFormDataWithProgress('/api/dashboard/uploads', form, ({ loaded, total, percent }) => {
+      if (percent == null) {
+        elements.uploadStatus.textContent = `Uploading ${formatFileSize(loaded)} to ${targetText}...`
+        setUploadProgress(null, `Uploaded ${formatFileSize(loaded)}`)
+        return
+      }
+      const rounded = Math.max(0, Math.min(100, Math.round(percent)))
+      const sizeText = total > 0 ? ` of ${formatFileSize(total)}` : ''
+      elements.uploadStatus.textContent = rounded >= 100
+        ? 'Upload sent. Dashboard is importing and queueing files...'
+        : `Uploading ${rounded}% to ${targetText}...`
+      setUploadProgress(rounded, rounded >= 100
+        ? '100% uploaded; processing on dashboard...'
+        : `${rounded}% uploaded (${formatFileSize(loaded)}${sizeText})`)
     })
-    const result = await response.json()
-    if (!response.ok) throw new Error(result?.error || `Upload failed: ${response.status}`)
 
     const queued = Array.isArray(result.items) ? result.items.length : 0
     const errors = Array.isArray(result.errors) ? result.errors : []
+    setUploadProgress(100, errors.length ? 'Upload completed with import warnings' : '100% uploaded and queued')
     elements.uploadStatus.textContent = errors.length
       ? `Queued ${queued} NBT file(s); ${errors.length} import error(s).`
       : `Queued ${queued} NBT file(s) for polling.`
@@ -1679,6 +1768,10 @@ async function onUpload(event) {
     state.renderCache.files = ''
     renderFiles()
     await refreshData()
+  } catch (error) {
+    setUploadProgress(null, 'Upload failed')
+    elements.uploadStatus.textContent = `Upload failed: ${error.message}`
+    throw error
   } finally {
     state.uploadBusy = false
   }
