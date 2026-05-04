@@ -2927,7 +2927,7 @@ function importNervFolderConfig(imported, baseConfig) {
   }
 
   const mapMaterial = Array.isArray(imported?.mapMaterialChests)
-    ? imported.mapMaterialChests.map(toBlockPos).filter(Boolean)
+    ? imported.mapMaterialChests.map(toMaterialSpot).filter(Boolean)
     : []
   merged.machine.mapMaterialChests = mapMaterial
 
@@ -5249,6 +5249,58 @@ function countChestWindowItems(window, itemId, itemName = null) {
     .reduce((sum, entry) => sum + toNumber(entry.stack?.count, 0), 0)
 }
 
+function getChestWindowSnapshotFingerprint(window) {
+  const inventoryStart = Number.isFinite(window?.inventoryStart) ? window.inventoryStart : 0
+  const slots = getChestWindowSlots(window)
+  return `${window?.id ?? ''}:${inventoryStart}:` + slots
+    .map((entry) => `${entry.slot}:${entry.stack?.type ?? ''}:${entry.stack?.name ?? ''}:${toNumber(entry.stack?.count, 0)}`)
+    .join('|')
+}
+
+async function waitForChestWindowSnapshotConfirmed(window, config, itemId, itemName, label) {
+  const advanced = config.advanced || {}
+  const timeoutMs = Math.max(500, toNumber(advanced.supportStockChestSyncWaitMs, toNumber(advanced.postPrintChestSyncWaitMs, 2500)))
+  const pollMs = Math.max(25, toNumber(advanced.supportStockChestPollMs, toNumber(advanced.postPrintChestPollMs, 100)))
+  const minStableMs = Math.max(100, toNumber(advanced.supportStockChestStableMs, 350))
+  const openedAt = Date.now()
+  const deadline = openedAt + timeoutMs
+  let lastFingerprint = null
+  let stableSince = 0
+  let latestCount = 0
+  let latestSlots = 0
+
+  while (Date.now() <= deadline) {
+    latestCount = countChestWindowItems(window, itemId, itemName)
+    latestSlots = getChestWindowSlots(window).length
+    const fingerprint = getChestWindowSnapshotFingerprint(window)
+    if (fingerprint === lastFingerprint) {
+      if (!stableSince) stableSince = Date.now()
+    } else {
+      lastFingerprint = fingerprint
+      stableSince = Date.now()
+    }
+
+    if (Number.isFinite(window?.inventoryStart) && stableSince && Date.now() - stableSince >= minStableMs) {
+      return {
+        count: latestCount,
+        slots: latestSlots,
+        confirmed: true,
+        durationMs: Date.now() - openedAt
+      }
+    }
+
+    await delay(pollMs)
+  }
+
+  console.log(`[SUPPORT-STOCK-WARN] ${label} chest window did not produce a stable server snapshot within ${timeoutMs}ms; using latest window state.`)
+  return {
+    count: latestCount,
+    slots: latestSlots,
+    confirmed: false,
+    durationMs: Date.now() - openedAt
+  }
+}
+
 function normalizeMachineChestList(...sources) {
   const result = []
   const seen = new Set()
@@ -5256,9 +5308,10 @@ function normalizeMachineChestList(...sources) {
     const entries = Array.isArray(source) ? source : [source]
     for (const entry of entries) {
       if (!entry) continue
-      const position = entry.position || entry
+      if (entry.enabled === false) continue
+      const position = toBlockPos(entry.position || entry)
       if (!Number.isFinite(position?.x) || !Number.isFinite(position?.y) || !Number.isFinite(position?.z)) continue
-      const accessPosition = entry.accessPosition || null
+      const accessPosition = toOpenPos(entry) || toOpenPos(entry.position) || null
       const key = `${position.x}:${position.y}:${position.z}:${accessPosition?.x ?? ''}:${accessPosition?.y ?? ''}:${accessPosition?.z ?? ''}`
       if (seen.has(key)) continue
       seen.add(key)
@@ -5282,10 +5335,31 @@ async function countItemAcrossChests(bot, config, itemName, chests, label) {
     assertRuntimeContinue(bot, config, 'stopping-during-stock-check')
     let container = null
     try {
-      container = await openContainerAt(bot, chest.position, chest.accessPosition)
-      await delay(Math.max(50, toNumber(config.advanced?.supportStockCheckSettleMs, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))))
-      count += countChestWindowItems(container, itemId, itemName)
+      try {
+        container = await openContainerAt(bot, chest.position, chest.accessPosition, {
+          config,
+          reason: `support-stock-${itemName}`,
+          accessRange: toNumber(config.advanced?.supportStockChestAccessRange, chest.accessPosition ? 1.25 : 2),
+          attempts: toNumber(config.advanced?.supportStockChestOpenAttempts, 3),
+          timeoutMs: toNumber(config.advanced?.supportStockChestOpenTimeoutMs, 2500)
+        })
+      } catch (err) {
+        if (!chest.accessPosition) throw err
+        console.log(`[SUPPORT-STOCK-WARN] Could not check ${label} chest from configured access position; retrying chest block directly: ${err?.message || err}`)
+        container = await openContainerAt(bot, chest.position, null, {
+          config,
+          reason: `support-stock-${itemName}-fallback`,
+          accessRange: toNumber(config.advanced?.supportStockChestFallbackAccessRange, 2),
+          attempts: toNumber(config.advanced?.supportStockChestOpenAttempts, 3),
+          timeoutMs: toNumber(config.advanced?.supportStockChestOpenTimeoutMs, 2500)
+        })
+      }
+      const snapshot = await waitForChestWindowSnapshotConfirmed(container, config, itemId, itemName, label)
+      count += snapshot.count
       checked += 1
+      if (config.advanced?.debugPrints) {
+        console.log(`[SUPPORT-STOCK-DEBUG] ${label} chest confirmed=${snapshot.confirmed} slots=${snapshot.slots} count=${snapshot.count} duration=${snapshot.durationMs}ms`)
+      }
     } catch (err) {
       failed += 1
       console.log(`[SUPPORT-STOCK-WARN] Could not check ${label} chest at ${chest.position.x} ${chest.position.y} ${chest.position.z}: ${err?.message || err}`)
