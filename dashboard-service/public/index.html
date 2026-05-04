@@ -15,10 +15,23 @@
         <p class="hero-copy">Live bot status, fleet controls, and NBT delivery from one page.</p>
       </div>
       <div class="hero-actions">
-        <div id="queueTracker" class="queue-tracker" title="Central queue remaining to print">
-          <span>NBT remaining</span>
-          <strong id="queueRemainingValue">0</strong>
-          <small id="queueRemainingMeta">0 pending</small>
+        <div id="queueTracker" class="queue-tracker" title="Combined central queue and local node NBT totals">
+          <span>NBT totals</span>
+          <div class="queue-tracker-grid">
+            <div>
+              <strong id="queueRemainingValue">0</strong>
+              <small>Remaining</small>
+            </div>
+            <div>
+              <strong id="queueCompletedValue">0</strong>
+              <small>Completed</small>
+            </div>
+            <div>
+              <strong id="queueTotalValue">0</strong>
+              <small>Total</small>
+            </div>
+          </div>
+          <small id="queueRemainingMeta">Queue 0 · local 0</small>
         </div>
         <div class="auth-box">
           <input id="operatorUsername" type="text" placeholder="operator">

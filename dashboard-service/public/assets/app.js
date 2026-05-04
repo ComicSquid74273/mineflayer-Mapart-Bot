@@ -7,12 +7,17 @@ const state = {
   dataFiles: [],
   uploadAssignments: [],
   queueSummary: {
+    combinedRemaining: 0,
+    combinedCompleted: 0,
+    combinedTotal: 0,
     remaining: 0,
     pending: 0,
     active: 0,
     retrying: 0,
     attention: 0,
-    localNodeFiles: 0
+    localNodeFiles: 0,
+    nodeFinishedMapCount: 0,
+    completed: 0
   },
   alerts: [],
   nbtSearch: '',
@@ -89,6 +94,8 @@ const elements = {
   refreshButton: document.getElementById('refreshButton'),
   refreshInterval: document.getElementById('refreshInterval'),
   queueRemainingValue: document.getElementById('queueRemainingValue'),
+  queueCompletedValue: document.getElementById('queueCompletedValue'),
+  queueTotalValue: document.getElementById('queueTotalValue'),
   queueRemainingMeta: document.getElementById('queueRemainingMeta'),
   queueTracker: document.getElementById('queueTracker'),
   serviceStatus: document.getElementById('serviceStatus'),
@@ -1011,24 +1018,30 @@ function renderUploadAssignments() {
 }
 
 function renderQueueSummary() {
-  if (!elements.queueRemainingValue || !elements.queueRemainingMeta) return
+  if (!elements.queueRemainingValue || !elements.queueCompletedValue || !elements.queueTotalValue || !elements.queueRemainingMeta) return
   const summary = state.queueSummary || {}
   const sig = JSON.stringify(summary)
   if (state.renderCache.queueSummary === sig) return
   state.renderCache.queueSummary = sig
 
-  const remaining = Math.max(0, Number(summary.remaining || 0))
+  const centralRemaining = Math.max(0, Number(summary.remaining || 0))
+  const centralCompleted = Math.max(0, Number(summary.completed || 0))
   const pending = Math.max(0, Number(summary.pending || 0))
   const active = Math.max(0, Number(summary.active || 0))
   const retrying = Math.max(0, Number(summary.retrying || 0))
   const attention = Math.max(0, Number(summary.attention || 0))
   const localNodeFiles = Math.max(0, Number(summary.localNodeFiles || 0))
-  const parts = [`${pending} pending`, `${active} active`]
-  if (retrying) parts.push(`${retrying} retry`)
+  const nodeFinishedMapCount = Math.max(0, Number(summary.nodeFinishedMapCount || 0))
+  const remaining = Math.max(0, Number(summary.combinedRemaining ?? (centralRemaining + localNodeFiles)))
+  const completed = Math.max(0, Number(summary.combinedCompleted ?? Math.max(centralCompleted, nodeFinishedMapCount)))
+  const total = Math.max(0, Number(summary.combinedTotal ?? (remaining + completed)))
+  const parts = [`Queue ${centralRemaining} left/${centralCompleted} done`, `local ${localNodeFiles}`, `finished ${nodeFinishedMapCount}`]
+  if (pending || active || retrying) parts.push(`${pending} pending/${active} active/${retrying} retry`)
   if (attention) parts.push(`${attention} attention`)
-  if (localNodeFiles) parts.push(`${localNodeFiles} local`)
 
   elements.queueRemainingValue.textContent = String(remaining)
+  elements.queueCompletedValue.textContent = String(completed)
+  elements.queueTotalValue.textContent = String(total)
   elements.queueRemainingMeta.textContent = parts.join(' · ')
   if (elements.queueTracker) {
     elements.queueTracker.classList.toggle('queue-tracker-warn', attention > 0 || retrying > 0)
@@ -1637,6 +1650,8 @@ async function refreshData(options = {}) {
     elements.serviceStatus.textContent = 'Service offline'
     elements.serviceStatus.className = 'status-pill status-offline'
     if (elements.queueRemainingValue) elements.queueRemainingValue.textContent = '--'
+    if (elements.queueCompletedValue) elements.queueCompletedValue.textContent = '--'
+    if (elements.queueTotalValue) elements.queueTotalValue.textContent = '--'
     if (elements.queueRemainingMeta) elements.queueRemainingMeta.textContent = 'Service offline'
     pushEvent('error', error.message)
   } finally {

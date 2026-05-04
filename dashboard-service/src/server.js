@@ -842,7 +842,11 @@ function buildQueueSummary(assignments, nodes = []) {
     completed: 0,
     cancelled: 0,
     attention: 0,
-    localNodeFiles: 0
+    localNodeFiles: 0,
+    nodeFinishedMapCount: 0,
+    combinedRemaining: 0,
+    combinedCompleted: 0,
+    combinedTotal: 0
   }
   const activeStatuses = new Set(['claimed', 'downloaded', 'printing'])
   const completedStatuses = new Set(['placed', 'completed', 'succeeded'])
@@ -872,6 +876,12 @@ function buildQueueSummary(assignments, nodes = []) {
   summary.localNodeFiles = (Array.isArray(nodes) ? nodes : []).reduce((count, node) => {
     return count + (Array.isArray(node.nodeFiles) ? node.nodeFiles.length : 0)
   }, 0)
+  summary.nodeFinishedMapCount = (Array.isArray(nodes) ? nodes : []).reduce((count, node) => {
+    return count + Math.max(0, Number(node.finishedMapCount || 0) || 0)
+  }, 0)
+  summary.combinedRemaining = summary.remaining + summary.localNodeFiles
+  summary.combinedCompleted = Math.max(summary.completed, summary.nodeFinishedMapCount)
+  summary.combinedTotal = summary.combinedRemaining + summary.combinedCompleted
   return summary
 }
 
