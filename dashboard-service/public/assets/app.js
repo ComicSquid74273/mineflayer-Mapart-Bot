@@ -204,7 +204,7 @@ function formatQueueEtaValue(value) {
     return `~${formatDuration(ms)}`
   }
   const reason = String(value.reason || '').toLowerCase()
-  if (reason === 'no-online-bots') return 'Paused'
+  if (reason === 'no-online-bots' || reason === 'no-online-nodes') return 'Paused'
   return 'n/a'
 }
 
@@ -216,10 +216,14 @@ function formatQueueEta(eta, mode = 'deployed') {
 function describeQueueEta(eta) {
   if (!eta || typeof eta !== 'object') return 'ETA n/a'
   const knownNodes = Math.max(0, Number(eta.knownNodeCount || 0))
-  const onlineBots = Math.max(0, Number(eta.onlineBotCount || 0))
-  const averageMapMs = Math.max(0, Number(eta.averageMapMs || 0))
-  const averageText = averageMapMs > 0 ? formatDuration(averageMapMs) : 'n/a'
-  return `ETA uses ${averageText}/map/bot: deployed ${formatQueueEta(eta, 'deployed')} from ${knownNodes} known node(s); online ${formatQueueEta(eta, 'online')} from ${onlineBots} online bot(s)`
+  const onlineNodes = Math.max(0, Number(eta.onlineNodeCount || 0))
+  const deployedAverageMapMs = Math.max(0, Number(eta.averageMapMs || 0))
+  const deployedAverageText = deployedAverageMapMs > 0 ? formatDuration(deployedAverageMapMs) : 'n/a'
+  const online = eta.online && typeof eta.online === 'object' ? eta.online : null
+  const observedNodes = Math.max(0, Number(online?.observedNodeCount || online?.workerCount || 0))
+  const observedAverageMapMs = Math.max(0, Number(online?.averageMapMs || 0))
+  const observedAverageText = observedAverageMapMs > 0 ? formatDuration(observedAverageMapMs) : 'n/a'
+  return `Deployed ETA uses ${deployedAverageText}/map across ${knownNodes} known node(s); online ETA uses ${observedAverageText}/map from ${observedNodes}/${onlineNodes} online node(s)`
 }
 
 function formatFileSize(bytes) {

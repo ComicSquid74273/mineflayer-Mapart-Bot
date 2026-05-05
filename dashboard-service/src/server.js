@@ -865,20 +865,83 @@ function buildFixedQueueEtaValue(remaining, workerCount, reasonWhenEmpty) {
   }
 }
 
+function buildObservedNodeQueueEtaValue(remaining, nodes = []) {
+  const onlineNodes = (Array.isArray(nodes) ? nodes : [])
+    .filter((node) => Math.max(0, Number(node?.onlineCount || 0)) > 0)
+  const timingNodes = onlineNodes
+    .map((node) => {
+      const averageDurationMs = Math.max(0, Number(node?.timing?.averageDurationMs || 0))
+      const totalCompletedMaps = Math.max(0, Number(node?.timing?.totalCompletedMaps || 0))
+      return { averageDurationMs, totalCompletedMaps }
+    })
+    .filter((item) => item.averageDurationMs > 0 && item.totalCompletedMaps > 0)
+
+  if (remaining <= 0) {
+    return {
+      available: true,
+      reason: 'complete',
+      workerCount: timingNodes.length,
+      nodeCount: onlineNodes.length,
+      observedNodeCount: timingNodes.length,
+      averageMapMs: 0,
+      ms: 0
+    }
+  }
+  if (!onlineNodes.length) {
+    return {
+      available: false,
+      reason: 'no-online-nodes',
+      workerCount: 0,
+      nodeCount: 0,
+      observedNodeCount: 0,
+      averageMapMs: null,
+      ms: null
+    }
+  }
+  if (!timingNodes.length) {
+    return {
+      available: false,
+      reason: 'no-node-timing',
+      workerCount: 0,
+      nodeCount: onlineNodes.length,
+      observedNodeCount: 0,
+      averageMapMs: null,
+      ms: null
+    }
+  }
+
+  const totalCompletedMaps = timingNodes.reduce((sum, item) => sum + item.totalCompletedMaps, 0)
+  const totalDurationMs = timingNodes.reduce((sum, item) => sum + (item.averageDurationMs * item.totalCompletedMaps), 0)
+  const observedAverageMapMs = totalCompletedMaps > 0 ? Math.round(totalDurationMs / totalCompletedMaps) : 0
+  const mapsPerMs = timingNodes.reduce((sum, item) => sum + (1 / item.averageDurationMs), 0)
+
+  return {
+    available: true,
+    reason: 'observed-node-time',
+    workerCount: timingNodes.length,
+    nodeCount: onlineNodes.length,
+    observedNodeCount: timingNodes.length,
+    averageMapMs: observedAverageMapMs,
+    ms: mapsPerMs > 0 ? Math.ceil(remaining / mapsPerMs) : null
+  }
+}
+
 function buildQueueEta(remainingCount, nodes = []) {
   const remaining = Math.max(0, Number(remainingCount || 0))
   const allNodes = Array.isArray(nodes) ? nodes : []
   const knownNodeCount = allNodes.length
   const onlineBotCount = allNodes.reduce((count, node) => count + Math.max(0, Number(node?.onlineCount || 0)), 0)
+  const onlineNodeCount = allNodes.filter((node) => Math.max(0, Number(node?.onlineCount || 0)) > 0).length
 
   return {
-    strategy: 'fixed-map-time',
+    strategy: 'deployed-fixed-online-observed-node-time',
     averageMapMs: ETA_MAP_TIME_MS,
     remaining,
     knownNodeCount,
     onlineBotCount,
+    onlineNodeCount,
     deployed: buildFixedQueueEtaValue(remaining, knownNodeCount, 'no-known-nodes'),
-    online: buildFixedQueueEtaValue(remaining, onlineBotCount, 'no-online-bots')
+    online: buildObservedNodeQueueEtaValue(remaining, allNodes)
   }
 }
 
