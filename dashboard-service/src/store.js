@@ -51,6 +51,7 @@ function createStore(baseDir) {
   const nodeInventoryFile = path.join(dataDir, 'node-inventory.json')
   const nodeLogDownloadsDir = path.join(dataDir, 'node-log-downloads')
   const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
+  const NODE_INVENTORY_FRESH_MS = Math.max(BOT_FRESH_MS, Number(process.env.DASHBOARD_NODE_INVENTORY_FRESH_MS || 3 * 60 * 1000))
   const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
   const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
   const NODE_TIMING_RECONCILE_MS = Math.max(1000, Number(process.env.DASHBOARD_NODE_TIMING_RECONCILE_MS || 10000))
@@ -759,6 +760,8 @@ function createStore(baseDir) {
       const botLastStatusMs = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
       const botAgeMs = Number.isFinite(botLastStatusMs) ? Math.max(0, nowMs - botLastStatusMs) : Number.POSITIVE_INFINITY
       const botOnline = botAgeMs <= BOT_FRESH_MS && bot.online === true
+      const inventoryStatusMs = timestampMs(inventory.nodeInventoryAt || inventory.serverStatusAt || inventory.lastStatusAt || bot.serverStatusAt || bot.lastStatusAt || bot.heartbeatAt)
+      const inventoryFresh = inventoryStatusMs > 0 && (nowMs - inventoryStatusMs) <= NODE_INVENTORY_FRESH_MS
       if (botOnline) current.onlineCount += 1
       current.botNames.push(bot.botName)
       const configFileName = path.basename(String(bot.configFileName || '').trim())
@@ -771,11 +774,12 @@ function createStore(baseDir) {
       if (botOnline && String(bot.activeState || '').trim().toLowerCase() === 'stale') current.operationalStats.staleBotCount += 1
       if (botOnline && hasRecentBotError(bot, nowMs)) current.operationalStats.errorCount += 1
       current.operationalStats.warningCount += botOnline ? countRecentWarnings(bot.warnings, nowMs) : 0
-      addNodeFileEntries(current._nodeFilesByName, inventory.nodeFiles)
-      addNodeFileEntries(current._nodeLogsByName, inventory.nodeLogs)
-      addNodeFileEntries(current._finishedMapFilesByName, botFinishedMapFiles)
-      const inventoryStatusMs = timestampMs(inventory.nodeInventoryAt || inventory.serverStatusAt || inventory.lastStatusAt || bot.serverStatusAt || bot.lastStatusAt || bot.heartbeatAt)
-      if (inventoryStatusMs >= current.latestFinishedMapStatusAtMs && (Object.prototype.hasOwnProperty.call(inventory, 'finishedMapCount') || botFinishedMapFiles.length > 0)) {
+      if (inventoryFresh) {
+        addNodeFileEntries(current._nodeFilesByName, inventory.nodeFiles)
+        addNodeFileEntries(current._nodeLogsByName, inventory.nodeLogs)
+        addNodeFileEntries(current._finishedMapFilesByName, botFinishedMapFiles)
+      }
+      if (inventoryFresh && inventoryStatusMs >= current.latestFinishedMapStatusAtMs && (Object.prototype.hasOwnProperty.call(inventory, 'finishedMapCount') || botFinishedMapFiles.length > 0)) {
         current.latestFinishedMapStatusAtMs = inventoryStatusMs
         current.finishedMapCount = reportedFinishedMapCount
       } else if (!current.latestFinishedMapStatusAtMs) {
