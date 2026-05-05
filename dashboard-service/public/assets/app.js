@@ -99,6 +99,7 @@ const elements = {
   queueCompletedValue: document.getElementById('queueCompletedValue'),
   queueTotalValue: document.getElementById('queueTotalValue'),
   queueEtaValue: document.getElementById('queueEtaValue'),
+  queueOnlineEtaValue: document.getElementById('queueOnlineEtaValue'),
   queueRemainingMeta: document.getElementById('queueRemainingMeta'),
   queueTracker: document.getElementById('queueTracker'),
   serviceStatus: document.getElementById('serviceStatus'),
@@ -194,33 +195,31 @@ function formatDuration(value) {
   return parts.slice(0, 2).join(' ')
 }
 
-function formatQueueEta(eta) {
-  if (!eta || typeof eta !== 'object') return 'Waiting'
-  if (eta.available === true) {
-    const ms = Number(eta.ms)
-    if (!Number.isFinite(ms)) return 'Waiting'
+function formatQueueEtaValue(value) {
+  if (!value || typeof value !== 'object') return 'n/a'
+  if (value.available === true) {
+    const ms = Number(value.ms)
+    if (!Number.isFinite(ms)) return 'n/a'
     if (ms <= 0) return 'Done'
     return `~${formatDuration(ms)}`
   }
-  const reason = String(eta.reason || '').toLowerCase()
-  if (reason === 'no-online-nodes') return 'Paused'
-  return 'Waiting'
+  const reason = String(value.reason || '').toLowerCase()
+  if (reason === 'no-online-bots') return 'Paused'
+  return 'n/a'
+}
+
+function formatQueueEta(eta, mode = 'deployed') {
+  const value = eta && typeof eta === 'object' ? eta[mode] : null
+  return formatQueueEtaValue(value)
 }
 
 function describeQueueEta(eta) {
-  if (!eta || typeof eta !== 'object') return 'ETA waiting for print history'
-  const reason = String(eta.reason || '').toLowerCase()
-  if (eta.available === true) {
-    if (reason === 'complete') return 'ETA complete'
-    const estimatedNodes = Math.max(0, Number(eta.estimatedNodeCount || 0))
-    const onlineNodes = Math.max(0, Number(eta.onlineNodeCount || 0))
-    const fallbackNodes = Math.max(0, Number(eta.fallbackNodeCount || 0))
-    const nodeText = estimatedNodes || onlineNodes
-    const suffix = fallbackNodes > 0 ? `; ${fallbackNodes} using fleet avg` : ''
-    return `ETA ${formatQueueEta(eta)} from ${nodeText} online node(s)${suffix}`
-  }
-  if (reason === 'no-online-nodes') return 'ETA paused: no online nodes'
-  return 'ETA waiting for print history'
+  if (!eta || typeof eta !== 'object') return 'ETA n/a'
+  const knownNodes = Math.max(0, Number(eta.knownNodeCount || 0))
+  const onlineBots = Math.max(0, Number(eta.onlineBotCount || 0))
+  const averageMapMs = Math.max(0, Number(eta.averageMapMs || 0))
+  const averageText = averageMapMs > 0 ? formatDuration(averageMapMs) : 'n/a'
+  return `ETA uses ${averageText}/map/bot: deployed ${formatQueueEta(eta, 'deployed')} from ${knownNodes} known node(s); online ${formatQueueEta(eta, 'online')} from ${onlineBots} online bot(s)`
 }
 
 function formatFileSize(bytes) {
@@ -1050,7 +1049,7 @@ function renderUploadAssignments() {
 }
 
 function renderQueueSummary() {
-  if (!elements.queueRemainingValue || !elements.queueCompletedValue || !elements.queueTotalValue || !elements.queueEtaValue || !elements.queueRemainingMeta) return
+  if (!elements.queueRemainingValue || !elements.queueCompletedValue || !elements.queueTotalValue || !elements.queueEtaValue || !elements.queueOnlineEtaValue || !elements.queueRemainingMeta) return
   const summary = state.queueSummary || {}
   const sig = JSON.stringify(summary)
   if (state.renderCache.queueSummary === sig) return
@@ -1078,6 +1077,7 @@ function renderQueueSummary() {
   elements.queueCompletedValue.textContent = String(completed)
   elements.queueTotalValue.textContent = String(total)
   elements.queueEtaValue.textContent = formatQueueEta(eta)
+  elements.queueOnlineEtaValue.textContent = `Online ${formatQueueEta(eta, 'online')}`
   elements.queueRemainingMeta.textContent = parts.join(' · ')
   if (elements.queueTracker) {
     elements.queueTracker.classList.toggle('queue-tracker-warn', attention > 0 || retrying > 0)

@@ -19,6 +19,7 @@ const SNAPSHOT_CACHE_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_CACH
 const SNAPSHOT_SLOW_STEP_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_SLOW_STEP_MS || 500))
 const SLOW_ROUTE_MS = Math.max(0, Number(process.env.DASHBOARD_SLOW_ROUTE_MS || 750))
 const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
+const ETA_MAP_TIME_MS = Math.max(60 * 1000, Number(process.env.DASHBOARD_ETA_MAP_TIME_MS || 30 * 60 * 1000))
 const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
 const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
 const MAX_REQUEST_BODY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_REQUEST_BYTES || 64 * 1024 * 1024))
@@ -838,95 +839,46 @@ function getAssignmentDisplayStatus(item) {
   return String(item.queueStatus || item.status || '').trim().toLowerCase()
 }
 
-function medianNumber(values) {
-  const sorted = values
-    .map((value) => Number(value))
-    .filter((value) => Number.isFinite(value) && value > 0)
-    .sort((left, right) => left - right)
-  if (!sorted.length) return null
-  const middle = Math.floor(sorted.length / 2)
-  return sorted.length % 2 === 1
-    ? sorted[middle]
-    : (sorted[middle - 1] + sorted[middle]) / 2
-}
-
-function nodeAverageDurationMs(node) {
-  const timing = node?.timing || {}
-  const samples = Number(timing.totalCompletedMaps || 0)
-  const averageMs = Number(timing.averageDurationMs || 0)
-  return samples > 0 && Number.isFinite(averageMs) && averageMs > 0 ? averageMs : null
+function buildFixedQueueEtaValue(remaining, workerCount, reasonWhenEmpty) {
+  const count = Math.max(0, Number(workerCount || 0))
+  if (remaining <= 0) {
+    return {
+      available: true,
+      reason: 'complete',
+      workerCount: count,
+      ms: 0
+    }
+  }
+  if (count <= 0) {
+    return {
+      available: false,
+      reason: reasonWhenEmpty,
+      workerCount: 0,
+      ms: null
+    }
+  }
+  return {
+    available: true,
+    reason: 'fixed-map-time',
+    workerCount: count,
+    ms: Math.ceil((remaining * ETA_MAP_TIME_MS) / count)
+  }
 }
 
 function buildQueueEta(remainingCount, nodes = []) {
   const remaining = Math.max(0, Number(remainingCount || 0))
   const allNodes = Array.isArray(nodes) ? nodes : []
-  const onlineNodes = allNodes.filter((node) => Number(node?.onlineCount || 0) > 0)
-  const knownDurations = allNodes.map(nodeAverageDurationMs).filter((value) => Number.isFinite(value) && value > 0)
-  const medianDurationMs = medianNumber(knownDurations)
-
-  if (remaining <= 0) {
-    return {
-      available: true,
-      reason: 'complete',
-      ms: 0,
-      onlineNodeCount: onlineNodes.length,
-      estimatedNodeCount: 0,
-      timedNodeCount: knownDurations.length,
-      fallbackNodeCount: 0,
-      medianDurationMs
-    }
-  }
-
-  if (!onlineNodes.length) {
-    return {
-      available: false,
-      reason: 'no-online-nodes',
-      ms: null,
-      onlineNodeCount: 0,
-      estimatedNodeCount: 0,
-      timedNodeCount: knownDurations.length,
-      fallbackNodeCount: 0,
-      medianDurationMs
-    }
-  }
-
-  let throughputPerMs = 0
-  let estimatedNodeCount = 0
-  let directNodeCount = 0
-  let fallbackNodeCount = 0
-
-  for (const node of onlineNodes) {
-    const directDurationMs = nodeAverageDurationMs(node)
-    const durationMs = directDurationMs || medianDurationMs
-    if (!Number.isFinite(durationMs) || durationMs <= 0) continue
-    throughputPerMs += 1 / durationMs
-    estimatedNodeCount += 1
-    if (directDurationMs) directNodeCount += 1
-    else fallbackNodeCount += 1
-  }
-
-  if (throughputPerMs <= 0 || estimatedNodeCount <= 0) {
-    return {
-      available: false,
-      reason: 'waiting-for-history',
-      ms: null,
-      onlineNodeCount: onlineNodes.length,
-      estimatedNodeCount: 0,
-      timedNodeCount: knownDurations.length,
-      fallbackNodeCount: 0,
-      medianDurationMs
-    }
-  }
+  const knownNodeCount = allNodes.length
+  const onlineBotCount = allNodes.reduce((count, node) => count + Math.max(0, Number(node?.onlineCount || 0)), 0)
 
   return {
-    available: true,
-    reason: fallbackNodeCount > 0 ? 'partial-history' : 'history',
-    ms: Math.round(remaining / throughputPerMs),
-    onlineNodeCount: onlineNodes.length,
-    estimatedNodeCount,
-    timedNodeCount: directNodeCount,
-    fallbackNodeCount,
-    medianDurationMs
+    strategy: 'fixed-map-time',
+    averageMapMs: ETA_MAP_TIME_MS,
+    remaining,
+    knownNodeCount,
+    onlineBotCount,
+    deployed: buildFixedQueueEtaValue(remaining, knownNodeCount, 'no-known-nodes'),
+    online: buildFixedQueueEtaValue(remaining, onlineBotCount, 'no-online-bots')
   }
 }
 

@@ -141,6 +141,11 @@ h1 {
   white-space: nowrap;
 }
 
+.queue-tracker-grid .queue-eta-sub {
+  color: var(--accent-strong);
+  font-size: 0.7rem;
+}
+
 .queue-tracker-active {
   border-color: rgba(28, 143, 114, 0.42);
 }
