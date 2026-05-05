@@ -269,6 +269,11 @@ h1 {
   align-items: start;
 }
 
+.compact-section-header {
+  align-items: center;
+  padding-top: 4px;
+}
+
 .collapsible-section {
   display: flex;
   flex-direction: column;

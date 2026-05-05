@@ -790,6 +790,18 @@ function listNodeReprintCommands(hostLabel) {
 
 function listUploadAssignments(limit = 150) {
   const commandCutoffMs = Date.now() - (60 * 60 * 1000)
+  const nowMs = Date.now()
+  const botStatusByName = new Map(store.listBots().map((bot) => [bot.botName, bot]))
+  const activeQueueStatuses = new Set(['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup'])
+  const displayQueueStatus = (item) => {
+    const status = String(item.queueStatus || '').trim().toLowerCase()
+    const botName = String(item.claimedByBotName || '').trim()
+    if (!botName || !activeQueueStatuses.has(status)) return item.queueStatus || null
+    const bot = botStatusByName.get(botName)
+    const lastStatusMs = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
+    const fresh = Number.isFinite(lastStatusMs) && nowMs - lastStatusMs <= BOT_FRESH_MS && bot?.online === true
+    return fresh ? item.queueStatus || null : 'held'
+  }
   const fileAssignments = store.listFiles()
     .filter((item) => item.queueMode === true || item.assignedBotName || item.assignedHostLabel || item.claimedByBotName || item.deliveryStatus !== 'unassigned')
     .map((item) => ({
@@ -803,9 +815,16 @@ function listUploadAssignments(limit = 150) {
       claimedByBotName: item.claimedByBotName || null,
       claimedByHostLabel: item.claimedByHostLabel || null,
       status: item.deliveryStatus || 'unknown',
-      queueStatus: item.queueStatus || null,
+      queueStatus: displayQueueStatus(item),
       attemptCount: Number.isFinite(Number(item.attemptCount)) ? Number(item.attemptCount) : 0,
       maxAttempts: Number.isFinite(Number(item.maxAttempts)) ? Number(item.maxAttempts) : 3,
+      localFileName: item.localFileName || null,
+      localPath: item.localPath || null,
+      lastAttemptAt: item.lastAttemptAt || null,
+      failedAt: item.failedAt || null,
+      failureHistory: Array.isArray(item.failureHistory) ? item.failureHistory.slice(-5) : [],
+      retryReason: item.retryReason || null,
+      retriedAt: item.retriedAt || null,
       createdAt: item.uploadedAt || null,
       completedAt: item.deliveredAt || null,
       resultMessage: item.failedReason || null
@@ -957,13 +976,14 @@ function buildQueueSummary(assignments, nodes = []) {
     cancelled: 0,
     attention: 0,
     localNodeFiles: 0,
+    managedLocalNodeFiles: 0,
     nodeFinishedMapCount: 0,
     combinedRemaining: 0,
     combinedCompleted: 0,
     combinedTotal: 0,
     eta: null
   }
-  const activeStatuses = new Set(['claimed', 'downloaded', 'printing'])
+  const activeStatuses = new Set(['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held'])
   const completedStatuses = new Set(['placed', 'completed', 'succeeded'])
   for (const item of assignments) {
     if (item.source === 'node-command') continue
@@ -989,9 +1009,29 @@ function buildQueueSummary(assignments, nodes = []) {
     const maxAttempts = Math.max(1, Number(item.maxAttempts || 3) || 3)
     if (Number(item.attemptCount || 0) >= maxAttempts) summary.attention += 1
   }
-  summary.localNodeFiles = (Array.isArray(nodes) ? nodes : []).reduce((count, node) => {
-    return count + (Array.isArray(node.nodeFiles) ? node.nodeFiles.length : 0)
-  }, 0)
+  const managedLocalNamesByHost = new Map()
+  for (const item of assignments) {
+    if (item.source === 'node-command') continue
+    const status = getAssignmentDisplayStatus(item) || 'pending'
+    if (completedStatuses.has(status) || status === 'cancelled') continue
+    const hostLabel = String(item.claimedByHostLabel || item.targetHostLabel || '').trim()
+    const localName = path.basename(String(item.localFileName || item.fileName || '').trim())
+    if (!hostLabel || !localName) continue
+    if (!managedLocalNamesByHost.has(hostLabel)) managedLocalNamesByHost.set(hostLabel, new Set())
+    managedLocalNamesByHost.get(hostLabel).add(localName)
+  }
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    const hostLabel = String(node?.hostLabel || '').trim()
+    const managedNames = managedLocalNamesByHost.get(hostLabel) || new Set()
+    for (const file of Array.isArray(node.nodeFiles) ? node.nodeFiles : []) {
+      const fileName = path.basename(String(file?.fileName || '').trim())
+      if (fileName && managedNames.has(fileName)) {
+        summary.managedLocalNodeFiles += 1
+      } else {
+        summary.localNodeFiles += 1
+      }
+    }
+  }
   summary.nodeFinishedMapCount = (Array.isArray(nodes) ? nodes : []).reduce((count, node) => {
     return count + Math.max(0, Number(node.finishedMapCount || 0) || 0)
   }, 0)
@@ -1022,7 +1062,7 @@ function buildDashboardAlerts(bots, nodes, assignments) {
   const errorBots = bots.filter((bot) => String(bot.lastError || '').trim())
   const heldAssignments = assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
-    if (!['claimed', 'downloaded', 'printing'].includes(status)) return false
+    if (!['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held'].includes(status)) return false
     if (!item.claimedByBotName) return false
     const bot = bots.find((entry) => entry.botName === item.claimedByBotName)
     return !bot || bot.online !== true || bot.activeState === 'stale'
@@ -1638,17 +1678,32 @@ async function route(req, res) {
     if (req.method !== 'POST') return methodNotAllowed(res)
     const body = await readBody(req)
     const deliveryStatus = String(body?.deliveryStatus || '').trim().toLowerCase()
-    if (!['downloaded', 'printing', 'placed', 'completed', 'failed'].includes(deliveryStatus)) {
-      return badRequest(res, 'deliveryStatus must be downloaded, printing, placed, completed, or failed')
+    if (!['downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held', 'placed', 'completed', 'failed'].includes(deliveryStatus)) {
+      return badRequest(res, 'deliveryStatus must be downloaded, printing, repair, post-print, cleanup, held, placed, completed, or failed')
     }
-    const item = store.completeQueueFileDelivery(params.hostLabel, body?.botName || '', params.fileId, deliveryStatus, body?.failedReason)
+    const item = store.completeQueueFileDelivery(params.hostLabel, body?.botName || '', params.fileId, deliveryStatus, body?.failedReason, {
+      localFileName: body?.localFileName || null,
+      localPath: body?.localPath || null
+    })
     if (!item) return notFound(res)
     if (deliveryStatus === 'failed') {
+      const final = item.queueStatus === 'failed-final'
       store.addEvent({
         operator: `bot:${body?.botName || params.hostLabel}`,
-        action: 'queue-file-retry',
-        message: `${item.originalName || params.fileId} failed on this bot and will stay retryable.`,
-        details: { fileId: params.fileId, hostLabel: params.hostLabel, botName: body?.botName || null, failedReason: body?.failedReason || null },
+        action: final ? 'queue-file-failed-final' : 'queue-file-auto-retry',
+        message: final
+          ? `${item.originalName || params.fileId} hit max attempts and needs operator retry.`
+          : `${item.originalName || params.fileId} failed and returned to pending.`,
+        details: {
+          fileId: params.fileId,
+          hostLabel: params.hostLabel,
+          botName: body?.botName || null,
+          failedReason: body?.failedReason || null,
+          attemptCount: item.attemptCount || 0,
+          maxAttempts: item.maxAttempts || 3,
+          previousClaimedByBotName: item.claimedByBotName || null,
+          previousClaimedByHostLabel: item.claimedByHostLabel || null
+        },
         level: 'warn'
       })
     }
@@ -2031,6 +2086,18 @@ async function route(req, res) {
     return sendJson(res, 200, { items: store.listFiles().filter((item) => item.queueMode === true || item.queueStatus), assignments: listUploadAssignments() })
   }
 
+  if (req.method === 'POST' && pathname === '/api/dashboard/queue/retry-failed-all') {
+    const body = await readBody(req)
+    const reason = body?.reason || 'operator retry all failed'
+    const result = store.retryFailedQueueFiles(reason)
+    auditOperatorAction(actor, 'queue-retry-failed-all', `Retried ${result.count} failed queue file(s).`, {
+      reason,
+      affectedFileIds: result.items.map((item) => item.fileId),
+      items: result.items
+    })
+    return sendJson(res, 200, result)
+  }
+
   params = matchPath(pathname, '/api/dashboard/queue/:fileId/release')
   if (params) {
     if (req.method !== 'POST') return methodNotAllowed(res)
@@ -2052,7 +2119,10 @@ async function route(req, res) {
     if (!item) return notFound(res)
     auditOperatorAction(actor, 'queue-retry', `Retried queue file ${item.originalName || params.fileId}.`, {
       fileId: params.fileId,
-      reason: body?.reason || null
+      reason: body?.reason || null,
+      previousClaimedByBotName: item.retryHistory?.at?.(-1)?.previousClaimedByBotName || null,
+      previousClaimedByHostLabel: item.retryHistory?.at?.(-1)?.previousClaimedByHostLabel || null,
+      previousAttemptCount: item.retryHistory?.at?.(-1)?.previousAttemptCount || null
     })
     return sendJson(res, 200, { item })
   }

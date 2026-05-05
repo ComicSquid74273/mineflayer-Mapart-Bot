@@ -15,8 +15,8 @@
         <p class="hero-copy">Live bot status, fleet controls, and NBT delivery from one page.</p>
       </div>
       <div class="hero-actions">
-        <div id="queueTracker" class="queue-tracker" title="Combined central queue and local node NBT totals">
-          <span>NBT totals</span>
+        <div id="queueTracker" class="queue-tracker" title="Central queue plus unmanaged local node NBT totals">
+          <span>NBT queue</span>
           <div class="queue-tracker-grid">
             <div>
               <strong id="queueRemainingValue">0</strong>
@@ -125,6 +125,14 @@
           </div>
           <p id="uploadStatus" class="hint">No upload in progress.</p>
         </form>
+        <div class="subsection-header compact-section-header">
+          <div>
+            <p class="panel-kicker">Retries</p>
+            <h3>Failed NBT Retry</h3>
+          </div>
+          <button id="retryAllFailedButton" class="accent-button small-button" type="button" data-action="queue-retry-all" data-permission-needed="canOperate">Retry All Failed</button>
+        </div>
+        <div id="failedQueueList" class="file-list"></div>
         <div id="uploadAssignmentsList" class="file-list"></div>
       </section>
 

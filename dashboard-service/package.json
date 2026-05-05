@@ -10,6 +10,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/store.js"
+    "check": "node --check src/server.js && node --check src/store.js && node --check public/assets/app.js",
+    "test": "node --test test"
   }
 }

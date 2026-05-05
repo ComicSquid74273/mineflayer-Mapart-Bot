@@ -991,6 +991,15 @@ function createStore(baseDir) {
     return normalized === 'placed' || normalized === 'completed' || normalized === 'succeeded' || normalized === 'cancelled'
   }
 
+  function isActiveQueueStatus(status) {
+    return ['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held'].includes(normalizeFileStatus(status, ''))
+  }
+
+  function isRetryableQueueFile(item) {
+    const status = getQueueStatus(item)
+    return status === 'failed' || status === 'failed-final' || item?.deliveryStatus === 'failed'
+  }
+
   function queueFileMatchesWorker(item, hostLabel, botName) {
     const normalizedHost = String(hostLabel || '').trim()
     const normalizedBot = String(botName || '').trim()
@@ -1235,7 +1244,7 @@ function createStore(baseDir) {
 
     const held = sortedIndexes.find(({ item }) => {
       const status = getQueueStatus(item)
-      return item.claimedByBotName === normalizedBot && ['claimed', 'downloaded', 'printing'].includes(status)
+      return item.claimedByBotName === normalizedBot && isActiveQueueStatus(status)
     })
     if (held) {
       const current = items[held.index]
@@ -1251,8 +1260,8 @@ function createStore(baseDir) {
     const next = sortedIndexes.find(({ item }) => {
       const status = getQueueStatus(item)
       if (isTerminalQueueStatus(status)) return false
-      if (['claimed', 'downloaded', 'printing'].includes(status) && item.claimedByBotName && item.claimedByBotName !== normalizedBot) return false
-      return status === 'pending' || status === 'failed' || status === 'failed-final'
+      if (isActiveQueueStatus(status)) return false
+      return status === 'pending'
     })
     if (!next) return null
 
@@ -1268,13 +1277,16 @@ function createStore(baseDir) {
       queueMode: true,
       claimCount: Math.max(0, toNumber(current.claimCount, 0)) + 1,
       lastAttemptAt: nowIso(),
-      failedReason: null
+      failedReason: null,
+      retryReason: null,
+      localFileName: null,
+      localPath: null
     }
     saveFiles(items)
     return items[next.index]
   }
 
-  function completeQueueFileDelivery(hostLabel, botName, fileId, deliveryStatus, failedReason = null) {
+  function completeQueueFileDelivery(hostLabel, botName, fileId, deliveryStatus, failedReason = null, details = null) {
     const normalizedHost = String(hostLabel || '').trim()
     const normalizedBot = String(botName || '').trim()
     const status = normalizeFileStatus(deliveryStatus, '')
@@ -1286,7 +1298,7 @@ function createStore(baseDir) {
     if (current.claimedByBotName && current.claimedByBotName !== normalizedBot) return null
     if (current.claimedByHostLabel && current.claimedByHostLabel !== normalizedHost) return null
 
-    if (status === 'downloaded' || status === 'printing') {
+    if (['downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held'].includes(status)) {
       items[index] = {
         ...current,
         claimedByBotName: normalizedBot || current.claimedByBotName || null,
@@ -1296,6 +1308,8 @@ function createStore(baseDir) {
         queueStatus: status,
         queueMode: true,
         downloadedAt: status === 'downloaded' ? nowIso() : current.downloadedAt || null,
+        localFileName: path.basename(String(details?.localFileName || current.localFileName || current.originalName || current.storedName || '')),
+        localPath: String(details?.localPath || current.localPath || '').trim() || null,
         failedReason: null
       }
       saveFiles(items)
@@ -1312,6 +1326,8 @@ function createStore(baseDir) {
         queueStatus: 'completed',
         queueMode: true,
         deliveredAt: nowIso(),
+        localFileName: path.basename(String(details?.localFileName || current.localFileName || current.originalName || current.storedName || '')),
+        localPath: String(details?.localPath || current.localPath || '').trim() || null,
         failedReason: null
       }
       saveFiles(items)
@@ -1320,6 +1336,8 @@ function createStore(baseDir) {
 
     if (status === 'failed') {
       const attemptCount = Math.max(0, toNumber(current.attemptCount, 0)) + 1
+      const maxAttempts = Math.max(1, toNumber(current.maxAttempts, 3))
+      const finalFailure = attemptCount >= maxAttempts
       const history = Array.isArray(current.failureHistory) ? current.failureHistory.slice(-19) : []
       history.push({
         botName: normalizedBot || current.claimedByBotName || null,
@@ -1330,15 +1348,16 @@ function createStore(baseDir) {
       })
       items[index] = {
         ...current,
-        claimedByBotName: null,
-        claimedByHostLabel: null,
-        claimedAt: null,
-        claimHeartbeatAt: null,
+        claimedByBotName: normalizedBot || current.claimedByBotName || null,
+        claimedByHostLabel: normalizedHost || current.claimedByHostLabel || null,
+        claimHeartbeatAt: nowIso(),
         deliveryStatus: 'failed',
-        queueStatus: 'pending',
+        queueStatus: finalFailure ? 'failed-final' : 'pending',
         queueMode: true,
         attemptCount,
         failedReason: failedReason || null,
+        failedAt: nowIso(),
+        lastAttemptAt: nowIso(),
         failureHistory: history
       }
       saveFiles(items)
@@ -1354,6 +1373,7 @@ function createStore(baseDir) {
     if (index < 0) return null
     const current = items[index]
     if (isTerminalQueueStatus(getQueueStatus(current))) return current
+    if (isActiveQueueStatus(getQueueStatus(current))) return null
     items[index] = {
       ...current,
       claimedByBotName: null,
@@ -1375,6 +1395,16 @@ function createStore(baseDir) {
     const index = items.findIndex((item) => item.fileId === fileId && isQueueFile(item))
     if (index < 0) return null
     const current = items[index]
+    if (!isRetryableQueueFile(current)) return null
+    const history = Array.isArray(current.retryHistory) ? current.retryHistory.slice(-19) : []
+    history.push({
+      retryAt: nowIso(),
+      reason: reason || null,
+      previousStatus: getQueueStatus(current),
+      previousAttemptCount: Math.max(0, toNumber(current.attemptCount, 0)),
+      previousClaimedByBotName: current.claimedByBotName || null,
+      previousClaimedByHostLabel: current.claimedByHostLabel || null
+    })
     items[index] = {
       ...current,
       claimedByBotName: null,
@@ -1385,10 +1415,55 @@ function createStore(baseDir) {
       queueStatus: 'pending',
       queueMode: true,
       attemptCount: 0,
-      failedReason: reason || null
+      failedReason: null,
+      retryReason: reason || null,
+      retryHistory: history,
+      retriedAt: nowIso()
     }
     saveFiles(items)
     return items[index]
+  }
+
+  function retryFailedQueueFiles(reason = null) {
+    const items = listFiles()
+    const affected = []
+    const next = items.map((item) => {
+      if (!isQueueFile(item) || !isRetryableQueueFile(item)) return item
+      const history = Array.isArray(item.retryHistory) ? item.retryHistory.slice(-19) : []
+      history.push({
+        retryAt: nowIso(),
+        reason: reason || null,
+        previousStatus: getQueueStatus(item),
+        previousAttemptCount: Math.max(0, toNumber(item.attemptCount, 0)),
+        previousClaimedByBotName: item.claimedByBotName || null,
+        previousClaimedByHostLabel: item.claimedByHostLabel || null
+      })
+      affected.push({
+        fileId: item.fileId,
+        originalName: item.originalName || null,
+        previousStatus: getQueueStatus(item),
+        previousAttemptCount: Math.max(0, toNumber(item.attemptCount, 0)),
+        previousClaimedByBotName: item.claimedByBotName || null,
+        previousClaimedByHostLabel: item.claimedByHostLabel || null
+      })
+      return {
+        ...item,
+        claimedByBotName: null,
+        claimedByHostLabel: null,
+        claimedAt: null,
+        claimHeartbeatAt: null,
+        deliveryStatus: 'pending',
+        queueStatus: 'pending',
+        queueMode: true,
+        attemptCount: 0,
+        failedReason: null,
+        retryReason: reason || null,
+        retryHistory: history,
+        retriedAt: nowIso()
+      }
+    })
+    if (affected.length) saveFiles(next)
+    return { count: affected.length, items: affected }
   }
 
   function completeNodeCommand(hostLabel, commandId, status, resultMessage, botName = null) {
@@ -1492,6 +1567,7 @@ function createStore(baseDir) {
     completeQueueFileDelivery,
     releaseQueueFile,
     retryQueueFile,
+    retryFailedQueueFiles,
     completeNodeCommand,
     saveNodeLogDownload,
     getNodeLogDownload,

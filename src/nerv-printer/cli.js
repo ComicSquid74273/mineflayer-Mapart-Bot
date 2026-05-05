@@ -1061,10 +1061,13 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   }
 
   async function reportQueueFileResult(fileId, deliveryStatus, failedReason = null) {
+    const active = state.activeQueueFile?.fileId === fileId ? state.activeQueueFile : null
     await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/queue/${encodeURIComponent(fileId)}/result`, 'POST', {
       deliveryStatus,
       failedReason,
-      botName
+      botName,
+      localFileName: active?.fileName || null,
+      localPath: active?.localPath || null
     })
   }
 
@@ -1229,16 +1232,30 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return reportedAny
   }
 
-  function rememberQueueFile(fileName, item) {
+  function normalizeQueueFileInfo(fileName, item = {}) {
     const safeName = path.basename(String(fileName || '').trim())
-    if (!safeName || !item?.fileId) return
-    const stateFile = readQueueState()
-    stateFile[safeName] = {
+    if (!safeName || !item?.fileId) return null
+    const localPath = item.localPath
+      ? path.resolve(process.cwd(), String(item.localPath))
+      : resolveNodeNbtPath(safeName)
+    return {
       fileId: item.fileId,
       fileName: safeName,
-      originalName: item.originalName || item.storedName || safeName,
-      rememberedAt: new Date().toISOString()
+      originalName: path.basename(String(item.originalName || item.storedName || safeName)),
+      localName: safeName,
+      localPath,
+      claimedByBotName: botName,
+      claimedByHostLabel: dashboard.hostLabel,
+      rememberedAt: item.rememberedAt || new Date().toISOString()
     }
+  }
+
+  function rememberQueueFile(fileName, item) {
+    const entry = normalizeQueueFileInfo(fileName, item)
+    if (!entry) return
+    const stateFile = readQueueState()
+    stateFile[entry.fileName] = entry
+    stateFile.__activeQueueFile = entry
     writeQueueState(stateFile)
   }
 
@@ -1247,14 +1264,41 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     if (!safeName) return null
     const entry = readQueueState()[safeName] || null
     if (entry?.fileId) {
-      state.activeQueueFile = {
-        fileId: entry.fileId,
-        fileName: safeName,
-        originalName: entry.originalName || safeName
-      }
+      state.activeQueueFile = normalizeQueueFileInfo(safeName, entry)
       return state.activeQueueFile
     }
     return null
+  }
+
+  function restoreActiveQueueFile() {
+    if (state.activeQueueFile?.fileId) return state.activeQueueFile
+    const stateFile = readQueueState()
+    const active = stateFile.__activeQueueFile
+    if (active?.fileId && active.fileName) {
+      state.activeQueueFile = normalizeQueueFileInfo(active.fileName, active)
+      return state.activeQueueFile
+    }
+    for (const [fileName, entry] of Object.entries(stateFile)) {
+      if (fileName.startsWith('__')) continue
+      if (!entry?.fileId) continue
+      state.activeQueueFile = normalizeQueueFileInfo(fileName, entry)
+      return state.activeQueueFile
+    }
+    return null
+  }
+
+  function getActiveQueueNbtPath() {
+    const active = restoreActiveQueueFile()
+    if (!active?.fileId) return null
+    const localPath = active.localPath ? path.resolve(process.cwd(), active.localPath) : resolveNodeNbtPath(active.fileName)
+    if (!fs.existsSync(localPath)) return null
+    state.activeQueueFile = {
+      ...active,
+      fileName: path.basename(localPath),
+      localName: path.basename(localPath),
+      localPath
+    }
+    return localPath
   }
 
   function forgetQueueFile(fileName) {
@@ -1262,7 +1306,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     if (!safeName) return
     const stateFile = readQueueState()
     if (!stateFile[safeName]) return
+    const active = stateFile.__activeQueueFile
     delete stateFile[safeName]
+    if (active?.fileName === safeName) delete stateFile.__activeQueueFile
     writeQueueState(stateFile)
   }
 
@@ -1457,7 +1503,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     state.activeQueueFile = {
       fileId: item.fileId,
       fileName: localName,
-      originalName: fileName
+      originalName: fileName,
+      localName,
+      localPath: targetPath,
+      claimedByBotName: botName,
+      claimedByHostLabel: dashboard.hostLabel
     }
     rememberQueueFile(localName, item)
     printingIntentActive = true
@@ -1632,6 +1682,16 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     setPhase(nextPhase, detail = null) {
       state.phase = normalizeDashboardPhase(nextPhase)
       state.statusDetail = detail ? String(detail).trim() : state.phase
+      const queueStatus = ['printing', 'repair', 'post-print', 'cleanup'].includes(state.phase) ? state.phase : null
+      if (queueStatus && state.activeQueueFile?.fileId && state.activeQueueFile.lastReportedQueueStatus !== queueStatus) {
+        state.activeQueueFile.lastReportedQueueStatus = queueStatus
+        void reportQueueFileResult(state.activeQueueFile.fileId, queueStatus).catch((error) => {
+          logThrottled(`dashboard-queue-phase-${botName}`, `[DASHBOARD-WARN] queue phase report failed for ${botName}: ${error?.message || error}`, {
+            intervalMs: 30000,
+            level: 'warn'
+          })
+        })
+      }
       noteActivity()
     },
     setStatusDetail(detail) {
@@ -1749,7 +1809,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       return restoreQueueFileForNbt(filePathOrName)
     },
     getActiveQueueFile() {
-      return state.activeQueueFile
+      return restoreActiveQueueFile()
+    },
+    getActiveQueueNbtPath() {
+      return getActiveQueueNbtPath()
     },
     consumeStartRequest() {
       if (!state.startRequested) return false
@@ -1781,8 +1844,20 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
     const shouldStart = pendingStart || runtimeControl?.consumeStartRequest() === true || dashboardRuntime?.consumeStartRequest() === true
     pendingStart = false
 
+    const activeQueueFile = dashboardRuntime?.getActiveQueueFile?.()
+    const activeQueuePath = dashboardRuntime?.getActiveQueueNbtPath?.()
+    if (activeQueueFile?.fileId && !activeQueuePath) {
+      const message = `claimed dashboard queue NBT is missing locally: ${activeQueueFile.fileName || activeQueueFile.originalName || activeQueueFile.fileId}`
+      console.warn(`[DASHBOARD-WARN] ${message}`)
+      await dashboardRuntime?.completeActiveQueueFile?.('failed', message)
+      dashboardRuntime?.setCurrentNbt(null)
+      dashboardRuntime?.setPhase('idle')
+      await delay(1000)
+      continue
+    }
+
     if (!shouldStart) {
-      const localQueuedNbt = getNextNbtFile(config)
+      const localQueuedNbt = activeQueuePath || getNextNbtFile(config)
       if (localQueuedNbt) {
         console.log(`[DASHBOARD] Auto-starting queued local NBT: ${path.basename(localQueuedNbt)}`)
         pendingStart = true
@@ -1794,13 +1869,15 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       continue
     }
 
-    const nextNbt = getNextNbtFile(config)
+    const claimedQueueNbt = activeQueuePath
+    const nextNbt = claimedQueueNbt || getNextNbtFile(config)
     runtimeControl?.markRunStarted('runtime')
     dashboardRuntime?.restoreQueueFileForNbt?.(nextNbt)
     dashboardRuntime?.setCurrentNbt(nextNbt ? path.basename(nextNbt) : null)
     dashboardRuntime?.setPhase('printing')
     try {
       config.__runtimeControl = runtimeControl || null
+      config.__dashboardQueueNbtPath = claimedQueueNbt || null
       const runInfo = await runPrint(bot, config, dashboardRuntime)
       dashboardRuntime?.clearLastError?.()
       dashboardRuntime?.setCurrentNbt(runInfo?.sourceName || null)
@@ -1820,10 +1897,13 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       }
 
       if (!runInfo?.postPrintPending) {
+        if (claimedQueueNbt && runInfo?.sourceType === 'nbt') {
+          retireDashboardQueueNbt(runInfo.sourcePath || claimedQueueNbt, config)
+        }
         await dashboardRuntime?.completeActiveQueueFile?.('placed', 'printed and post-print workflow completed')
       }
 
-      const nextQueuedNbt = config.files?.moveToFinishedFolder === true ? getNextNbtFile(config) : null
+      const nextQueuedNbt = config.files?.moveToFinishedFolder === true && !claimedQueueNbt ? getNextNbtFile(config) : null
       if (nextQueuedNbt && !runInfo?.postPrintPending && !isRuntimeStopRequested(config)) {
         console.log(`[STATE] Continuing with next map: ${path.basename(nextQueuedNbt)}`)
         dashboardRuntime?.setCurrentNbt(path.basename(nextQueuedNbt))
@@ -1865,6 +1945,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       runtimeControl?.markRunCompleted()
       config.__runtimeControl = null
       config.__runtimeStopHandler = null
+      config.__dashboardQueueNbtPath = null
     }
   }
 }
@@ -3670,6 +3751,19 @@ function getNextNbtFile(config) {
   return path.join(folder, candidates[0])
 }
 
+function retireDashboardQueueNbt(filePath, config) {
+  const resolved = filePath ? path.resolve(process.cwd(), String(filePath)) : null
+  if (!resolved || !fs.existsSync(resolved)) return null
+  const finishedDir = path.resolve(process.cwd(), config.files?.finishedFolder || './finished-maps')
+  if (!fs.existsSync(finishedDir)) {
+    fs.mkdirSync(finishedDir, { recursive: true })
+  }
+  const toPath = resolveUniqueFilePath(path.join(finishedDir, path.basename(resolved)))
+  fs.renameSync(resolved, toPath)
+  console.log(`[FILES] Retired dashboard queue NBT ${path.basename(resolved)} to ${toPath}`)
+  return toPath
+}
+
 function targetsFromNbt(nbtData, config) {
   const machine = config.machine || {}
   const offsets = getPrintOffsets(config)
@@ -3767,8 +3861,14 @@ async function loadTargets(config) {
   }
 
   if (tryNbt) {
-    const nextNbt = getNextNbtFile(config)
+    const claimedQueuePath = config.__dashboardQueueNbtPath
+      ? path.resolve(process.cwd(), String(config.__dashboardQueueNbtPath))
+      : null
+    const nextNbt = claimedQueuePath || getNextNbtFile(config)
     if (nextNbt) {
+      if (!fs.existsSync(nextNbt)) {
+        throw new Error(`Claimed dashboard queue NBT not found: ${nextNbt}`)
+      }
       const data = await parseNbtFile(nextNbt)
       const targets = targetsFromNbt(data, config)
       return {

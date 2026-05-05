@@ -31,6 +31,7 @@
     "test:spatial-portal": "node nerv-printer.js --connection=6b6t --test-spatial-portal",
     "test:spatial": "node nerv-printer.js --connection=6b6t --test-spatial",
     "test:move5": "node src/nerv-printer/diagnostics/move-test.js",
+    "test:dashboard-queue": "npm --prefix dashboard-service test",
     "start:broadcast": "set ENABLE_QUOTE_BROADCAST=true&& node index.js",
     "graphify:build": "npm run graphify:refresh",
     "graphify:update": "npm run graphify:refresh",

@@ -17,6 +17,7 @@ const state = {
     requeued: 0,
     attention: 0,
     localNodeFiles: 0,
+    managedLocalNodeFiles: 0,
     nodeFinishedMapCount: 0,
     completed: 0,
     eta: null
@@ -41,6 +42,7 @@ const state = {
     configs: '',
     dataFiles: '',
     uploadAssignments: '',
+    failedQueue: '',
     queueSummary: '',
     events: '',
     alerts: '',
@@ -117,6 +119,8 @@ const elements = {
   uploadProgressText: document.getElementById('uploadProgressText'),
   uploadStatus: document.getElementById('uploadStatus'),
   uploadAssignmentsList: document.getElementById('uploadAssignmentsList'),
+  failedQueueList: document.getElementById('failedQueueList'),
+  retryAllFailedButton: document.getElementById('retryAllFailedButton'),
   clearDataButton: document.getElementById('clearDataButton'),
   configFilesList: document.getElementById('configFilesList'),
   dataFilesList: document.getElementById('dataFilesList'),
@@ -1028,23 +1032,87 @@ function renderUploadAssignments() {
       : (item.targetHostLabel ? `Node: ${item.targetHostLabel}` : 'Unassigned')
     const status = String(item.queueStatus || item.status || 'unknown')
     const statusClass = ['succeeded', 'placed', 'completed'].includes(status) ? 'status-online'
-      : (status === 'failed' ? 'status-offline' : 'status-neutral')
-    const claimed = item.claimedByBotName ? ` | claimed by ${item.claimedByBotName}` : ''
+      : (['failed', 'failed-final'].includes(status) ? 'status-offline' : 'status-neutral')
+    const claimed = item.claimedByBotName ? ` | claimed by ${item.claimedByBotName}${item.claimedByHostLabel ? `/${item.claimedByHostLabel}` : ''}` : ''
+    const local = item.localFileName ? ` | local ${item.localFileName}` : ''
     const result = item.resultMessage ? ` | ${item.resultMessage}` : ''
     const attempts = Number(item.maxAttempts || 0) > 0 ? ` | attempts ${Number(item.attemptCount || 0)}/${Number(item.maxAttempts || 0)}` : ''
-    const canRelease = ['claimed', 'downloaded', 'printing'].includes(status)
-    const canRetry = ['failed-final', 'failed'].includes(status)
+    const canRetry = ['failed-final', 'failed'].includes(status) || item.status === 'failed'
     return `
       <article class="file-item compact-file-item">
         <div class="file-row">
           <div>
             <strong>${escapeHtml(item.fileName || 'unknown.nbt')}</strong>
-            <p class="file-meta">${escapeHtml(target)}${escapeHtml(claimed)} | ${escapeHtml(formatTime(item.createdAt))}${escapeHtml(attempts)}${escapeHtml(result)}</p>
+            <p class="file-meta">${escapeHtml(target)}${escapeHtml(claimed)}${escapeHtml(local)} | ${escapeHtml(formatTime(item.createdAt))}${escapeHtml(attempts)}${escapeHtml(result)}</p>
           </div>
           <div class="file-actions">
             <span class="tag ${statusClass}">${escapeHtml(status)}</span>
-            ${canRelease ? `<button class="ghost-button small-button" type="button" data-action="queue-release" data-permission-needed="canOperate" data-file-id="${escapeHtml(item.id)}">Release</button>` : ''}
             ${canRetry ? `<button class="accent-button small-button" type="button" data-action="queue-retry" data-permission-needed="canOperate" data-file-id="${escapeHtml(item.id)}">Retry</button>` : ''}
+          </div>
+        </div>
+      </article>`
+  }).join('')
+}
+
+function isFailedQueueAssignment(item) {
+  const status = String(item?.queueStatus || item?.status || '').trim().toLowerCase()
+  return status === 'failed' || status === 'failed-final' || item?.status === 'failed'
+}
+
+function renderFailedQueueRetries() {
+  if (!elements.failedQueueList) return
+  const failedItems = state.uploadAssignments.filter(isFailedQueueAssignment)
+  const sig = JSON.stringify({
+    canOperate: hasPermission('canOperate'),
+    failedItems
+  })
+  if (state.renderCache.failedQueue === sig) return
+  state.renderCache.failedQueue = sig
+
+  if (elements.retryAllFailedButton) {
+    elements.retryAllFailedButton.textContent = `Retry All Failed (${failedItems.length})`
+    elements.retryAllFailedButton.disabled = !hasPermission('canOperate') || failedItems.length === 0
+  }
+
+  if (!hasPermission('canOperate')) {
+    elements.failedQueueList.innerHTML = `
+      <article class="empty-card">
+        <h3>Retries hidden</h3>
+        <p>Login as an operator to view failed queue files.</p>
+      </article>`
+    return
+  }
+
+  if (!failedItems.length) {
+    elements.failedQueueList.innerHTML = `
+      <article class="empty-card">
+        <h3>No failed queue files</h3>
+        <p>Failed and failed-final NBTs will appear here.</p>
+      </article>`
+    return
+  }
+
+  elements.failedQueueList.innerHTML = failedItems.map((item) => {
+    const status = String(item.queueStatus || item.status || 'failed')
+    const owner = item.claimedByBotName
+      ? `${item.claimedByBotName}${item.claimedByHostLabel ? ` / ${item.claimedByHostLabel}` : ''}`
+      : (item.claimedByHostLabel || 'unclaimed')
+    const failure = Array.isArray(item.failureHistory) && item.failureHistory.length
+      ? item.failureHistory[item.failureHistory.length - 1]
+      : null
+    const reason = item.resultMessage || failure?.reason || 'no reason recorded'
+    const failedAt = item.failedAt || failure?.failedAt || item.lastAttemptAt || item.createdAt
+    return `
+      <article class="file-item compact-file-item failed-queue-item">
+        <div class="file-row">
+          <div>
+            <strong>${escapeHtml(item.fileName || 'unknown.nbt')}</strong>
+            <p class="file-meta">Status ${escapeHtml(status)} | attempts ${escapeHtml(Number(item.attemptCount || 0))}/${escapeHtml(Number(item.maxAttempts || 0) || 3)} | last claimed ${escapeHtml(owner)} | failed ${escapeHtml(formatTime(failedAt))}</p>
+            <p class="file-meta">${escapeHtml(reason)}</p>
+          </div>
+          <div class="file-actions">
+            <span class="tag status-offline">${escapeHtml(status)}</span>
+            <button class="accent-button small-button" type="button" data-action="queue-retry" data-permission-needed="canOperate" data-file-id="${escapeHtml(item.id)}">Retry</button>
           </div>
         </div>
       </article>`
@@ -1066,12 +1134,13 @@ function renderQueueSummary() {
   const requeued = Math.max(0, Number(summary.requeued || 0))
   const attention = Math.max(0, Number(summary.attention || 0))
   const localNodeFiles = Math.max(0, Number(summary.localNodeFiles || 0))
+  const managedLocalNodeFiles = Math.max(0, Number(summary.managedLocalNodeFiles || 0))
   const nodeFinishedMapCount = Math.max(0, Number(summary.nodeFinishedMapCount || 0))
   const remaining = Math.max(0, Number(summary.combinedRemaining ?? (centralRemaining + localNodeFiles)))
   const completed = Math.max(0, Number(summary.combinedCompleted ?? Math.max(centralCompleted, nodeFinishedMapCount)))
   const total = Math.max(0, Number(summary.combinedTotal ?? (remaining + completed)))
   const eta = summary.eta || null
-  const parts = [`Queue ${centralRemaining} left/${centralCompleted} done`, `local ${localNodeFiles}`, `finished ${nodeFinishedMapCount}`]
+  const parts = [`Queue ${centralRemaining} left/${centralCompleted} done`, `downloaded ${managedLocalNodeFiles}`, `manual local ${localNodeFiles}`, `finished ${nodeFinishedMapCount}`]
   if (pending || active || retrying || requeued) parts.push(`${pending} pending/${active} active/${requeued} requeued/${retrying} retry-needed`)
   if (attention) parts.push(`${attention} attention`)
   parts.push(describeQueueEta(eta))
@@ -1677,6 +1746,7 @@ async function refreshData(options = {}) {
     renderSummary()
     renderBots()
     renderFiles()
+    renderFailedQueueRetries()
     renderUploadAssignments()
     renderQueueSummary()
     renderNodes()
@@ -1968,6 +2038,16 @@ async function onQueueRetry(fileId) {
   await refreshData()
 }
 
+async function onQueueRetryAll() {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before retrying queue files.')
+    return
+  }
+  const result = await submitJson('/api/dashboard/queue/retry-failed-all', { reason: 'dashboard-ui retry all failed' })
+  pushEvent('info', `Queued ${Number(result.count || 0)} failed file(s) for retry`)
+  await refreshData()
+}
+
 async function onDeleteLog(fileName) {
   if (!hasPermission('canManageOperators')) {
     pushEvent('warn', 'Admin permission required before deleting log files.')
@@ -2104,6 +2184,8 @@ document.addEventListener('click', async (event) => {
       await onQueueRelease(button.dataset.fileId || '')
     } else if (button.dataset.action === 'queue-retry') {
       await onQueueRetry(button.dataset.fileId || '')
+    } else if (button.dataset.action === 'queue-retry-all') {
+      await onQueueRetryAll()
     } else if (button.dataset.action === 'download-node-log') {
       await downloadNodeLogFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
       pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
