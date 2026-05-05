@@ -652,11 +652,10 @@ function restoreFormState(snapshot) {
   if (snapshot.uploadNode && Array.from(elements.uploadNodeSelect.options).some((option) => option.value === snapshot.uploadNode)) {
     elements.uploadNodeSelect.value = snapshot.uploadNode
   }
-  if (snapshot.distribute) {
-    elements.distributeCheckbox.checked = true
-    elements.uploadTargetSelectLabel.style.display = 'none'
-    elements.uploadNodeSelect.required = false
-  }
+  const distribute = snapshot.distribute !== false
+  elements.distributeCheckbox.checked = distribute
+  elements.uploadTargetSelectLabel.style.display = distribute ? 'none' : ''
+  elements.uploadNodeSelect.required = !distribute
 }
 
 function renderSummary() {

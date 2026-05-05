@@ -100,17 +100,17 @@
           <label>
             <span>Target type</span>
             <select id="uploadTargetType">
-              <option value="bot">Individual bots</option>
               <option value="node">Nodes / shared folders</option>
+              <option value="bot">Individual bots</option>
             </select>
           </label>
           <label class="checkbox-row">
             <input id="distributeCheckbox" type="checkbox" checked>
             <span id="distributeLabel">Use central queue: any eligible bot can poll later</span>
           </label>
-          <label id="uploadTargetSelectLabel">
+          <label id="uploadTargetSelectLabel" style="display:none">
             <span id="uploadTargetSelectText">Target bot</span>
-            <select id="uploadNodeSelect" required>
+            <select id="uploadNodeSelect">
               <option value="">Select bot</option>
             </select>
           </label>
