@@ -2625,6 +2625,10 @@ function startPlatformStallReconnectWatchdog(bot, config) {
       resetBaseline(bot?.entity?.position, lastProgressToken)
       return
     }
+    if (bot.__nervPlatformWaterHoldActive || bot.__nervPlatformWaterHoldPromise) {
+      resetBaseline(bot?.entity?.position, lastProgressToken)
+      return
+    }
 
     const progress = readProgressState(progressFile)
     if (!progress || !isPlatformStallReconnectPhase(progress.phase)) {
@@ -10278,6 +10282,7 @@ async function waitForStartupSupport(bot, config, targets) {
   const pollMs = Math.max(500, toNumber(config.advanced?.startupSupportPollMs, 5000))
   const logMs = Math.max(1000, toNumber(config.advanced?.startupSupportLogMs, 15000))
   let lastLog = 0
+  let alertSent = false
 
   while (bot?._client && bot._client.state !== 'disconnected') {
     await waitForPlatformReady(bot, config, 'startup-support')
@@ -10295,7 +10300,26 @@ async function waitForStartupSupport(bot, config, targets) {
 
     const probe = probeStartupSupport(bot, targets)
     const ratio = probe.sampleSize > 0 ? probe.supportCount / probe.sampleSize : 1
-    if (ratio >= minRatio) return probe
+    if (ratio >= minRatio) {
+      clearDashboardAlert(config, 'platform-support')
+      return probe
+    }
+    if (!alertSent) {
+      const message = `Platform support not ready (${probe.supportCount}/${probe.sampleSize}); waiting for chunks or platform repair`
+      setDashboardAlert(config, 'platform-support', message, {
+        supportCount: probe.supportCount,
+        sampleSize: probe.sampleSize,
+        ratio,
+        minRatio
+      }, 'critical')
+      reportDashboardWarning(config, 'platform-support', message, {
+        supportCount: probe.supportCount,
+        sampleSize: probe.sampleSize,
+        ratio,
+        minRatio
+      })
+      alertSent = true
+    }
 
     const now = Date.now()
     if (now - lastLog >= logMs) {
@@ -13916,7 +13940,21 @@ async function waitForPlatformWaterClear(bot, config, targets = null, reason = '
 
     stopBotMovement(bot)
     closeCurrentWindowIfOpen(bot, reason)
+    bot.__nervPlatformWaterHoldActive = true
     config?.__dashboardRuntime?.setPhase?.('cleanup', 'water-on-platform-hold')
+    const initialMessage = `Water on platform layer y=${initial.bounds?.y ?? 'unknown'}; waiting for real player cleanup`
+    setDashboardAlert(config, 'platform-water', initialMessage, {
+      reason,
+      y: initial.bounds?.y ?? null,
+      sample: initial.water.slice(0, 12),
+      elapsedMs: 0
+    }, 'critical')
+    reportDashboardWarning(config, 'platform-water', initialMessage, {
+      reason,
+      y: initial.bounds?.y ?? null,
+      sample: initial.water.slice(0, 12)
+    })
+    alertSent = true
     console.log(`[PLATFORM-WATER-HOLD] Paused ${reason}; water found on carpet layer y=${initial.bounds?.y ?? 'unknown'} at ${initial.water.slice(0, 4).map((pos) => `${pos.x},${pos.y},${pos.z}`).join(' ')}`)
 
     while (bot?._client && bot._client.state !== 'disconnected' && bot.__nervSessionActive !== false) {
@@ -13965,6 +14003,7 @@ async function waitForPlatformWaterClear(bot, config, targets = null, reason = '
   try {
     await bot.__nervPlatformWaterHoldPromise
   } finally {
+    bot.__nervPlatformWaterHoldActive = false
     bot.__nervPlatformWaterHoldPromise = null
   }
 }
