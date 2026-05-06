@@ -451,6 +451,8 @@
     "hostLabel": "Dashboard",
     "heartbeatMs": 5000,
     "commandPollMs": 3000,
+    "queuePrefetchHighWater": 10,
+    "queuePrefetchLowWater": 3,
     "idleWindowMs": 15000,
     "staleMs": 20000
   }

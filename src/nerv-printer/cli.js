@@ -462,6 +462,8 @@ function getDashboardConfig(config) {
     hostLabel: String(raw?.hostLabel || process.env.NERV_DASHBOARD_HOST_LABEL || process.env.COMPUTERNAME || os.hostname() || 'unknown-host').trim(),
     heartbeatMs: Math.max(1000, toNumber(raw?.heartbeatMs, 5000)),
     commandPollMs: Math.max(1000, toNumber(raw?.commandPollMs, 3000)),
+    queuePrefetchHighWater: Math.max(1, Math.floor(toNumber(raw?.queuePrefetchHighWater, 10))),
+    queuePrefetchLowWater: Math.max(0, Math.floor(toNumber(raw?.queuePrefetchLowWater, 3))),
     nodeInventoryScanMs: Math.max(5000, toNumber(raw?.nodeInventoryScanMs, 60000)),
     idleWindowMs: Math.max(3000, toNumber(raw?.idleWindowMs, 15000)),
     staleMs: Math.max(5000, toNumber(raw?.staleMs, 20000))
@@ -736,6 +738,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     startRequested: false,
     stopRequested: false,
     commandBusy: false,
+    queueBatchLimited: false,
     heartbeatTimer: null,
     commandTimer: null,
     stopped: false
@@ -1060,8 +1063,8 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     })
   }
 
-  async function reportQueueFileResult(fileId, deliveryStatus, failedReason = null) {
-    const active = state.activeQueueFile?.fileId === fileId ? state.activeQueueFile : null
+  async function reportQueueFileResult(fileId, deliveryStatus, failedReason = null, fileInfo = null) {
+    const active = fileInfo || (state.activeQueueFile?.fileId === fileId ? state.activeQueueFile : null)
     await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/queue/${encodeURIComponent(fileId)}/result`, 'POST', {
       deliveryStatus,
       failedReason,
@@ -1083,6 +1086,20 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       botName
     })
     return response.body?.item || null
+  }
+
+  async function claimNextQueueFiles(limit = 1) {
+    const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/queue/claim-next`, 'POST', {
+      botName,
+      limit
+    })
+    const items = Array.isArray(response.body?.items)
+      ? response.body.items.filter(Boolean)
+      : (response.body?.item ? [response.body.item] : [])
+    return {
+      items,
+      batchPolicy: response.body?.batchPolicy || null
+    }
   }
 
   async function claimNextNodeCommand() {
@@ -1246,17 +1263,52 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       localPath,
       claimedByBotName: botName,
       claimedByHostLabel: dashboard.hostLabel,
+      queueOrderAt: item.queueOrderAt || item.rememberedAt || item.claimedAt || item.uploadedAt || new Date().toISOString(),
       rememberedAt: item.rememberedAt || new Date().toISOString()
     }
   }
 
-  function rememberQueueFile(fileName, item) {
+  function rememberQueueFile(fileName, item, options = {}) {
     const entry = normalizeQueueFileInfo(fileName, item)
     if (!entry) return
     const stateFile = readQueueState()
     stateFile[entry.fileName] = entry
-    stateFile.__activeQueueFile = entry
+    if (options.active !== false) stateFile.__activeQueueFile = entry
     writeQueueState(stateFile)
+  }
+
+  function listRememberedQueueFiles() {
+    const stateFile = readQueueState()
+    return Object.entries(stateFile)
+      .filter(([fileName, entry]) => !fileName.startsWith('__') && entry?.fileId)
+      .map(([fileName, entry]) => normalizeQueueFileInfo(fileName, entry))
+      .filter(Boolean)
+      .sort((left, right) => {
+        const byOrder = String(left.queueOrderAt || '').localeCompare(String(right.queueOrderAt || ''))
+        if (byOrder !== 0) return byOrder
+        return String(left.fileName || '').localeCompare(String(right.fileName || ''), undefined, { numeric: true, sensitivity: 'base' })
+      })
+  }
+
+  function findRememberedQueueFileById(fileId) {
+    const wanted = String(fileId || '').trim()
+    if (!wanted) return null
+    return listRememberedQueueFiles().find((entry) => String(entry.fileId || '') === wanted) || null
+  }
+
+  function queueFileExists(entry) {
+    if (!entry?.fileName) return false
+    const localPath = entry.localPath ? path.resolve(process.cwd(), entry.localPath) : resolveNodeNbtPath(entry.fileName)
+    return fs.existsSync(localPath)
+  }
+
+  function countLocalQueueFiles() {
+    return listRememberedQueueFiles().filter((entry) => queueFileExists(entry)).length
+  }
+
+  function hasNonDashboardLocalNbtWork() {
+    const remembered = new Set(listRememberedQueueFiles().map((entry) => entry.fileName))
+    return listNodeNbtFiles().some((item) => !remembered.has(item.fileName))
   }
 
   function restoreQueueFileForNbt(filePathOrName) {
@@ -1265,6 +1317,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const entry = readQueueState()[safeName] || null
     if (entry?.fileId) {
       state.activeQueueFile = normalizeQueueFileInfo(safeName, entry)
+      const stateFile = readQueueState()
+      stateFile.__activeQueueFile = state.activeQueueFile
+      writeQueueState(stateFile)
       return state.activeQueueFile
     }
     return null
@@ -1278,10 +1333,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       state.activeQueueFile = normalizeQueueFileInfo(active.fileName, active)
       return state.activeQueueFile
     }
-    for (const [fileName, entry] of Object.entries(stateFile)) {
-      if (fileName.startsWith('__')) continue
-      if (!entry?.fileId) continue
-      state.activeQueueFile = normalizeQueueFileInfo(fileName, entry)
+    const nextQueued = listRememberedQueueFiles().find((entry) => queueFileExists(entry))
+    if (nextQueued?.fileId) {
+      state.activeQueueFile = nextQueued
+      stateFile.__activeQueueFile = state.activeQueueFile
+      writeQueueState(stateFile)
       return state.activeQueueFile
     }
     return null
@@ -1475,12 +1531,12 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return listNodeNbtFiles().length > 0
   }
 
-  async function handleQueueFileAssignment() {
-    await flushQueueResultOutbox()
-    if (hasPendingQueueResults()) return false
-    if (hasLocalNbtWorkPending()) return false
-    const item = await claimNextQueueFile()
-    if (!item) return false
+  async function downloadQueueFile(item) {
+    const existing = findRememberedQueueFileById(item?.fileId)
+    if (existing && queueFileExists(existing)) {
+      return { ...existing, downloaded: false }
+    }
+
     const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
     const fileName = path.basename(String(item.originalName || item.storedName || `${item.fileId}.nbt`))
     const targetPath = resolveUniqueFilePath(path.join(folder, fileName))
@@ -1498,9 +1554,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       }
       throw error
     }
+
     const localName = path.basename(targetPath)
-    state.currentNbt = localName
-    state.activeQueueFile = {
+    const localInfo = {
       fileId: item.fileId,
       fileName: localName,
       originalName: fileName,
@@ -1509,21 +1565,53 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       claimedByBotName: botName,
       claimedByHostLabel: dashboard.hostLabel
     }
-    rememberQueueFile(localName, item)
-    printingIntentActive = true
-    runtimeControl?.requestStart('dashboard-queue')
-    state.startRequested = true
-    state.stopRequested = false
-    invalidateNodeInventoryCache()
-    noteActivity()
+    rememberQueueFile(localName, { ...item, ...localInfo }, { active: false })
     try {
-      await reportQueueFileResult(item.fileId, 'downloaded')
-      await reportQueueFileResult(item.fileId, 'printing')
+      await reportQueueFileResult(item.fileId, 'downloaded', null, localInfo)
     } catch (error) {
       logThrottled(`dashboard-queue-progress-${botName}`, `[DASHBOARD-WARN] queue progress report will catch up on final result: ${error?.message || error}`, {
         intervalMs: 30000,
         level: 'warn'
       })
+    }
+    return { ...localInfo, downloaded: true }
+  }
+
+  async function handleQueueFileAssignment() {
+    await flushQueueResultOutbox()
+    if (hasPendingQueueResults()) return false
+    if (hasNonDashboardLocalNbtWork()) return false
+
+    const highWater = Math.max(1, dashboard.queuePrefetchHighWater)
+    const lowWater = Math.min(highWater, Math.max(0, dashboard.queuePrefetchLowWater))
+    const localQueueCount = countLocalQueueFiles()
+    if (localQueueCount <= 0) state.queueBatchLimited = false
+    if (state.queueBatchLimited && localQueueCount > 0) return false
+    if (localQueueCount >= lowWater && localQueueCount > 0) return false
+
+    const claimLimit = Math.max(1, highWater - localQueueCount)
+    const claim = await claimNextQueueFiles(claimLimit)
+    const items = claim.items
+    if (!items.length) return false
+    state.queueBatchLimited = claim.batchPolicy?.batchLimited === true
+
+    let downloadedCount = 0
+    for (const item of items) {
+      const result = await downloadQueueFile(item)
+      if (result?.downloaded) downloadedCount += 1
+    }
+
+    const canStartBufferedQueue = runtimeControl?.isRunActive?.() !== true && !state.currentNbt && !progressBlocksQueue(currentProgress())
+    if (canStartBufferedQueue && countLocalQueueFiles() > 0) {
+      printingIntentActive = true
+      runtimeControl?.requestStart('dashboard-queue')
+      state.startRequested = true
+      state.stopRequested = false
+    }
+    invalidateNodeInventoryCache()
+    noteActivity()
+    if (downloadedCount > 0) {
+      console.log(`[DASHBOARD] Prefetched ${downloadedCount} dashboard queue NBT${downloadedCount === 1 ? '' : 's'}; local buffer=${countLocalQueueFiles()}/${highWater}`)
     }
     return true
   }
@@ -3134,6 +3222,8 @@ function createDefaultConfig() {
       hostLabel: '',
       heartbeatMs: 5000,
       commandPollMs: 3000,
+      queuePrefetchHighWater: 10,
+      queuePrefetchLowWater: 3,
       idleWindowMs: 15000,
       staleMs: 20000
     },

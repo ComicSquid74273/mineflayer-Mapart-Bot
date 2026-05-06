@@ -590,6 +590,8 @@ Current behavior:
 | `dashboard.hostLabel` | empty | Logical host label sent with status updates. | Set this on multi-host deployments so operators can distinguish machines. |
 | `dashboard.heartbeatMs` | `5000` | Status POST interval in ms. | Lower gives fresher status; higher reduces traffic. |
 | `dashboard.commandPollMs` | `3000` | Command polling interval in ms. | Lower reacts faster to operator actions. |
+| `dashboard.queuePrefetchHighWater` | `10` | Maximum dashboard queue NBTs a node keeps locally buffered. | Refilled by batch claim when the local dashboard queue buffer drops below the low-water mark. |
+| `dashboard.queuePrefetchLowWater` | `3` | Local dashboard queue buffer threshold that triggers refill. | The dashboard caps batch claims to one file while pending queue depth is below `10 * knownNodes`. |
 | `dashboard.idleWindowMs` | `15000` | Idle classification window in ms. | Raise if the bot often pauses briefly between phases. |
 | `dashboard.staleMs` | `20000` | Stale classification window in ms. | Raise if public-server lag causes long apparent inactivity. |
 

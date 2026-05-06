@@ -55,6 +55,8 @@ function createStore(baseDir) {
   const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
   const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
   const NODE_TIMING_RECONCILE_MS = Math.max(1000, Number(process.env.DASHBOARD_NODE_TIMING_RECONCILE_MS || 10000))
+  const QUEUE_BATCH_HIGH_WATER = Math.max(1, Number(process.env.DASHBOARD_QUEUE_BATCH_HIGH_WATER || 10))
+  const QUEUE_BATCH_MAX_CLAIM = Math.max(1, Number(process.env.DASHBOARD_QUEUE_BATCH_MAX_CLAIM || 10))
   const COUNTED_NODE_PHASES = new Set(['printing', 'repair', 'rescan', 'post-print', 'cleanup'])
   const HOLD_NODE_PHASES = new Set([])
   const nextNodeTimingReconcileAtByHost = new Map()
@@ -1231,10 +1233,31 @@ function createStore(baseDir) {
     return items[index]
   }
 
-  function claimNextQueueFile(hostLabel, botName) {
+  function isPendingQueueCandidate(item) {
+    const status = getQueueStatus(item)
+    if (isTerminalQueueStatus(status)) return false
+    if (isActiveQueueStatus(status)) return false
+    return status === 'pending'
+  }
+
+  function getQueueBatchPolicy(limit = 1) {
+    const requestedLimit = Math.max(1, Math.min(QUEUE_BATCH_MAX_CLAIM, Math.floor(toNumber(limit, 1))))
+    const knownNodeCount = Math.max(1, listNodes().length || 0)
+    const pendingQueueCount = listFiles().filter((item) => isQueueFile(item) && isPendingQueueCandidate(item)).length
+    const threshold = knownNodeCount * QUEUE_BATCH_HIGH_WATER
+    return {
+      requestedLimit,
+      knownNodeCount,
+      pendingQueueCount,
+      threshold,
+      batchLimited: requestedLimit > 1 && pendingQueueCount < threshold
+    }
+  }
+
+  function claimNextQueueFiles(hostLabel, botName, limit = 1) {
     const normalizedHost = String(hostLabel || '').trim()
     const normalizedBot = String(botName || '').trim()
-    if (!normalizedHost || !normalizedBot) return null
+    if (!normalizedHost || !normalizedBot) return []
 
     const items = listFiles()
     const sortedIndexes = items
@@ -1242,48 +1265,63 @@ function createStore(baseDir) {
       .filter(({ item }) => isQueueFile(item) && queueFileMatchesWorker(item, normalizedHost, normalizedBot))
       .sort((left, right) => String(left.item.uploadedAt || '').localeCompare(String(right.item.uploadedAt || '')))
 
-    const held = sortedIndexes.find(({ item }) => {
+    const policy = getQueueBatchPolicy(limit)
+    const requestedLimit = policy.requestedLimit
+    const lowQueueDepth = policy.batchLimited
+    const claimed = []
+    let changed = false
+
+    for (const held of sortedIndexes.filter(({ item }) => {
       const status = getQueueStatus(item)
       return item.claimedByBotName === normalizedBot && isActiveQueueStatus(status)
-    })
-    if (held) {
+    })) {
+      if (claimed.length >= requestedLimit) break
       const current = items[held.index]
       items[held.index] = {
         ...current,
         claimedByHostLabel: normalizedHost,
         claimHeartbeatAt: nowIso()
       }
-      saveFiles(items)
-      return items[held.index]
+      claimed.push(items[held.index])
+      changed = true
     }
 
-    const next = sortedIndexes.find(({ item }) => {
-      const status = getQueueStatus(item)
-      if (isTerminalQueueStatus(status)) return false
-      if (isActiveQueueStatus(status)) return false
-      return status === 'pending'
-    })
-    if (!next) return null
+    const newClaimLimit = lowQueueDepth
+      ? Math.min(1, Math.max(0, requestedLimit - claimed.length))
+      : Math.max(0, requestedLimit - claimed.length)
+    let newClaimCount = 0
 
-    const current = items[next.index]
-    items[next.index] = {
-      ...current,
-      claimedByBotName: normalizedBot,
-      claimedByHostLabel: normalizedHost,
-      claimedAt: nowIso(),
-      claimHeartbeatAt: nowIso(),
-      deliveryStatus: 'claimed',
-      queueStatus: 'claimed',
-      queueMode: true,
-      claimCount: Math.max(0, toNumber(current.claimCount, 0)) + 1,
-      lastAttemptAt: nowIso(),
-      failedReason: null,
-      retryReason: null,
-      localFileName: null,
-      localPath: null
+    for (const next of sortedIndexes.filter(({ item }) => isPendingQueueCandidate(item))) {
+      if (newClaimCount >= newClaimLimit) break
+
+      const current = items[next.index]
+      items[next.index] = {
+        ...current,
+        claimedByBotName: normalizedBot,
+        claimedByHostLabel: normalizedHost,
+        claimedAt: nowIso(),
+        claimHeartbeatAt: nowIso(),
+        deliveryStatus: 'claimed',
+        queueStatus: 'claimed',
+        queueMode: true,
+        claimCount: Math.max(0, toNumber(current.claimCount, 0)) + 1,
+        lastAttemptAt: nowIso(),
+        failedReason: null,
+        retryReason: null,
+        localFileName: null,
+        localPath: null
+      }
+      claimed.push(items[next.index])
+      newClaimCount += 1
+      changed = true
     }
-    saveFiles(items)
-    return items[next.index]
+
+    if (changed) saveFiles(items)
+    return claimed
+  }
+
+  function claimNextQueueFile(hostLabel, botName) {
+    return claimNextQueueFiles(hostLabel, botName, 1)[0] || null
   }
 
   function completeQueueFileDelivery(hostLabel, botName, fileId, deliveryStatus, failedReason = null, details = null) {
@@ -1561,6 +1599,8 @@ function createStore(baseDir) {
     getNextAssignedFile,
     claimNextNodeFile,
     claimNextQueueFile,
+    claimNextQueueFiles,
+    getQueueBatchPolicy,
     claimNextNodeCommand,
     completeFileDelivery,
     completeNodeFileDelivery,

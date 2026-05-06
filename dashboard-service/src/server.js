@@ -3,6 +3,7 @@ const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const zlib = require('zlib')
+const os = require('os')
 const { createStore } = require('./store')
 
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0'
@@ -20,6 +21,7 @@ const SNAPSHOT_SLOW_STEP_MS = Math.max(0, Number(process.env.DASHBOARD_SNAPSHOT_
 const SLOW_ROUTE_MS = Math.max(0, Number(process.env.DASHBOARD_SLOW_ROUTE_MS || 750))
 const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
 const ETA_MAP_TIME_MS = Math.max(60 * 1000, Number(process.env.DASHBOARD_ETA_MAP_TIME_MS || 30 * 60 * 1000))
+const NODE_DOWNLOAD_TIMEOUT_MS = Math.max(15000, Number(process.env.DASHBOARD_NODE_DOWNLOAD_TIMEOUT_MS || 60000))
 const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
 const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
 const MAX_REQUEST_BODY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_REQUEST_BYTES || 64 * 1024 * 1024))
@@ -289,7 +291,10 @@ function reqIsNodeDeletePath(pathname, method) {
 }
 
 function reqIsFinishedMapDeletePath(pathname, method) {
-  return method === 'POST' && Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/delete'))
+  return method === 'POST' && (
+    pathname === '/api/dashboard/nodes/finished-maps/delete-all'
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/delete'))
+  )
 }
 
 function reqIsLogDeletePath(pathname, method) {
@@ -381,6 +386,8 @@ function listDownloadableLogs() {
   const dirs = [LOGS_DIR]
   const cwdLogs = path.resolve(process.cwd(), 'logs')
   if (cwdLogs !== LOGS_DIR) dirs.push(cwdLogs)
+  const homeDir = os.homedir()
+  if (homeDir && !dirs.includes(homeDir)) dirs.push(homeDir)
 
   const seen = new Set()
   const results = []
@@ -404,6 +411,8 @@ function resolveLogFilePath(fileName) {
   const dirs = [LOGS_DIR]
   const cwdLogs = path.resolve(process.cwd(), 'logs')
   if (cwdLogs !== LOGS_DIR) dirs.push(cwdLogs)
+  const homeDir = os.homedir()
+  if (homeDir && !dirs.includes(homeDir)) dirs.push(homeDir)
   for (const dir of dirs) {
     const filePath = path.join(dir, safeName)
     if (!ensureWithinDir(filePath, dir)) continue
@@ -1620,8 +1629,13 @@ async function route(req, res) {
     if (req.method !== 'POST') return methodNotAllowed(res)
     const body = await readBody(req)
     if (!body?.botName) return badRequest(res, 'botName is required')
-    const item = store.claimNextQueueFile(params.hostLabel, body.botName)
-    return sendJson(res, 200, { item })
+    const parsedLimit = Number(body.limit)
+    const limit = Math.max(1, Math.floor(Number.isFinite(parsedLimit) ? parsedLimit : 1))
+    const batchPolicy = store.getQueueBatchPolicy(limit)
+    const items = limit > 1
+      ? store.claimNextQueueFiles(params.hostLabel, body.botName, limit)
+      : [store.claimNextQueueFile(params.hostLabel, body.botName)].filter(Boolean)
+    return sendJson(res, 200, { item: items[0] || null, items, batchPolicy })
   }
 
   params = matchPath(pathname, '/api/nodes/:hostLabel/commands/claim-next')
@@ -1804,7 +1818,7 @@ async function route(req, res) {
       fileName,
       requestedBy: actor?.username || 'unknown'
     })
-    const downloaded = await waitForNodeLogDownload(store, command.commandId, 15000)
+    const downloaded = await waitForNodeLogDownload(store, command.commandId, NODE_DOWNLOAD_TIMEOUT_MS)
     if (!downloaded?.filePath || !fs.existsSync(downloaded.filePath)) {
       return sendJson(res, 504, { error: `Timed out waiting for node log ${fileName} from ${params.hostLabel}` })
     }
@@ -1830,7 +1844,7 @@ async function route(req, res) {
       fileName,
       requestedBy: actor?.username || 'unknown'
     })
-    const downloaded = await waitForNodeLogDownload(store, command.commandId, 15000)
+    const downloaded = await waitForNodeLogDownload(store, command.commandId, NODE_DOWNLOAD_TIMEOUT_MS)
     if (!downloaded?.filePath || !fs.existsSync(downloaded.filePath)) {
       return sendJson(res, 504, { error: `Timed out waiting for node config ${fileName} from ${params.hostLabel}` })
     }
@@ -2040,6 +2054,45 @@ async function route(req, res) {
     return sendJson(res, 201, { command })
   }
 
+  if (req.method === 'POST' && pathname === '/api/dashboard/nodes/finished-maps/delete-all') {
+    const existingDeletes = new Set(store.listCommands((command) =>
+      command.commandType === 'delete-finished-map'
+      && (command.status === 'pending' || command.status === 'claimed')
+    ).map((command) => `${command.targetHostLabel || ''}\u0000${command.fileName || ''}`))
+    const commands = []
+    const skipped = []
+    for (const node of store.listNodes()) {
+      const hostLabel = String(node.hostLabel || '').trim()
+      if (!hostLabel) continue
+      for (const file of Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : []) {
+        const fileName = path.basename(String(file?.fileName || '').trim())
+        if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) continue
+        const key = `${hostLabel}\u0000${fileName}`
+        if (existingDeletes.has(key)) {
+          skipped.push({ hostLabel, fileName, reason: 'already queued' })
+          continue
+        }
+        existingDeletes.add(key)
+        commands.push(store.createCommand({
+          targetHostLabel: hostLabel,
+          commandType: 'delete-finished-map',
+          fileName,
+          requestedBy: actor.username
+        }))
+      }
+    }
+    auditOperatorAction(actor, 'delete-finished-maps-all', `Queued ${commands.length} finished map delete command(s) across all nodes.`, {
+      commandCount: commands.length,
+      skippedCount: skipped.length
+    }, 'warn')
+    return sendJson(res, 201, {
+      ok: true,
+      count: commands.length,
+      skippedCount: skipped.length,
+      commands
+    })
+  }
+
   params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/delete')
   if (params) {
     if (req.method !== 'POST') return methodNotAllowed(res)
@@ -2155,6 +2208,6 @@ server.listen(PORT, HOST, () => {
   if (demoOperators.length) {
     console.warn(`[dashboard-service] WARNING: demo operator credentials are enabled: ${demoOperators.map((item) => item.username).join(', ')}. Replace or delete them before exposing this dashboard.`)
   }
-  console.log(`[dashboard-service] log downloads served from ${LOGS_DIR} (also checks ${path.resolve(process.cwd(), 'logs')})`)
+  console.log(`[dashboard-service] log downloads served from ${LOGS_DIR} (also checks ${path.resolve(process.cwd(), 'logs')} and ${os.homedir()})`)
   console.log(`[dashboard-service] direct NBT uploads go to ${NBT_DIR}`)
 })

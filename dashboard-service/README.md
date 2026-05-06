@@ -46,7 +46,8 @@ Environment variables:
 - `DASHBOARD_PORT` - HTTP port, default `4080`
 - `DASHBOARD_HOST` - bind host, default `0.0.0.0`
 - `DASHBOARD_DATA_DIR` - storage directory, default `dashboard-service/data`
-- `DASHBOARD_LOGS_DIR` - directory used for authenticated `.log` downloads, default repo `logs/`
+- `DASHBOARD_LOGS_DIR` - directory used for authenticated `.log` downloads, default repo `logs/`; the service also checks `./logs` and the dashboard user's home directory for files such as `dashboard.log`
+- `DASHBOARD_NODE_DOWNLOAD_TIMEOUT_MS` - max wait for node log/config download commands, default `60000`
 - `DASHBOARD_ADMIN_USERNAME` - first-run admin username when `operators.json` does not exist, default `admin`
 - `DASHBOARD_ADMIN_PASSWORD` - first-run admin password when `operators.json` does not exist, default is a generated value written to `operators.json`
 - `DASHBOARD_SEED_DEMO_OPERATORS=true` - opt in to legacy demo accounts for local testing only
@@ -115,6 +116,7 @@ Example record:
 - `POST /api/dashboard/commands/stop-all`
 - `POST /api/dashboard/nodes/:hostLabel/commands/start`
 - `POST /api/dashboard/nodes/:hostLabel/commands/stop`
+- `POST /api/dashboard/nodes/finished-maps/delete-all`
 - `POST /api/dashboard/bots/:botName/commands/start`
 - `POST /api/dashboard/bots/:botName/commands/stop`
 - `POST /api/dashboard/files`

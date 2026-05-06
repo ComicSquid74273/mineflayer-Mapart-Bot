@@ -1158,7 +1158,7 @@ function renderQueueSummary() {
 }
 
 function renderNodes() {
-  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch })
+  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch, canManageOperators: hasPermission('canManageOperators') })
   if (state.renderCache.nodes === nodesSignature) return
   state.renderCache.nodes = nodesSignature
 
@@ -1172,7 +1172,24 @@ function renderNodes() {
     return
   }
 
-  elements.nodesGrid.innerHTML = state.nodes.map((node) => {
+  const totalFinishedMaps = state.nodes.reduce((total, node) => {
+    return total + (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0)
+  }, 0)
+  const bulkFinishedMapActions = hasPermission('canManageOperators') && totalFinishedMaps > 0
+    ? `
+      <article class="node-card">
+        <div class="file-row">
+          <div>
+            <strong>Finished map cleanup</strong>
+            <p class="file-meta">${escapeHtml(totalFinishedMaps)} finished .nbt file(s) reported across all nodes</p>
+          </div>
+          <button class="danger-button small-button" type="button" data-action="delete-all-finished-maps" data-permission-needed="canManageOperators">Delete all finished</button>
+        </div>
+      </article>
+    `
+    : ''
+
+  elements.nodesGrid.innerHTML = bulkFinishedMapActions + state.nodes.map((node) => {
     const query = String(state.nbtSearch || '').trim().toLowerCase()
     const matchesQuery = (file) => {
       if (!query) return true
@@ -1975,6 +1992,25 @@ async function onDeleteFinishedMap(hostLabel, fileName) {
   await refreshData()
 }
 
+async function onDeleteAllFinishedMaps() {
+  if (!hasPermission('canManageOperators')) {
+    pushEvent('warn', 'Admin permission required before deleting finished maps.')
+    return
+  }
+  const totalFinishedMaps = state.nodes.reduce((total, node) => {
+    return total + (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0)
+  }, 0)
+  if (!totalFinishedMaps) {
+    pushEvent('info', 'No finished maps are currently reported by nodes.')
+    return
+  }
+  const confirmed = confirm(`Queue deletion for ${totalFinishedMaps} finished .nbt file(s) across all nodes?`)
+  if (!confirmed) return
+  const result = await submitJson('/api/dashboard/nodes/finished-maps/delete-all', {})
+  pushEvent('warn', `Queued ${result.count || 0} finished map delete command(s) across all nodes.`)
+  await refreshData()
+}
+
 async function onReprintFinishedMap(hostLabel, fileName) {
   if (!hasPermission('canOperate')) {
     pushEvent('warn', 'Login as an operator before reprinting finished maps.')
@@ -2178,6 +2214,8 @@ document.addEventListener('click', async (event) => {
       await onDeleteNodeFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
     } else if (button.dataset.action === 'delete-finished-map') {
       await onDeleteFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
+    } else if (button.dataset.action === 'delete-all-finished-maps') {
+      await onDeleteAllFinishedMaps()
     } else if (button.dataset.action === 'reprint-finished-map') {
       await onReprintFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
     } else if (button.dataset.action === 'queue-release') {

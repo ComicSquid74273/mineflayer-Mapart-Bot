@@ -23,6 +23,15 @@ function createQueueFile(store, name, options = {}) {
   })
 }
 
+function registerNode(store, hostLabel, botName = `${hostLabel}-bot`) {
+  store.upsertBotStatus({
+    botName,
+    hostLabel,
+    online: true,
+    phase: 'idle'
+  })
+}
+
 test('failed queue item below maxAttempts returns to pending for auto retry', () => {
   const { store } = makeStore()
   const file = createQueueFile(store, 'below-max.nbt', { maxAttempts: 3 })
@@ -119,4 +128,49 @@ test('active downloaded and printing queue items cannot be released or claimed b
 
   const sameBotRefresh = store.claimNextQueueFile('node-a', 'bot-a')
   assert.equal(sameBotRefresh.fileId, downloaded.fileId)
+})
+
+test('batch queue claim can reserve up to ten files when pending count is high enough', () => {
+  const { store } = makeStore()
+  registerNode(store, 'node-a', 'bot-a')
+  for (let index = 0; index < 12; index += 1) {
+    createQueueFile(store, `batch-${index}.nbt`)
+  }
+
+  const claimed = store.claimNextQueueFiles('node-a', 'bot-a', 10)
+  assert.equal(claimed.length, 10)
+  assert.deepEqual(new Set(claimed.map((item) => item.claimedByBotName)), new Set(['bot-a']))
+  assert.deepEqual(new Set(claimed.map((item) => item.queueStatus)), new Set(['claimed']))
+})
+
+test('batch queue claim is capped to one when pending count is below ten per known node', () => {
+  const { store } = makeStore()
+  registerNode(store, 'node-a', 'bot-a')
+  registerNode(store, 'node-b', 'bot-b')
+  registerNode(store, 'node-c', 'bot-c')
+  for (let index = 0; index < 25; index += 1) {
+    createQueueFile(store, `low-${index}.nbt`)
+  }
+
+  const policy = store.getQueueBatchPolicy(10)
+  assert.equal(policy.knownNodeCount, 3)
+  assert.equal(policy.pendingQueueCount, 25)
+  assert.equal(policy.threshold, 30)
+  assert.equal(policy.batchLimited, true)
+  const claimed = store.claimNextQueueFiles('node-a', 'bot-a', 10)
+  assert.equal(claimed.length, 1)
+})
+
+test('same bot can refresh multiple held queue claims in one batch', () => {
+  const { store } = makeStore()
+  registerNode(store, 'node-a', 'bot-a')
+  for (let index = 0; index < 12; index += 1) {
+    createQueueFile(store, `held-${index}.nbt`)
+  }
+
+  const firstClaim = store.claimNextQueueFiles('node-a', 'bot-a', 10)
+  assert.equal(firstClaim.length, 10)
+  const refreshed = store.claimNextQueueFiles('node-a', 'bot-a', 10)
+  assert.equal(refreshed.length, 10)
+  assert.deepEqual(refreshed.map((item) => item.fileId), firstClaim.map((item) => item.fileId))
 })
