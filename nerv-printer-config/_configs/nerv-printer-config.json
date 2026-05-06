@@ -71,10 +71,10 @@
       },
       "6b6t": {
         "bot": {
-          "host": "alt3.6b6t.org",
+          "host": "alt.6b6t.org",
           "hosts": [
-            "alt3.6b6t.org",
-            "alt.6b6t.org"
+            "alt.6b6t.org",
+            "alt3.6b6t.org"
           ],
           "port": 25565,
           "auth": "microsoft",
