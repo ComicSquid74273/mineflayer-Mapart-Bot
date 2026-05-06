@@ -769,6 +769,7 @@ function summarizeNode(node) {
     reprintCommands: listNodeReprintCommands(node.hostLabel),
     assignmentStats: node.assignmentStats || null,
     operationalStats: node.operationalStats || null,
+    currentRun: node.timing?.activeRun || null,
     timing: node.timing || null
   }
 }

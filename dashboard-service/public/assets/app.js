@@ -725,10 +725,16 @@ function renderAlerts() {
 
 function renderNodeTimingMetrics(node) {
   const timing = node.timing || {}
+  const activeRun = timing.activeRun || node.currentRun || null
   const completed = Number(node.finishedMapCount || 0)
   const averageSamples = Number(timing.totalCompletedMaps || 0)
   const averageDurationMs = Number(timing.averageDurationMs || 0)
   const average = averageSamples > 0 && averageDurationMs > 0 ? formatDuration(averageDurationMs) : 'n/a'
+  const currentRunElapsed = activeRun?.elapsedMs ? formatDuration(Number(activeRun.elapsedMs)) : 'none'
+  const currentRunFile = activeRun?.fileName || ''
+  const currentRunBots = Array.isArray(activeRun?.botNames) && activeRun.botNames.length
+    ? ` | ${activeRun.botNames.join(', ')}`
+    : ''
   const assignmentStats = node.assignmentStats || {}
   const operationalStats = node.operationalStats || {}
   const assigned = Number(assignmentStats.assignedTotal || 0)
@@ -736,6 +742,10 @@ function renderNodeTimingMetrics(node) {
   const reconnects = Number(operationalStats.reconnectCount || 0)
   return `
     <div class="node-timing-strip">
+      <div class="metric metric-compact metric-wide">
+        Current Run<strong>${escapeHtml(currentRunElapsed)}</strong>
+        ${currentRunFile ? `<span class="metric-subtle" title="${escapeHtml(currentRunFile)}">${escapeHtml(currentRunFile)}${escapeHtml(currentRunBots)}</span>` : ''}
+      </div>
       <div class="metric metric-compact">
         Avg Map Time<strong>${escapeHtml(average)}</strong>
       </div>

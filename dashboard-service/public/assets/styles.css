@@ -475,11 +475,24 @@ h1 {
   min-width: 0;
 }
 
+.metric-wide {
+  min-width: 180px;
+}
+
 .metric strong {
   display: block;
   color: var(--ink);
   font-size: 1rem;
   margin-top: 4px;
+}
+
+.metric-subtle {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.25;
 }
 
 .bot-warnings {
