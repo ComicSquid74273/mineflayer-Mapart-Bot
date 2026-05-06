@@ -836,7 +836,7 @@ function renderBotCard(bot) {
         <div class="metric">Hunger<strong>${escapeHtml(bot.hunger ?? 'n/a')}</strong></div>
         <div class="metric">Activity<strong>${escapeHtml(bot.activeState || 'n/a')}</strong></div>
         <div class="metric">Progress<strong>${escapeHtml(progress)}</strong></div>
-        <div class="metric">Ping<strong>${escapeHtml(pingText)}</strong></div>
+        <div class="metric">MC Ping<strong>${escapeHtml(pingText)}</strong></div>
       </div>
       <div class="bot-metrics">
         <div class="metric">NBT<strong>${escapeHtml(bot.currentNbt || 'none')}</strong></div>

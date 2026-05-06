@@ -2900,11 +2900,10 @@ function createDefaultConfig() {
         },
         '6b6t': {
           bot: {
-            host: 'alt.6b6t.org',
+            host: 'play.6b6t.org',
             hosts: [
-              'alt3.6b6t.org',
-              'alt.6b6t.org',
               'play.6b6t.org',
+              'alt.6b6t.org',
               'alt2.6b6t.org'
             ],
             port: 25565,
@@ -13541,12 +13540,11 @@ function get6b6tHosts(config) {
   const hosts = uniqueList([
     ...configured,
     config.bot?.host,
-    'alt3.6b6t.org',
-    'alt.6b6t.org',
     'play.6b6t.org',
+    'alt.6b6t.org',
     'alt2.6b6t.org'
   ])
-  return hosts.length ? hosts : [config.bot?.host || 'alt3.6b6t.org']
+  return hosts.length ? hosts : [config.bot?.host || 'play.6b6t.org']
 }
 
 function makeHostConfig(config, host) {
@@ -16504,8 +16502,7 @@ function get6b6tTestHosts(config) {
     config.bot?.host,
     'play.6b6t.org',
     'alt.6b6t.org',
-    'alt2.6b6t.org',
-    'alt3.6b6t.org'
+    'alt2.6b6t.org'
   ])
 }
 
