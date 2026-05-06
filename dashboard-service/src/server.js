@@ -1738,11 +1738,14 @@ async function route(req, res) {
     })
     if (!item) return notFound(res)
     if (deliveryStatus === 'failed') {
+      const held = item.queueStatus === 'held'
       const final = item.queueStatus === 'failed-final'
       store.addEvent({
         operator: `bot:${body?.botName || params.hostLabel}`,
-        action: final ? 'queue-file-failed-final' : 'queue-file-auto-retry',
-        message: final
+        action: held ? 'queue-file-held-for-resume' : (final ? 'queue-file-failed-final' : 'queue-file-auto-retry'),
+        message: held
+          ? `${item.originalName || params.fileId} hit a resumable runtime error and is held for the same bot/node to resume.`
+          : final
           ? `${item.originalName || params.fileId} hit max attempts and needs operator retry.`
           : `${item.originalName || params.fileId} failed and returned to pending.`,
         details: {

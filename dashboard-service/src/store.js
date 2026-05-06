@@ -821,6 +821,59 @@ function createStore(baseDir) {
     return listBots().filter((bot) => String(bot.hostLabel || '').trim() === String(hostLabel || '').trim())
   }
 
+  function reconcileQueueForBotLocalWork(status) {
+    const botName = String(status?.botName || '').trim()
+    const hostLabel = String(status?.hostLabel || '').trim()
+    if (!botName || !hostLabel) return
+
+    const currentNbt = path.basename(String(status?.currentNbt || '').trim())
+    const localNodeFiles = Array.isArray(status?.nodeFiles)
+      ? status.nodeFiles.map((entry) => path.basename(String(entry?.fileName || entry?.name || '').trim())).filter(Boolean)
+      : []
+    const localNames = new Set([currentNbt, ...localNodeFiles].filter(Boolean))
+    if (!localNames.size) return
+
+    const phase = normalizeFileStatus(status?.phase, 'held')
+    const resumableStatus = ['printing', 'repair', 'post-print', 'cleanup'].includes(phase) ? phase : 'held'
+    const items = listFiles()
+    let changed = false
+
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]
+      if (!isQueueFile(item)) continue
+      const queueStatus = getQueueStatus(item)
+      if (!['failed', 'failed-final', 'pending', 'held'].includes(queueStatus)) continue
+      if (item.claimedByBotName && item.claimedByBotName !== botName) continue
+      if (item.claimedByHostLabel && item.claimedByHostLabel !== hostLabel) continue
+
+      const names = [
+        item.localFileName,
+        item.originalName,
+        item.storedName,
+        item.fileName
+      ].map((value) => path.basename(String(value || '').trim())).filter(Boolean)
+      if (!names.some((name) => localNames.has(name))) continue
+
+      items[index] = {
+        ...item,
+        claimedByBotName: botName,
+        claimedByHostLabel: hostLabel,
+        claimHeartbeatAt: nowIso(),
+        deliveryStatus: resumableStatus,
+        queueStatus: resumableStatus,
+        queueMode: true,
+        localFileName: currentNbt || names[0] || item.localFileName || null,
+        failedReason: queueStatus === 'failed-final'
+          ? `revived from ${queueStatus}; bot still reports local NBT work`
+          : item.failedReason || null,
+        retryReason: null
+      }
+      changed = true
+    }
+
+    if (changed) saveFiles(items)
+  }
+
   function upsertBotStatus(status) {
     const bots = readBotMap()
     const previous = bots[status.botName] || {}
@@ -855,6 +908,7 @@ function createStore(baseDir) {
     }
     bots[status.botName] = next
     writeJson(botsFile, bots)
+    reconcileQueueForBotLocalWork(next)
     const normalizedHost = String(next.hostLabel || '').trim()
     if (normalizedHost) {
       const nowMs = Date.now()
@@ -1324,6 +1378,23 @@ function createStore(baseDir) {
     return claimNextQueueFiles(hostLabel, botName, 1)[0] || null
   }
 
+  function isResumableQueueRuntimeFailure(failedReason = '') {
+    const text = String(failedReason || '').toLowerCase()
+    if (!text) return false
+    return (
+      text.includes('nerv-workload-checkpoint-timeout') ||
+      text.includes('checkpoint-timeout') ||
+      text.includes('goal was changed') ||
+      text.includes('goalchanged') ||
+      text.includes('path was interrupted') ||
+      text.includes('platform-hold') ||
+      text.includes('platform-stall') ||
+      text.includes('latency') ||
+      text.includes('timed out') ||
+      text.includes('timeout')
+    )
+  }
+
   function completeQueueFileDelivery(hostLabel, botName, fileId, deliveryStatus, failedReason = null, details = null) {
     const normalizedHost = String(hostLabel || '').trim()
     const normalizedBot = String(botName || '').trim()
@@ -1367,6 +1438,25 @@ function createStore(baseDir) {
         localFileName: path.basename(String(details?.localFileName || current.localFileName || current.originalName || current.storedName || '')),
         localPath: String(details?.localPath || current.localPath || '').trim() || null,
         failedReason: null
+      }
+      saveFiles(items)
+      return items[index]
+    }
+
+    if (status === 'failed' && isResumableQueueRuntimeFailure(failedReason)) {
+      items[index] = {
+        ...current,
+        claimedByBotName: normalizedBot || current.claimedByBotName || null,
+        claimedByHostLabel: normalizedHost || current.claimedByHostLabel || null,
+        claimHeartbeatAt: nowIso(),
+        deliveryStatus: 'held',
+        queueStatus: 'held',
+        queueMode: true,
+        localFileName: path.basename(String(details?.localFileName || current.localFileName || current.originalName || current.storedName || '')),
+        localPath: String(details?.localPath || current.localPath || '').trim() || null,
+        failedReason: failedReason || null,
+        retryReason: failedReason || null,
+        lastAttemptAt: nowIso()
       }
       saveFiles(items)
       return items[index]

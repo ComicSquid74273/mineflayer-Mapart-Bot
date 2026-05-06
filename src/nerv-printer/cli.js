@@ -1247,6 +1247,24 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     })
   }
 
+  function shouldHoldQueueFileAfterRuntimeError(errorText) {
+    const text = String(errorText || '').toLowerCase()
+    if (!text) return false
+    return (
+      text.includes('nerv-workload-checkpoint-timeout') ||
+      text.includes('checkpoint-timeout') ||
+      text.includes('goal was changed') ||
+      text.includes('goalchanged') ||
+      text.includes('path was interrupted') ||
+      text.includes('pathfinder') ||
+      text.includes('platform-hold') ||
+      text.includes('platform-stall') ||
+      text.includes('latency') ||
+      text.includes('timed out') ||
+      text.includes('timeout')
+    )
+  }
+
   async function claimNextNodeFile() {
     const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/files/claim-next`, 'POST', {
       botName
@@ -1395,8 +1413,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       }
       try {
         await reportQueueFileResult(item.fileId, item.deliveryStatus || 'placed', item.failedReason || null)
-        forgetQueueFile(item.fileName || item.originalName)
-        if (state.activeQueueFile?.fileId === item.fileId) state.activeQueueFile = null
+        const terminal = ['placed', 'completed', 'succeeded', 'failed'].includes(String(item.deliveryStatus || 'placed').trim().toLowerCase())
+        if (terminal) forgetQueueFile(item.fileName || item.originalName)
+        if (terminal && state.activeQueueFile?.fileId === item.fileId) state.activeQueueFile = null
         reportedAny = true
         changed = true
       } catch (error) {
@@ -2054,8 +2073,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       try {
         await reportQueueFileResult(active.fileId, status, reason)
         removeQueueResultOutboxItem(active.fileId)
-        forgetQueueFile(active.fileName || active.originalName)
-        state.activeQueueFile = null
+        const terminal = ['placed', 'completed', 'succeeded', 'failed'].includes(String(status || '').trim().toLowerCase())
+        if (terminal) {
+          forgetQueueFile(active.fileName || active.originalName)
+          state.activeQueueFile = null
+        }
         return true
       } catch (error) {
         enqueueQueueResult(active, status, reason, error)
@@ -2196,6 +2218,13 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
         console.log('[STATE] No more map files found. Waiting idle.')
         await dashboardRuntime?.completeActiveQueueFile?.('failed', text)
         dashboardRuntime?.setCurrentNbt(null)
+        dashboardRuntime?.setPhase('idle')
+        await delay(1000)
+        continue
+      }
+      if (claimedQueueNbt && shouldHoldQueueFileAfterRuntimeError(text)) {
+        console.log(`[DASHBOARD-WARN] Holding active queue NBT for local resume after transient runtime error: ${text}`)
+        await dashboardRuntime?.completeActiveQueueFile?.('held', text)
         dashboardRuntime?.setPhase('idle')
         await delay(1000)
         continue
