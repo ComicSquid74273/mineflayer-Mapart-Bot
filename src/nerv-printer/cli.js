@@ -15,6 +15,7 @@ let printingIntentActive = false
 const fs = require('fs')
 const http = require('http')
 const https = require('https')
+const net = require('net')
 const os = require('os')
 const path = require('path')
 const { AsyncLocalStorage } = require('async_hooks')
@@ -383,6 +384,178 @@ function logPingDiagnostic(bot, config, reason, details = {}, options = {}) {
   logThrottled(options.throttleKey || `ping-${reason}`, fields.join(' '), {
     intervalMs: toNumber(advanced.pingDiagnosticsLogEveryMs, 5000)
   })
+}
+
+function getLatencyBackoffSettings(config) {
+  const advanced = config?.advanced || {}
+  return {
+    enabled: advanced.latencyAdaptiveBackoffEnabled !== false,
+    normalMs: Math.max(1, toNumber(advanced.latencyNormalThresholdMs, 80)),
+    highMs: Math.max(1, toNumber(advanced.latencyHighThresholdMs, 50)),
+    severeMs: Math.max(1, toNumber(advanced.latencySevereThresholdMs, 250)),
+    criticalMs: Math.max(1, toNumber(advanced.latencyCriticalThresholdMs, 450)),
+    resumeMs: Math.max(1, toNumber(advanced.latencyResumeThresholdMs, 45)),
+    minDelayMs: Math.max(0, toNumber(advanced.latencyActionMinDelayMs, 100)),
+    maxDelayMs: Math.max(0, toNumber(advanced.latencyActionMaxDelayMs, 1500)),
+    criticalWaitMs: Math.max(0, toNumber(advanced.latencyCriticalWaitMs, 15000)),
+    pollMs: Math.max(50, toNumber(advanced.latencyBackoffPollMs, 500)),
+    logEveryMs: Math.max(1000, toNumber(advanced.latencyBackoffLogEveryMs, 5000)),
+    timeoutMultiplier: Math.max(1, toNumber(advanced.latencyTimeoutMultiplier, 3)),
+    timeoutMaxMs: Math.max(1000, toNumber(advanced.latencyTimeoutMaxMs, 12000)),
+    disableSprintAboveMs: Math.max(1, toNumber(advanced.latencyDisableSprintAboveMs, 50)),
+    movementPauseMaxMs: Math.max(0, toNumber(advanced.latencyMovementPauseMaxMs, 450))
+  }
+}
+
+function getLatencyBackoffState(bot, config = null) {
+  const settings = getLatencyBackoffSettings(config || bot?.__nervConfig)
+  const pingMs = getBotLatencyMs(bot)
+  if (!settings.enabled || pingMs == null) {
+    return { settings, pingMs, level: 'normal', delayMs: 0, shouldPause: false, shouldDisableSprint: false }
+  }
+
+  const shouldDisableSprint = pingMs >= settings.disableSprintAboveMs
+  if (pingMs < settings.highMs) {
+    return { settings, pingMs, level: 'normal', delayMs: 0, shouldPause: false, shouldDisableSprint }
+  }
+
+  const overHigh = Math.max(0, pingMs - settings.highMs)
+  const scaledDelay = settings.minDelayMs + Math.round(overHigh * 2)
+  const delayMs = Math.min(settings.maxDelayMs, Math.max(settings.minDelayMs, scaledDelay))
+  const level = pingMs >= settings.criticalMs ? 'critical' : (pingMs >= settings.severeMs ? 'severe' : 'high')
+  return {
+    settings,
+    pingMs,
+    level,
+    delayMs,
+    shouldPause: pingMs >= settings.criticalMs,
+    shouldDisableSprint
+  }
+}
+
+function shouldUseLatencySafeMode(bot, config = null, label = 'action') {
+  const resolvedConfig = config || bot?.__nervConfig || {}
+  const state = getLatencyBackoffState(bot, resolvedConfig)
+  const advanced = resolvedConfig.advanced || {}
+  const enterMs = Math.max(1, toNumber(advanced.latencySafeModeEnterMs, state.settings.highMs))
+  const resumeMs = Math.max(1, toNumber(advanced.latencySafeModeResumeMs, state.settings.resumeMs))
+  const modes = resolvedConfig.__latencySafeModeState || (resolvedConfig.__latencySafeModeState = {})
+  const key = String(label || 'action')
+  const wasActive = modes[key] === true
+
+  let active = wasActive
+  if (state.settings.enabled === false || state.pingMs == null) {
+    active = false
+  } else if (wasActive) {
+    active = state.pingMs > resumeMs
+  } else {
+    active = state.pingMs > enterMs
+  }
+
+  if (active !== wasActive) {
+    modes[key] = active
+    const status = active ? 'enabled' : 'recovered'
+    const threshold = active ? enterMs : resumeMs
+    logThrottled(`latency-safe-${key}-${status}`, `[LATENCY-SAFE] ${key}: ${status} ping=${state.pingMs == null ? 'unknown' : `${state.pingMs}ms`} threshold=${threshold}ms.`, {
+      intervalMs: state.settings.logEveryMs
+    })
+  } else {
+    modes[key] = active
+  }
+
+  return { active, state, enterMs, resumeMs }
+}
+
+function getLatencyAdjustedTimeoutMs(bot, config, timeoutMs, minimumMs = 0) {
+  const base = Math.max(0, toNumber(timeoutMs, 0))
+  const min = Math.max(0, toNumber(minimumMs, 0))
+  const state = getLatencyBackoffState(bot, config)
+  const pingMs = state.pingMs
+  if (pingMs == null || state.level === 'normal') return Math.max(base, min)
+  const adjusted = Math.max(base, min, Math.ceil(pingMs * state.settings.timeoutMultiplier) + state.delayMs)
+  return Math.min(state.settings.timeoutMaxMs, adjusted)
+}
+
+function stopLagSensitiveMovement(bot) {
+  if (!bot || typeof bot.setControlState !== 'function') return
+  for (const control of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) {
+    try { bot.setControlState(control, false) } catch { }
+  }
+}
+
+async function applyAdaptiveLatencyBackoff(bot, config, reason = 'action', options = {}) {
+  const state = getLatencyBackoffState(bot, config)
+  if (!state.settings.enabled || state.pingMs == null || state.level === 'normal') return state
+
+  const allowCriticalWait = options.allowCriticalWait !== false
+  const pauseMovement = options.pauseMovement !== false
+  const maxWaitMs = Math.max(0, toNumber(options.maxWaitMs, state.settings.criticalWaitMs))
+
+  if (state.shouldPause && allowCriticalWait && maxWaitMs > 0) {
+    const startedAt = Date.now()
+    logThrottled(`latency-critical-${reason}`, `[LATENCY-BACKOFF] ${reason}: ping=${state.pingMs}ms level=${state.level}; pausing actions until <=${state.settings.resumeMs}ms or ${maxWaitMs}ms.`, {
+      intervalMs: state.settings.logEveryMs
+    })
+    while (Date.now() - startedAt < maxWaitMs) {
+      if (pauseMovement) stopLagSensitiveMovement(bot)
+      await delay(state.settings.pollMs)
+      const next = getLatencyBackoffState(bot, config)
+      if (next.pingMs == null || next.pingMs <= state.settings.resumeMs) return next
+    }
+  }
+
+  const latest = getLatencyBackoffState(bot, config)
+  if (latest.delayMs > 0) {
+    logThrottled(`latency-backoff-${reason}`, `[LATENCY-BACKOFF] ${reason}: ping=${latest.pingMs}ms level=${latest.level} delay=${latest.delayMs}ms sprintDisabled=${latest.shouldDisableSprint === true}`, {
+      intervalMs: latest.settings.logEveryMs
+    })
+    await delay(latest.delayMs)
+  }
+  return latest
+}
+
+function installAdaptiveLatencyGuard(bot, config) {
+  if (!bot || bot.__nervLatencyGuardInstalled) return
+  bot.__nervLatencyGuardInstalled = true
+  bot.__nervConfig = config
+
+  const originalSetControlState = typeof bot.setControlState === 'function' ? bot.setControlState.bind(bot) : null
+  if (originalSetControlState) {
+    bot.setControlState = (control, state) => {
+      if (control === 'sprint' && state === true && getLatencyBackoffState(bot, config).shouldDisableSprint) {
+        return originalSetControlState(control, false)
+      }
+      return originalSetControlState(control, state)
+    }
+  }
+
+  const wrapAsyncAction = (name, reason, options = {}) => {
+    if (typeof bot[name] !== 'function' || bot[name].__nervLatencyWrapped) return
+    const original = bot[name].bind(bot)
+    const wrapped = async (...args) => {
+      await applyAdaptiveLatencyBackoff(bot, config, `${reason}-before`, options)
+      const result = await original(...args)
+      await applyAdaptiveLatencyBackoff(bot, config, `${reason}-after`, {
+        ...options,
+        allowCriticalWait: false,
+        maxWaitMs: Math.min(options.maxWaitMs || 1000, 1000)
+      })
+      return result
+    }
+    wrapped.__nervLatencyWrapped = true
+    bot[name] = wrapped
+  }
+
+  wrapAsyncAction('clickWindow', 'window-click')
+  wrapAsyncAction('openContainer', 'open-container', { pauseMovement: true })
+  wrapAsyncAction('openBlock', 'open-block', { pauseMovement: true })
+  wrapAsyncAction('openAnvil', 'open-anvil', { pauseMovement: true })
+  wrapAsyncAction('activateBlock', 'activate-block', { pauseMovement: true })
+  wrapAsyncAction('activateItem', 'activate-item', { pauseMovement: true })
+  wrapAsyncAction('placeBlock', 'place-block', { pauseMovement: true })
+  wrapAsyncAction('_genericPlace', 'generic-place', { pauseMovement: true })
+  wrapAsyncAction('equip', 'equip')
+  wrapAsyncAction('dig', 'dig', { pauseMovement: true })
 }
 
 function readOptionalJson(filePath) {
@@ -2798,6 +2971,14 @@ function startPlatformStallReconnectWatchdog(bot, config) {
       resetBaseline(bot?.entity?.position, lastProgressToken)
       return
     }
+    const latencyState = getLatencyBackoffState(bot, config)
+    if (latencyState.level !== 'normal') {
+      resetBaseline(bot?.entity?.position, lastProgressToken)
+      logThrottled('platform-stall-latency-hold', `[PLATFORM-STALL] ping=${latencyState.pingMs}ms level=${latencyState.level}; pausing stall reconnect timer until latency recovers.`, {
+        intervalMs: settings.logMs
+      })
+      return
+    }
 
     const progress = readProgressState(progressFile)
     if (!progress || !isPlatformStallReconnectPhase(progress.phase)) {
@@ -2870,7 +3051,7 @@ function createDefaultConfig() {
       username: 'MapartBot',
       usernames: ['MapartBot'],
       auth: 'offline',
-      version: '1.21.8',
+      version: '1.20',
       profilesFolder: './auth-cache',
       viewDistance: 'tiny',
       checkTimeoutInterval: 60000,
@@ -2900,10 +3081,11 @@ function createDefaultConfig() {
         },
         '6b6t': {
           bot: {
-            host: 'play.6b6t.org',
+            host: 'alt.6b6t.org',
             hosts: [
-              'play.6b6t.org',
               'alt.6b6t.org',
+              'alt3.6b6t.org',
+              'play.6b6t.org',
               'alt2.6b6t.org'
             ],
             port: 25565,
@@ -3135,6 +3317,33 @@ function createDefaultConfig() {
       pingDiagnosticsEnabled: true,
       pingDiagnosticsThresholdMs: 30,
       pingDiagnosticsLogEveryMs: 5000,
+      mcStatusHostSelectionEnabled: true,
+      mcStatusHostSelectionTimeoutMs: 5000,
+      mcStatusHostSelectionProtocolVersion: 763,
+      latencyAdaptiveBackoffEnabled: true,
+      latencyNormalThresholdMs: 80,
+      latencyHighThresholdMs: 50,
+      latencySevereThresholdMs: 250,
+      latencyCriticalThresholdMs: 450,
+      latencyResumeThresholdMs: 45,
+      latencyDisableSprintAboveMs: 50,
+      latencyActionMinDelayMs: 100,
+      latencyActionMaxDelayMs: 1500,
+      latencyCriticalWaitMs: 15000,
+      latencyBackoffPollMs: 500,
+      latencyBackoffLogEveryMs: 5000,
+      latencyTimeoutMultiplier: 3,
+      latencyTimeoutMaxMs: 12000,
+      latencyMovementPauseMaxMs: 450,
+      latencySafeModeEnterMs: 50,
+      latencySafeModeResumeMs: 45,
+      latencySafePlacementSettleMs: 50,
+      latencySafePlacementMoveTimeoutMs: 12000,
+      supportStockChestOpenTimeoutMs: 8000,
+      supportStockChestSyncWaitMs: 8000,
+      supportStockChestStableMs: 800,
+      supportStockChestOpenAttempts: 5,
+      supportStockChestPollMs: 100,
       scannerWorkloadMode: 'litematic',
       inventoryCycleTestWaitAfterMs: 5000,
       inventoryCycleTestRows: 2,
@@ -4490,6 +4699,7 @@ async function openContainerAt(bot, position, accessPosition, options = {}) {
   const accessRange = Math.max(0.35, toNumber(options.accessRange, accessPosition ? 1.25 : 2))
   const attempts = Math.max(1, Math.floor(toNumber(options.attempts, 3)))
   const timeoutMs = Math.max(500, toNumber(options.timeoutMs, 2500))
+  const adjustedTimeoutMs = getLatencyAdjustedTimeoutMs(bot, options.config || bot.__nervConfig, timeoutMs, timeoutMs)
   const retryDelayMs = Math.max(50, toNumber(options.retryDelayMs, 250))
   const blockWaitMs = Math.max(500, toNumber(options.blockWaitMs, 5000))
   const blockPollMs = Math.max(50, toNumber(options.blockPollMs, 150))
@@ -4508,12 +4718,13 @@ async function openContainerAt(bot, position, accessPosition, options = {}) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       closeCurrentWindowIfOpen(bot, `open-container-attempt-${attempt}`)
+      await applyAdaptiveLatencyBackoff(bot, options.config || bot.__nervConfig, `open-container-attempt-${attempt}`, { pauseMovement: true })
       await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
       return await Promise.race([
         bot.openContainer(block),
         (async () => {
-          await delay(timeoutMs)
-          throw new Error(`open-container-timeout-${timeoutMs}ms`)
+          await delay(adjustedTimeoutMs)
+          throw new Error(`open-container-timeout-${adjustedTimeoutMs}ms`)
         })()
       ])
     } catch (err) {
@@ -5144,6 +5355,7 @@ async function gotoWithTemporaryThinkTimeout(bot, goal, timeoutMs) {
 async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path', options = {}) {
   const limitMs = Math.max(1000, toNumber(timeoutMs, 30000))
   const pollMs = Math.max(100, toNumber(options.pollMs, 250))
+  const config = options.config || bot.__nervConfig || null
   const shouldPauseTimeout = typeof options.shouldPauseTimeout === 'function'
     ? options.shouldPauseTimeout
     : null
@@ -5152,6 +5364,7 @@ async function gotoGoalWithHardTimeout(bot, goal, timeoutMs, label = 'path', opt
     : null
   let timeoutId = null
   try {
+    await applyAdaptiveLatencyBackoff(bot, config, `${label}-before-goto`, { pauseMovement: true })
     const gotoPromise = bot.pathfinder.goto(goal)
     gotoPromise.catch(() => {})
     await Promise.race([
@@ -5256,6 +5469,13 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
         continue
       }
 
+      const latencyState = getLatencyBackoffState(bot, config)
+      if (latencyState.shouldPause) {
+        stopLagSensitiveMovement(bot)
+        await applyAdaptiveLatencyBackoff(bot, config, `${label}-movement-pause`, { pauseMovement: true })
+        continue
+      }
+
       activeElapsedMs += elapsed
       if (activeElapsedMs >= limitMs) {
         throw new Error(`${label}-timeout-${limitMs}ms`)
@@ -5267,9 +5487,14 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
           await bot.lookAt(new Vec3(Number(point.x), Number(pos.y) + 1.62, Number(point.z)), true)
         } catch { }
       }
-      bot.setControlState('sprint', sprint)
+      bot.setControlState('sprint', sprint && !latencyState.shouldDisableSprint)
       bot.setControlState('forward', true)
       await delay(tickMs)
+      if (latencyState.delayMs > 0) {
+        bot.setControlState('forward', false)
+        bot.setControlState('sprint', false)
+        await delay(Math.min(latencyState.settings.movementPauseMaxMs, latencyState.delayMs))
+      }
     }
 
     throw new Error(`${label}-session-ended`)
@@ -5377,7 +5602,7 @@ async function withdrawFromChest(bot, config, chestPos, itemName, amount, access
 
   const requested = Math.max(1, toNumber(amount, 1))
   const before = countInventoryByType(bot, itemName)
-  const timeoutMs = Math.max(500, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500))
+  const timeoutMs = getLatencyAdjustedTimeoutMs(bot, config, Math.max(500, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500)), 500)
   const pollMs = Math.max(50, toNumber(config.advanced?.postPrintChestPollMs, 100))
   const actionDelayMs = Math.max(50, toNumber(config.advanced?.inventoryActionDelayMs, 100))
   const interactionDelayMs = Math.max(50, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
@@ -5426,7 +5651,7 @@ async function withdrawItemStacksFromChests(bot, config, chests, itemName, desir
 
   const itemInfo = bot.registry.itemsByName[itemName] || {}
   const stackSize = Math.max(1, toNumber(itemInfo.stackSize, 64))
-  const timeoutMs = Math.max(500, toNumber(options.timeoutMs, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500)))
+  const timeoutMs = getLatencyAdjustedTimeoutMs(bot, config, Math.max(500, toNumber(options.timeoutMs, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500))), 500)
   const pollMs = Math.max(50, toNumber(options.pollMs, toNumber(config.advanced?.postPrintChestPollMs, 100)))
   const interactionDelayMs = Math.max(50, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
   const sortedChests = [...chests].sort((a, b) => horizontalDist2(bot, a.position) - horizontalDist2(bot, b.position))
@@ -5477,7 +5702,7 @@ async function depositToChest(bot, config, chestPos, itemName, amount, accessPos
 
   const requested = Math.max(1, toNumber(amount, 1))
   const before = countInventoryByType(bot, itemName)
-  const timeoutMs = Math.max(500, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500))
+  const timeoutMs = getLatencyAdjustedTimeoutMs(bot, config, Math.max(500, toNumber(config.advanced?.postPrintChestSyncWaitMs, 2500)), 500)
   const pollMs = Math.max(50, toNumber(config.advanced?.postPrintChestPollMs, 100))
   const actionDelayMs = Math.max(50, toNumber(config.advanced?.inventoryActionDelayMs, 100))
   const interactionDelayMs = Math.max(50, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
@@ -5620,15 +5845,19 @@ async function openBlockWindowAt(bot, position, accessPosition, options = {}) {
     pollMs: options.blockPollMs,
     expectedNames: options.expectedNames
   })
+  if (config) {
+    await applyAdaptiveLatencyBackoff(bot, config, `${reason}-before-open-block`, { pauseMovement: true })
+  }
   return await bot.openBlock(block)
 }
 
-async function openAnvilAt(bot, position, accessPosition) {
+async function openAnvilAt(bot, position, accessPosition, config = null) {
   const Vec3 = bot.entity.position.constructor
   const blockPos = new Vec3(position.x, position.y, position.z)
-  await gotoConfiguredAccess(bot, position, accessPosition, 2)
+  await gotoConfiguredAccess(bot, position, accessPosition, 2, config, 'open-anvil')
   const block = bot.blockAt(blockPos)
   if (!block) throw new Error(`No anvil at ${position.x} ${position.y} ${position.z}`)
+  if (config) await applyAdaptiveLatencyBackoff(bot, config, 'open-anvil-before-open', { pauseMovement: true })
   return await bot.openAnvil(block)
 }
 
@@ -5747,6 +5976,7 @@ async function safeWindowClick(bot, window, slot, mouseButton = 0, mode = 0, opt
   if (precondition === 'empty') {
     await assertWindowCursorEmpty(window, `before click slot=${slot}`)
   }
+  await applyAdaptiveLatencyBackoff(bot, bot.__nervConfig, `window-click-slot-${slot}`)
   await bot.clickWindow(slot, mouseButton, mode)
   await waitBotTicks(bot, ticks)
 }
@@ -5772,11 +6002,13 @@ async function moveOneWindowItemConfirmed(bot, window, fromSlot, toSlot, predica
 }
 
 async function quickMoveWindowSlotConfirmed(bot, window, fromSlot, targetSlot, predicate, timeoutMs = 3000, pollMs = 100, clickTicks = 2) {
+  const adjustedTimeoutMs = getLatencyAdjustedTimeoutMs(bot, bot.__nervConfig, timeoutMs, timeoutMs)
   await assertWindowCursorEmpty(window, `before quick-moving slot ${fromSlot}`)
+  await applyAdaptiveLatencyBackoff(bot, bot.__nervConfig, `quick-move-slot-${fromSlot}`)
   await bot.clickWindow(fromSlot, 0, 1)
   await waitBotTicks(bot, clickTicks)
   await assertWindowCursorEmpty(window, `after quick-moving slot ${fromSlot}`)
-  return await waitForWindowSlot(window, targetSlot, predicate, timeoutMs, pollMs)
+  return await waitForWindowSlot(window, targetSlot, predicate, adjustedTimeoutMs, pollMs)
 }
 
 async function quickMoveCartographyInputConfirmed(bot, window, sourceSlot, targetSlot, itemName, timeoutMs = 3000, pollMs = 100, clickTicks = 2) {
@@ -5864,11 +6096,13 @@ function getChestWindowSnapshotFingerprint(window) {
     .join('|')
 }
 
-async function waitForChestWindowSnapshotConfirmed(window, config, itemId, itemName, label) {
+async function waitForChestWindowSnapshotConfirmed(bot, window, config, itemId, itemName, label) {
   const advanced = config.advanced || {}
-  const timeoutMs = Math.max(500, toNumber(advanced.supportStockChestSyncWaitMs, toNumber(advanced.postPrintChestSyncWaitMs, 2500)))
+  const baseTimeoutMs = Math.max(500, toNumber(advanced.supportStockChestSyncWaitMs, toNumber(advanced.postPrintChestSyncWaitMs, 2500)))
+  const timeoutMs = getLatencyAdjustedTimeoutMs(bot, config, baseTimeoutMs, baseTimeoutMs)
   const pollMs = Math.max(25, toNumber(advanced.supportStockChestPollMs, toNumber(advanced.postPrintChestPollMs, 100)))
-  const minStableMs = Math.max(100, toNumber(advanced.supportStockChestStableMs, 350))
+  const latencyState = getLatencyBackoffState(bot, config)
+  const minStableMs = Math.max(100, toNumber(advanced.supportStockChestStableMs, 350), latencyState.level === 'normal' ? 0 : Math.min(1500, Math.max(350, latencyState.delayMs)))
   const openedAt = Date.now()
   const deadline = openedAt + timeoutMs
   let lastFingerprint = null
@@ -5899,7 +6133,7 @@ async function waitForChestWindowSnapshotConfirmed(window, config, itemId, itemN
     await delay(pollMs)
   }
 
-  console.log(`[SUPPORT-STOCK-WARN] ${label} chest window did not produce a stable server snapshot within ${timeoutMs}ms; using latest window state.`)
+  console.log(`[SUPPORT-STOCK-WARN] ${label} chest window did not produce a stable server snapshot within ${timeoutMs}ms; using latest window state. ping=${latencyState.pingMs == null ? 'unknown' : `${latencyState.pingMs}ms`}`)
   return {
     count: latestCount,
     slots: latestSlots,
@@ -5962,7 +6196,7 @@ async function countItemAcrossChests(bot, config, itemName, chests, label) {
           timeoutMs: toNumber(config.advanced?.supportStockChestOpenTimeoutMs, 2500)
         })
       }
-      const snapshot = await waitForChestWindowSnapshotConfirmed(container, config, itemId, itemName, label)
+      const snapshot = await waitForChestWindowSnapshotConfirmed(bot, container, config, itemId, itemName, label)
       count += snapshot.count
       checked += 1
       if (config.advanced?.debugPrints) {
@@ -6235,28 +6469,31 @@ async function takeOneChestItemToInventory(bot, window, itemId, itemName, timeou
   const targetSlot = findEmptyWindowInventorySlot(window)
   if (targetSlot < 0) return false
 
+  const adjustedTimeoutMs = getLatencyAdjustedTimeoutMs(bot, bot.__nervConfig, timeoutMs, timeoutMs)
   const beforeTarget = countWindowInventoryItems(window, itemId, itemName)
-  await bot.clickWindow(source.slot, 0, 0)
+  await safeWindowClick(bot, window, source.slot, 0, 0, { precondition: 'empty' })
   await delay(pollMs)
-  await bot.clickWindow(targetSlot, 1, 0)
+  await safeWindowClick(bot, window, targetSlot, 1, 0, { precondition: 'any' })
   await delay(pollMs)
-  await bot.clickWindow(source.slot, 0, 0)
+  await safeWindowClick(bot, window, source.slot, 0, 0, { precondition: 'any' })
 
   const targetReady = await waitForWindowSlot(window, targetSlot, (stack) => (
     stack &&
     toNumber(stack.count, 0) > 0 &&
     (stack.type === itemId || stack.name === itemName)
-  ), timeoutMs, pollMs)
-  const invCount = await waitForWindowInventoryCount(window, itemId, itemName, beforeTarget + 1, timeoutMs, pollMs)
+  ), adjustedTimeoutMs, pollMs)
+  const invCount = await waitForWindowInventoryCount(window, itemId, itemName, beforeTarget + 1, adjustedTimeoutMs, pollMs)
   return Boolean(targetReady) || invCount > beforeTarget
 }
 
 async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stackSize, maxStacks = 8, options = {}) {
+  const config = options.config || bot.__nervConfig
   const onlyFullStacks = options.onlyFullStacks !== false
-  const timeoutMs = Math.max(100, toNumber(options.timeoutMs, 3000))
+  const timeoutMs = getLatencyAdjustedTimeoutMs(bot, config, Math.max(100, toNumber(options.timeoutMs, 3000)), 3000)
   const pollMs = Math.max(25, toNumber(options.pollMs, 100))
   const waitForSlot = options.waitForSlot !== false
-  const actionDelayMs = Math.max(0, toNumber(options.actionDelayMs, waitForSlot ? pollMs : 0))
+  const latencyState = getLatencyBackoffState(bot, config)
+  const actionDelayMs = Math.max(latencyState.delayMs, Math.max(0, toNumber(options.actionDelayMs, waitForSlot ? pollMs : 0)))
   const startedAt = Date.now()
   const slots = getChestWindowSlots(window)
     .filter((entry) => entry.stack?.type === itemId)
@@ -6271,6 +6508,7 @@ async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stack
     if (onlyFullStacks && count < stackSize) continue
     const plannedCount = onlyFullStacks ? stackSize : count
     if (amountNeeded - movedEstimate < plannedCount) break
+    await applyAdaptiveLatencyBackoff(bot, config, `quick-move-chest-slot-${entry.slot}`)
     await bot.clickWindow(entry.slot, 0, 1)
     if (waitForSlot) {
       await waitForWindowSlot(window, entry.slot, (stack) => (
@@ -6337,7 +6575,7 @@ async function interactWithConfiguredBlock(bot, config, node, label = 'configure
   const pos = node?.position
   if (!pos) throw new Error(`Missing ${label} position`)
   await waitForPlatformReady(bot, config, `postprint-${label}`)
-  await gotoConfiguredAccess(bot, pos, node?.accessPosition, 2)
+  await gotoConfiguredAccess(bot, pos, node?.accessPosition, 2, config, `postprint-${label}`)
   const Vec3 = bot.entity.position.constructor
   const block = bot.blockAt(new Vec3(pos.x, pos.y, pos.z))
   if (!block) throw new Error(`No block found at ${pos.x} ${pos.y} ${pos.z}`)
@@ -6356,9 +6594,13 @@ async function interactWithConfiguredBlock(bot, config, node, label = 'configure
     if (isResetBlock) {
       console.log(`[POSTPRINT-RESET] Opening reset container ${name} at ${pos.x},${pos.y},${pos.z}.`)
     }
+    await applyAdaptiveLatencyBackoff(bot, config, `postprint-${label}-before-open`, { pauseMovement: true })
     const container = await bot.openContainer(block)
+    const latencyHoldMs = shouldUseLatencySafeMode(bot, config, label).active
+      ? getLatencyAdjustedTimeoutMs(bot, config, toNumber(config.advanced?.resetChestWaitMs, toNumber(config.advanced?.postPrintInteractionDelayMs, 200)), toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+      : 0
     const openDelayMs = isResetBlock
-      ? toNumber(config.advanced?.resetChestWaitMs, toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+      ? Math.max(toNumber(config.advanced?.resetChestWaitMs, toNumber(config.advanced?.postPrintInteractionDelayMs, 200)), latencyHoldMs)
       : toNumber(config.advanced?.postPrintInteractionDelayMs, 200)
     if (isResetBlock) {
       console.log(`[POSTPRINT-RESET] Reset container opened; holding open for ${openDelayMs}ms.`)
@@ -6386,9 +6628,10 @@ async function interactWithConfiguredBlock(bot, config, node, label = 'configure
     return name
   }
 
+  await applyAdaptiveLatencyBackoff(bot, config, `postprint-${label}-before-activate`, { pauseMovement: true })
   await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
   await bot.activateBlock(block)
-  await delay(toNumber(config.advanced?.postPrintInteractionDelayMs, 200))
+  await delay(getLatencyAdjustedTimeoutMs(bot, config, toNumber(config.advanced?.postPrintInteractionDelayMs, 200), toNumber(config.advanced?.postPrintInteractionDelayMs, 200)))
   return name
 }
 
@@ -6714,6 +6957,7 @@ async function renameFinishedMap(bot, config, anvilConfig, sourceName) {
     toNumber(advanced.postPrintInteractionDelayMs, 200),
     toNumber(advanced.postPrintMapSettleDelayMs, 200)
   )
+  const latencySettleMs = getLatencyAdjustedTimeoutMs(bot, config, settleMs, settleMs)
   warnIfAnvilPillarLow(bot, config, anvilConfig, 'postprint-rename')
 
   let filledMaps = findInventoryItemsByType(bot, 'filled_map')
@@ -6737,12 +6981,14 @@ async function renameFinishedMap(bot, config, anvilConfig, sourceName) {
         console.log(`[POSTPRINT-DEBUG] Rename attempt ${attempt}/${maxAttempts} candidate: ${beforeHints.join(' | ')}`)
       }
 
-      const anvil = await openAnvilAt(bot, anvilConfig.position, anvilConfig.accessPosition)
-      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+      await applyAdaptiveLatencyBackoff(bot, config, 'postprint-rename-before-open', { pauseMovement: true })
+      const anvil = await openAnvilAt(bot, anvilConfig.position, anvilConfig.accessPosition, config)
+      await delay(Math.max(toNumber(advanced.postPrintInteractionDelayMs, 200), latencySettleMs))
+      await applyAdaptiveLatencyBackoff(bot, config, 'postprint-rename-before-rename', { pauseMovement: true })
       await anvil.rename(filledMap, renameTarget)
-      await delay(settleMs)
+      await delay(latencySettleMs)
       if (typeof anvil.close === 'function') anvil.close()
-      await delay(settleMs)
+      await delay(latencySettleMs)
 
       filledMaps = findInventoryItemsByType(bot, 'filled_map')
       const remainingUnnamed = filledMaps.filter((entry) => !isMapNamed(entry, renameTarget))
@@ -6755,7 +7001,7 @@ async function renameFinishedMap(bot, config, anvilConfig, sourceName) {
       console.log(`[POSTPRINT-WARN] Rename attempt ${attempt}/${maxAttempts} not fully verified. renamed=${filledMaps.length - remainingUnnamed.length}/${filledMaps.length} seen=${sampleNames.join(' | ') || 'none'}`)
     } catch (err) {
       console.log(`[POSTPRINT-WARN] Rename attempt ${attempt}/${maxAttempts} failed: ${err?.message || err}`)
-      await delay(settleMs)
+      await delay(latencySettleMs)
       filledMaps = findInventoryItemsByType(bot, 'filled_map')
     }
   }
@@ -6922,9 +7168,20 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
         return failPostPrint('fill_map', `Could not reach map center before map activation: ${err?.message || err}`)
       }
 
+      await applyAdaptiveLatencyBackoff(bot, config, 'postprint-fill-map-before-activate', { pauseMovement: true })
       await bot.equip(mapItem, 'hand')
       await bot.activateItem()
-      await delay(toNumber(advanced.postPrintInteractionDelayMs, 200))
+      const fillWaitMs = getLatencyAdjustedTimeoutMs(
+        bot,
+        config,
+        toNumber(advanced.postPrintFillMapWaitMs, toNumber(advanced.postPrintInteractionDelayMs, 200)),
+        toNumber(advanced.postPrintInteractionDelayMs, 200)
+      )
+      const fillPollMs = Math.max(50, toNumber(advanced.postPrintFillMapPollMs, toNumber(advanced.postPrintChestPollMs, 100)))
+      const fillDeadline = Date.now() + fillWaitMs
+      while (Date.now() < fillDeadline && countInventoryByType(bot, 'filled_map') <= 0) {
+        await delay(Math.min(fillPollMs, Math.max(1, fillDeadline - Date.now())))
+      }
       if (typeof bot.deactivateItem === 'function') bot.deactivateItem()
 
       const filledMapItem = findInventoryItemByType(bot, 'filled_map')
@@ -7015,8 +7272,9 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       let lockedMapTaken = false
       let lockedMapConfirmedInWindow = false
 
-      console.log(`[CARTO] start useApi=${advanced.postPrintCartographyUseApi !== false} attempts=${maxAttempts} accessRange=${cartographyAccessRange} clickTicks=${clickTicks} humanDelayMs=${cartographyHumanDelayMs} outputHumanDelayMs=${cartographyOutputHumanDelayMs} outputSettleTicks=${outputSettleTicks} ${formatCartographyBotState(bot, config)}`)
-      if (advanced.postPrintCartographyUseApi !== false) {
+      const cartographySafeMode = shouldUseLatencySafeMode(bot, config, 'cartography').active
+      console.log(`[CARTO] start useApi=${advanced.postPrintCartographyUseApi !== false && !cartographySafeMode} attempts=${maxAttempts} accessRange=${cartographyAccessRange} clickTicks=${clickTicks} humanDelayMs=${cartographyHumanDelayMs} outputHumanDelayMs=${cartographyOutputHumanDelayMs} outputSettleTicks=${outputSettleTicks} safeMode=${cartographySafeMode} ${formatCartographyBotState(bot, config)}`)
+      if (advanced.postPrintCartographyUseApi !== false && !cartographySafeMode) {
         try {
           const apiLocked = await lockMapWithCartographyApi(bot, config, cartographyConfig, advanced, {
             clickTicks,
@@ -8402,6 +8660,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         ? Math.max(20, toNumber(config.advanced?.repairFastConfirmMs, Math.max(160, toNumber(config.advanced?.scannerPlaceConfirmMs, 80) * 2)))
         : 0)
     : Math.max(0, toNumber(config.advanced?.scannerPlaceConfirmMs, Math.max(45, toNumber(config.advanced?.scannerWorkloadPollMs, 10) * 4)))
+  const effectiveConfirmMs = getLatencyAdjustedTimeoutMs(bot, config, fastConfirmMs, fastConfirmMs)
   const fastConfirmPollMs = Math.max(5, toNumber(
     requiresFastConfirmation ? config.advanced?.repairFastConfirmPollMs : config.advanced?.scannerPlaceConfirmPollMs,
     toNumber(config.advanced?.scannerPlaceConfirmPollMs, 15)
@@ -8535,6 +8794,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         bot.setControlState('sneak', true)
         await new Promise(r => setTimeout(r, 60))
       }
+      await applyAdaptiveLatencyBackoff(bot, config, 'before-place-block', { pauseMovement: true })
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
         await bot._genericPlace(attempt.block, attempt.face, {
           swingArm: 'right',
@@ -8547,7 +8807,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         placedSuccessfully = true
         break
       }
-      if (await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
+      if (await waitForTargetBlockPlaced(bot, targetPos, target.blockName, effectiveConfirmMs, fastConfirmPollMs)) {
         placedSuccessfully = true
         break
       }
@@ -8567,7 +8827,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         // Fast path: don't wait for confirmation on error, just report failure
         break
       }
-      if (isTargetBlockPlaced(bot, targetPos, target.blockName) || await waitForTargetBlockPlaced(bot, targetPos, target.blockName, fastConfirmMs, fastConfirmPollMs)) {
+      if (isTargetBlockPlaced(bot, targetPos, target.blockName) || await waitForTargetBlockPlaced(bot, targetPos, target.blockName, effectiveConfirmMs, fastConfirmPollMs)) {
         placedSuccessfully = true
         if (config.advanced?.debugPrints) {
           console.log(`[PLACE-WARN] Placement timeout but block is present at ${target.position.x} ${target.position.y} ${target.position.z}`)
@@ -8589,9 +8849,106 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   }
 
   if (!isFastNoWaitPlacement) {
-    await delay(toNumber(printer.placeDelayMs, 50))
+    const latencyState = await applyAdaptiveLatencyBackoff(bot, config, 'after-place-block', { allowCriticalWait: false, maxWaitMs: 1000 })
+    await delay(Math.max(toNumber(printer.placeDelayMs, 50), latencyState.delayMs || 0))
   }
   return { state: 'placed' }
+}
+
+function isTargetAlreadyResolved(bot, config, target) {
+  const { targetPos } = resolveTargetPlacementPosition(bot, target, config)
+  const actual = bot.blockAt(targetPos)
+  return actual?.name === target.blockName
+}
+
+function getUnresolvedPlacementTargets(bot, config, targets) {
+  return targets.filter((target) => !isTargetAlreadyResolved(bot, config, target))
+}
+
+function mergePlacementResults(left, right) {
+  const merged = {
+    placed: toNumber(left?.placed, 0) + toNumber(right?.placed, 0),
+    already: toNumber(left?.already, 0) + toNumber(right?.already, 0),
+    skipped: toNumber(left?.skipped, 0) + toNumber(right?.skipped, 0),
+    seen: toNumber(left?.seen, 0) + toNumber(right?.seen, 0),
+    missing: toNumber(right?.missing, toNumber(left?.missing, 0)),
+    hardStops: toNumber(left?.hardStops, 0) + toNumber(right?.hardStops, 0),
+    rawAllowed: toNumber(left?.rawAllowed, 0) + toNumber(right?.rawAllowed, 0),
+    capped: toNumber(left?.capped, 0) + toNumber(right?.capped, 0),
+    maxAllowed: Math.max(toNumber(left?.maxAllowed, 0), toNumber(right?.maxAllowed, 0))
+  }
+  return merged
+}
+
+async function runLatencySafePlacementBatch(bot, config, batchTargets, placeRange, label = 'LATENCY-SAFE-PLACE') {
+  const remaining = [...batchTargets]
+  const result = { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
+  const targetRange = Math.max(0.75, Math.max(1, toNumber(placeRange, 4)) - 0.75)
+  const settleMs = Math.max(0, toNumber(config.advanced?.latencySafePlacementSettleMs, toNumber(config.printer?.placeDelayMs, 50)))
+
+  stopBotMovement(bot)
+
+  while (remaining.length > 0) {
+    assertRuntimeContinue(bot, config, 'stopping-during-latency-safe-placement')
+    const mode = shouldUseLatencySafeMode(bot, config, 'placement')
+    if (!mode.active) break
+
+    const target = remaining.shift()
+    if (!target) break
+
+    try {
+      const { targetPos } = resolveTargetPlacementPosition(bot, target, config)
+      const actual = bot.blockAt(targetPos)
+      if (actual?.name === target.blockName) {
+        result.already += 1
+        result.seen += 1
+        continue
+      }
+
+      const distance = bot.entity.position.distanceTo(targetPos.offset(0.5, 0.5, 0.5))
+      if (distance > Math.max(1, toNumber(placeRange, 4))) {
+        stopBotMovement(bot)
+        await gotoGoalWithHardTimeout(
+          bot,
+          new GoalNear(target.position.x, target.position.y, target.position.z, targetRange),
+          getLatencyAdjustedTimeoutMs(bot, config, toNumber(config.advanced?.latencySafePlacementMoveTimeoutMs, 12000), 12000),
+          `${label.toLowerCase()}-move`,
+          {
+            config,
+            shouldPauseTimeout: () => getLatencyBackoffState(bot, config).level === 'critical',
+            pollMs: Math.max(100, toNumber(config.advanced?.latencyBackoffPollMs, 500))
+          }
+        )
+      }
+
+      stopLagSensitiveMovement(bot)
+      const placed = await placeTarget(bot, config, target, false)
+      if (placed.state === 'placed') {
+        result.placed += 1
+        result.seen += 1
+      } else if (placed.state === 'already') {
+        result.already += 1
+        result.seen += 1
+      } else {
+        result.skipped += 1
+        if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
+          console.log(`[${label}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${placed.reason})`)
+        }
+      }
+    } catch (err) {
+      if (isRuntimeStopError(err)) throw err
+      result.skipped += 1
+      if (config.errorHandling?.logErrors !== false) {
+        console.log(`[${label}-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+      }
+    }
+
+    if (settleMs > 0) await delay(settleMs)
+  }
+
+  result.remainingTargets = remaining
+  result.missing = getUnresolvedPlacementTargets(bot, config, batchTargets).length
+  return result
 }
 
 async function repairTargets(bot, config, targets, placeRange) {
@@ -8807,6 +9164,11 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
   assertRuntimeContinue(bot, config, 'stopping-during-repair')
 
+  if (shouldUseLatencySafeMode(bot, config, 'repair').active) {
+    console.log(`[${label}-LATENCY-SAFE] MC ping high; using stop-place confirmed repair for ${targets.length} target(s).`)
+    return await repairTargets(bot, config, targets, placeRange)
+  }
+
   const printer = config.printer || {}
   const advanced = config.advanced || {}
   const tickMs = Math.max(10, toNumber(advanced.repairFastTickMs, toNumber(printer.fastTraversalTickMs, 40)))
@@ -8891,7 +9253,8 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   const fastAirLoop = (async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-repair')
-      if (stopRepairActive) {
+      if (stopRepairActive || shouldUseLatencySafeMode(bot, config, 'repair').active) {
+        stopLagSensitiveMovement(bot)
         await delay(tickMs)
         continue
       }
@@ -8959,6 +9322,28 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
 
       const target = remaining[0]
       if (!target) break
+
+      if (shouldUseLatencySafeMode(bot, config, 'repair').active) {
+        stopRepairActive = true
+        stopBotMovement(bot)
+        const key = targetKey(target)
+        processed.add(key)
+        try {
+          console.log(`[${label}-LATENCY-SAFE] stop-place repair target=${target.position.x} ${target.position.y} ${target.position.z}`)
+          const result = await placeTarget(bot, config, target, true)
+          markResult(target, result, `${label}-LATENCY-SAFE`)
+        } catch (err) {
+          skipped += 1
+          if (config.errorHandling?.logErrors !== false) {
+            console.log(`[${label}-LATENCY-SAFE-ERR] ${target.position.x} ${target.position.y} ${target.position.z} -> ${err?.message || err}`)
+          }
+        } finally {
+          stopRepairActive = false
+          bot.setControlState('sprint', shouldSprintDuringRepair(config))
+        }
+        await delay(tickMs)
+        continue
+      }
 
       try {
         const repairMovePromise = bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
@@ -9167,6 +9552,21 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 
   const printer = config.printer || {}
   const advanced = config.advanced || {}
+  if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
+    console.log(`[${label}-LATENCY-SAFE] MC ping high; switching ${batchTargets.length} target(s) to one-by-one confirmed placement.`)
+    const safe = await runLatencySafePlacementBatch(bot, config, batchTargets, placeRange, `${label}-LATENCY-SAFE`)
+    if (safe.remainingTargets?.length) {
+      const fast = await runContinuousPlacementBatch(bot, config, safe.remainingTargets, rowOrder, placeRange, label)
+      return {
+        placed: safe.placed + fast.placed,
+        already: safe.already + fast.already,
+        skipped: safe.skipped + fast.skipped,
+        processed: toNumber(safe.seen, 0) + toNumber(fast.processed, 0)
+      }
+    }
+    return { placed: safe.placed, already: safe.already, skipped: safe.skipped, processed: safe.seen }
+  }
+
   const tickMs = Math.max(10, toNumber(printer.fastTraversalTickMs, 40))
   const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
   const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 1))
@@ -9186,6 +9586,8 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
   let already = 0
   let skipped = 0
   let emergencyRestockBlock = null
+  let latencySafeInterrupted = false
+  let latencySafeSeen = 0
   const inventoryDesyncHits = new Map()
   const maxInventoryDesyncHits = Math.max(1, toNumber(advanced.scannerInventoryDesyncMaxHits, 3))
   const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
@@ -9213,6 +9615,13 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
   const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
+      if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
+        latencySafeInterrupted = true
+        active = false
+        stopBotMovement(bot)
+        console.log(`[${label}-LATENCY-SAFE] MC ping rose during fast traversal; stopping movement for confirmed placement.`)
+        break
+      }
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
       if (allowPlacement) {
         const now = Date.now()
@@ -9310,7 +9719,12 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
       const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
       bot.setControlState('sprint', shouldSprint)
 
-      await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+      try {
+        await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+      } catch (err) {
+        if (!latencySafeInterrupted) throw err
+      }
+      if (latencySafeInterrupted) break
 
       if (checkpoint.action === 'lineEnd') {
         if (lineEndSettleMs > 0) {
@@ -9325,6 +9739,22 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
   } finally {
     active = false
     await placementLoop
+  }
+
+  if (latencySafeInterrupted) {
+    const remainingTargets = getUnresolvedPlacementTargets(bot, config, batchTargets)
+    if (remainingTargets.length) {
+      const safe = await runLatencySafePlacementBatch(bot, config, remainingTargets, placeRange, `${label}-LATENCY-SAFE`)
+      placed += safe.placed
+      already += safe.already
+      skipped += safe.skipped
+      if (safe.remainingTargets?.length) {
+        const fast = await runContinuousPlacementBatch(bot, config, safe.remainingTargets, rowOrder, placeRange, label)
+        placed += fast.placed
+        already += fast.already
+        skipped += fast.skipped
+      }
+    }
   }
 
   if (emergencyRestockBlock) {
@@ -9387,6 +9817,17 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   if (!batchTargets.length) return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0 }
 
   const printer = config.printer || {}
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
+    console.log(`[NERV-SCANNER-LATENCY-SAFE] MC ping high; switching ${batchTargets.length} target(s) to one-by-one confirmed placement.`)
+    const safe = await runLatencySafePlacementBatch(bot, config, batchTargets, placeRange, 'NERV-SCANNER-LATENCY-SAFE')
+    if (safe.remainingTargets?.length) {
+      const fast = await runNervScannerPlacementBatch(bot, config, safe.remainingTargets, startOnNorthSide, allowEmergencyRestock)
+      return mergePlacementResults(safe, fast)
+    }
+    return safe
+  }
+
   const tickMs = Math.max(10, toNumber(printer.fastTraversalTickMs, 40))
   const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
   const checkpointBuffer = Math.max(0.5, toNumber(config.advanced?.checkpointBuffer, 0.8))
@@ -9403,6 +9844,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   let already = 0
   let skipped = 0
   let emergencyRestockBlock = null
+  let latencySafeInterrupted = false
   const seen = new Set()
   const retryPriority = new Set()
   const inventoryDesyncHits = new Map()
@@ -9412,6 +9854,13 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
+      if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
+        latencySafeInterrupted = true
+        active = false
+        stopBotMovement(bot)
+        console.log('[NERV-SCANNER-LATENCY-SAFE] MC ping rose during fast traversal; stopping movement for confirmed placement.')
+        break
+      }
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint'
       if (allowPlacement) {
         for (let i = 0; i < maxPerTick; i += 1) {
@@ -9485,11 +9934,34 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
       const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
       const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
       bot.setControlState('sprint', shouldSprint)
-      await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+      try {
+        await bot.pathfinder.goto(new GoalNear(checkpoint.position.x, checkpoint.position.y, checkpoint.position.z, checkpointBuffer))
+      } catch (err) {
+        if (!latencySafeInterrupted) throw err
+      }
+      if (latencySafeInterrupted) break
     }
   } finally {
     active = false
     await placementLoop
+  }
+
+  if (latencySafeInterrupted) {
+    const remainingTargets = getUnresolvedPlacementTargets(bot, config, batchTargets)
+    if (remainingTargets.length) {
+      const safe = await runLatencySafePlacementBatch(bot, config, remainingTargets, placeRange, 'NERV-SCANNER-LATENCY-SAFE')
+      placed += safe.placed
+      already += safe.already
+      skipped += safe.skipped
+      latencySafeSeen += toNumber(safe.seen, 0)
+      if (safe.remainingTargets?.length) {
+        const fast = await runNervScannerPlacementBatch(bot, config, safe.remainingTargets, startOnNorthSide, allowEmergencyRestock)
+        placed += fast.placed
+        already += fast.already
+        skipped += fast.skipped
+        latencySafeSeen += toNumber(fast.seen, 0)
+      }
+    }
   }
 
   if (allowEmergencyRestock && emergencyRestockBlock) {
@@ -9517,7 +9989,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
     if (actual?.name !== target.blockName) missing += 1
   }
 
-  return { placed, already, skipped, seen: seen.size, missing }
+  return { placed, already, skipped, seen: seen.size + latencySafeSeen, missing }
 }
 
 async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true) {
@@ -9527,6 +9999,17 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   const printer = config.printer || {}
   const advanced = config.advanced || {}
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
+    console.log(`[NERV-WORKLOAD-LATENCY-SAFE] MC ping high; switching ${batchTargets.length} target(s) to one-by-one confirmed placement.`)
+    const safe = await runLatencySafePlacementBatch(bot, config, batchTargets, placeRange, 'NERV-WORKLOAD-LATENCY-SAFE')
+    if (safe.remainingTargets?.length) {
+      const fast = await runNervTimeWorkloadPlacementBatch(bot, config, safe.remainingTargets, startOnNorthSide, allowEmergencyRestock)
+      return mergePlacementResults(safe, fast)
+    }
+    return safe
+  }
+
   const placeDelayMs = Math.max(0, toNumber(advanced.scannerPlaceDelayMs, 0))
   const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 30))
   const pollMs = Math.max(0, toNumber(advanced.scannerWorkloadPollMs, 0))
@@ -9546,7 +10029,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const straightCheckpointTickMs = Math.max(25, toNumber(advanced.workloadStraightCheckpointTickMs, 50))
   const stallTimeoutMs = Math.max(0, toNumber(advanced.placementStallTimeoutMs, 5000))
 
-  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
   const stallSkipRadiusBlocks = Math.max(1, toNumber(advanced.placementStallSkipRadiusBlocks, placeRange + 1))
   const stallRecoveryMs = Math.max(0, toNumber(advanced.placementStallRecoveryMs, stallTimeoutMs > 0 ? Math.min(2000, Math.max(1500, Math.floor(stallTimeoutMs * 0.4))) : 0))
   const stallRecoveryAttempts = Math.max(0, toNumber(advanced.placementStallRecoveryAttempts, 3))
@@ -9573,6 +10055,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let emergencyRestockReason = 'unavailable during placement'
   let emergencyRestockAnchor = null
   let prevCheckpointPos = null
+  let latencySafeInterrupted = false
+  let latencySafeSeen = 0
   const seen = new Set()
   const stallSkipped = new Set()
   const pendingUntil = new Map()
@@ -10035,6 +10519,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
+      if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
+        latencySafeInterrupted = true
+        active = false
+        stopBotMovement(bot)
+        console.log('[NERV-WORKLOAD-LATENCY-SAFE] MC ping rose during fast traversal; stopping movement for confirmed placement.')
+        break
+      }
       if (!isWorkloadPlatformReady()) {
         if (!checkpointMoveInProgress) {
           await waitForWorkloadPlatformReady('workload-placement-loop')
@@ -10214,6 +10705,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               checkpointMoveTimeoutMs,
               'nerv-workload-checkpoint',
               {
+                config,
                 shouldPauseTimeout: () => !isWorkloadPlatformReady(),
                 pollMs: Math.max(100, Math.min(1000, toNumber(advanced.platformWatchdogPollMs, toNumber(config.advanced?.platformWatchdogPollMs, 1000)))),
                 isGoalSatisfied: checkpointIsCloseEnough
@@ -10230,6 +10722,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           break
         } catch (err) {
           if (isRuntimeStopError(err)) throw err
+          if (latencySafeInterrupted) {
+            console.log('[NERV-WORKLOAD-LATENCY-SAFE] checkpoint movement interrupted by high MC ping.')
+            break
+          }
           const afterMove = bot.entity.position
           if (String(err?.message || err || '').includes('nerv-workload-checkpoint-timeout') && checkpointIsCloseEnough()) {
             console.log(`[NERV-WORKLOAD-CHECKPOINT-OK] action=${currentAction || 'place'} pos=${afterMove.x.toFixed(2)} ${afterMove.y.toFixed(2)} ${afterMove.z.toFixed(2)} reason=timeout-near-goal distance=${distanceToPoint(afterMove, checkpoint.position).toFixed(2)} acceptRange=${checkpointAcceptRange.toFixed(2)}`)
@@ -10248,6 +10744,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           checkpointMoveInProgress = false
         }
       }
+
+      if (latencySafeInterrupted) break
 
       if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
         await drainActiveColumnTargets(Math.max(50, toNumber(advanced.inlineRepairDrainMs, Math.max(200, retryCooldownMs * 4))))
@@ -10373,6 +10871,32 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     await placementLoop
   }
 
+  if (latencySafeInterrupted) {
+    const remainingTargets = getUnresolvedTraversalTargets()
+    if (remainingTargets.length) {
+      const safe = await runLatencySafePlacementBatch(bot, config, remainingTargets, placeRange, 'NERV-WORKLOAD-LATENCY-SAFE')
+      placed += safe.placed
+      already += safe.already
+      skipped += safe.skipped
+      latencySafeSeen += toNumber(safe.seen, 0)
+      hardStops += safe.hardStops || 0
+      rawAllowedTotal += safe.rawAllowed || 0
+      cappedTotal += safe.capped || 0
+      maxAllowedSeen = Math.max(maxAllowedSeen, safe.maxAllowed || 0)
+      if (safe.remainingTargets?.length) {
+        const fast = await runNervTimeWorkloadPlacementBatch(bot, config, safe.remainingTargets, startOnNorthSide, allowEmergencyRestock)
+        placed += fast.placed
+        already += fast.already
+        skipped += fast.skipped
+        latencySafeSeen += toNumber(fast.seen, 0)
+        hardStops += fast.hardStops
+        rawAllowedTotal += fast.rawAllowed
+        cappedTotal += fast.capped
+        maxAllowedSeen = Math.max(maxAllowedSeen, fast.maxAllowed)
+      }
+    }
+  }
+
   if (allowEmergencyRestock && emergencyRestockBlock) {
     console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; stopping movement, refilling, and retrying remaining targets once.`)
     const unresolvedBeforeRestock = getUnresolvedTraversalTargets()
@@ -10418,7 +10942,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     placed,
     already,
     skipped,
-    seen: seen.size,
+    seen: seen.size + latencySafeSeen,
     missing,
     hardStops,
     rawAllowed: rawAllowedTotal,
@@ -11453,6 +11977,7 @@ function createBot(config) {
     }
   })
 
+  installAdaptiveLatencyGuard(bot, config)
   applyAntiHunger(bot, config)
   installChatLogin(bot, config)
   bot.once('login', () => applyInventoryStateSync(bot, config))
@@ -13540,11 +14065,203 @@ function get6b6tHosts(config) {
   const hosts = uniqueList([
     ...configured,
     config.bot?.host,
-    'play.6b6t.org',
     'alt.6b6t.org',
+    'alt3.6b6t.org',
+    'play.6b6t.org',
     'alt2.6b6t.org'
   ])
-  return hosts.length ? hosts : [config.bot?.host || 'play.6b6t.org']
+  return hosts.length ? hosts : [config.bot?.host || 'alt.6b6t.org']
+}
+
+function encodeMcVarInt(value) {
+  let remaining = Number(value) >>> 0
+  const bytes = []
+  do {
+    let temp = remaining & 0x7f
+    remaining >>>= 7
+    if (remaining !== 0) temp |= 0x80
+    bytes.push(temp)
+  } while (remaining !== 0)
+  return Buffer.from(bytes)
+}
+
+function readMcVarInt(buffer, offset = 0) {
+  let value = 0
+  let shift = 0
+  for (let i = offset; i < buffer.length && i < offset + 5; i += 1) {
+    const byte = buffer[i]
+    value |= (byte & 0x7f) << shift
+    if ((byte & 0x80) !== 0x80) {
+      return { value, size: i - offset + 1 }
+    }
+    shift += 7
+  }
+  return null
+}
+
+function encodeMcString(value) {
+  const body = Buffer.from(String(value || ''), 'utf8')
+  return Buffer.concat([encodeMcVarInt(body.length), body])
+}
+
+function encodeMcPacket(packetId, parts = []) {
+  const body = Buffer.concat([encodeMcVarInt(packetId), ...parts])
+  return Buffer.concat([encodeMcVarInt(body.length), body])
+}
+
+function tryDecodeMcPacket(buffer) {
+  const lengthInfo = readMcVarInt(buffer, 0)
+  if (!lengthInfo) return null
+  const totalLength = lengthInfo.size + lengthInfo.value
+  if (buffer.length < totalLength) return null
+  const body = buffer.subarray(lengthInfo.size, totalLength)
+  const idInfo = readMcVarInt(body, 0)
+  if (!idInfo) return null
+  return {
+    packetId: idInfo.value,
+    payload: body.subarray(idInfo.size),
+    rest: buffer.subarray(totalLength)
+  }
+}
+
+function decodeMcStringPayload(payload) {
+  const lengthInfo = readMcVarInt(payload, 0)
+  if (!lengthInfo) return ''
+  return payload.subarray(lengthInfo.size, lengthInfo.size + lengthInfo.value).toString('utf8')
+}
+
+function connectTcpSocket(host, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host, port })
+    let settled = false
+    const done = (err) => {
+      if (settled) return
+      settled = true
+      socket.removeAllListeners('connect')
+      socket.removeAllListeners('error')
+      socket.removeAllListeners('timeout')
+      if (err) {
+        try { socket.destroy() } catch { }
+        reject(err)
+      } else {
+        resolve(socket)
+      }
+    }
+    socket.setNoDelay(true)
+    socket.setTimeout(Math.max(500, timeoutMs))
+    socket.once('connect', () => done(null))
+    socket.once('error', done)
+    socket.once('timeout', () => done(new Error(`status-timeout-${timeoutMs}ms`)))
+  })
+}
+
+function readMinecraftPacket(socket, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0)
+    const cleanup = () => {
+      clearTimeout(timer)
+      socket.removeListener('data', onData)
+      socket.removeListener('error', onError)
+      socket.removeListener('end', onEnd)
+      socket.removeListener('close', onClose)
+    }
+    const finish = (err, packet) => {
+      cleanup()
+      if (err) reject(err)
+      else resolve(packet)
+    }
+    const onData = (chunk) => {
+      buffer = Buffer.concat([buffer, chunk])
+      const packet = tryDecodeMcPacket(buffer)
+      if (packet) finish(null, packet)
+    }
+    const onError = (err) => finish(err)
+    const onEnd = () => finish(new Error('status-socket-ended'))
+    const onClose = () => finish(new Error('status-socket-closed'))
+    const timer = setTimeout(() => finish(new Error(`status-read-timeout-${timeoutMs}ms`)), Math.max(500, timeoutMs))
+    socket.on('data', onData)
+    socket.once('error', onError)
+    socket.once('end', onEnd)
+    socket.once('close', onClose)
+  })
+}
+
+async function queryMinecraftServerStatus(host, port, config) {
+  const advanced = config?.advanced || {}
+  const timeoutMs = Math.max(500, toNumber(advanced.mcStatusHostSelectionTimeoutMs, 5000))
+  const protocolVersion = Math.max(0, toNumber(advanced.mcStatusHostSelectionProtocolVersion, 763))
+  const socket = await connectTcpSocket(host, port, timeoutMs)
+  const startedAt = Date.now()
+  try {
+    socket.write(encodeMcPacket(0, [
+      encodeMcVarInt(protocolVersion),
+      encodeMcString(host),
+      Buffer.from([(port >> 8) & 0xff, port & 0xff]),
+      encodeMcVarInt(1)
+    ]))
+    socket.write(encodeMcPacket(0))
+    const statusPacket = await readMinecraftPacket(socket, timeoutMs)
+    if (statusPacket.packetId !== 0) throw new Error(`unexpected-status-packet-${statusPacket.packetId}`)
+    const statusLatencyMs = Date.now() - startedAt
+    const rawJson = decodeMcStringPayload(statusPacket.payload)
+    const status = rawJson ? JSON.parse(rawJson) : {}
+
+    const pingPayload = Buffer.alloc(8)
+    pingPayload.writeBigInt64BE(BigInt(Date.now()))
+    const pingStartedAt = Date.now()
+    socket.write(encodeMcPacket(1, [pingPayload]))
+    const pongPacket = await readMinecraftPacket(socket, timeoutMs)
+    const pongLatencyMs = pongPacket.packetId === 1 ? Date.now() - pingStartedAt : statusLatencyMs
+    return {
+      host,
+      ok: true,
+      latencyMs: Math.max(1, Math.round(statusLatencyMs)),
+      statusLatencyMs: Math.max(1, Math.round(statusLatencyMs)),
+      pongLatencyMs: Math.max(1, Math.round(pongLatencyMs || statusLatencyMs)),
+      version: status?.version?.name || 'unknown',
+      playersOnline: Number.isFinite(Number(status?.players?.online)) ? Number(status.players.online) : null,
+      playersMax: Number.isFinite(Number(status?.players?.max)) ? Number(status.players.max) : null
+    }
+  } finally {
+    try { socket.end() } catch { }
+    try { socket.destroy() } catch { }
+  }
+}
+
+async function chooseBest6b6tHostIndex(config, hosts, fallbackIndex = 0, label = 'runtime') {
+  if (!Array.isArray(hosts) || hosts.length <= 1) return Math.max(0, fallbackIndex)
+  if (config?.advanced?.mcStatusHostSelectionEnabled === false) return Math.max(0, fallbackIndex)
+
+  const port = toNumber(config?.bot?.port, 25565)
+  console.log(`[6B6T-MC-STATUS] ${label}: checking ${hosts.join(', ')} before connecting.`)
+  const results = await Promise.all(hosts.map(async (host) => {
+    try {
+      return await queryMinecraftServerStatus(host, port, config)
+    } catch (err) {
+      return { host, ok: false, error: err?.message || String(err) }
+    }
+  }))
+
+  for (const result of results) {
+    if (result.ok) {
+      const players = result.playersOnline == null ? 'unknown' : `${result.playersOnline}/${result.playersMax ?? '?'}`
+      console.log(`[6B6T-MC-STATUS] ${result.host} MC_STATUS=${result.latencyMs}ms PONG=${result.pongLatencyMs}ms VERSION=${result.version} PLAYERS=${players}`)
+    } else {
+      console.log(`[6B6T-MC-STATUS] ${result.host} FAILED: ${result.error}`)
+    }
+  }
+
+  const best = results
+    .filter((result) => result.ok && Number.isFinite(result.latencyMs))
+    .sort((left, right) => left.latencyMs - right.latencyMs)[0]
+  if (!best) {
+    console.log(`[6B6T-MC-STATUS] ${label}: all checks failed; keeping ${hosts[fallbackIndex] || hosts[0]}.`)
+    return Math.max(0, fallbackIndex)
+  }
+
+  const bestIndex = Math.max(0, hosts.findIndex((host) => host === best.host))
+  console.log(`[6B6T-MC-STATUS] ${label}: selected ${best.host} (${best.latencyMs}ms).`)
+  return bestIndex
 }
 
 function makeHostConfig(config, host) {
@@ -15865,10 +16582,21 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
     let lastLog = 0
     let announced = false
     let lastPortalAttemptAt = 0
-    const stuckAt = Date.now()
+    let activeStuckMs = 0
+    let lastStuckCheckAt = Date.now()
 
     while (bot?._client && bot._client.state !== 'disconnected' && bot.__nervSessionActive !== false) {
-      if (Date.now() - stuckAt > stuckTimeoutMs) {
+      const nowForStuck = Date.now()
+      const elapsedSinceLastCheck = Math.max(0, nowForStuck - lastStuckCheckAt)
+      lastStuckCheckAt = nowForStuck
+      const latencyState = getLatencyBackoffState(bot, config)
+      if (latencyState.level === 'critical') {
+        stopLagSensitiveMovement(bot)
+        await applyAdaptiveLatencyBackoff(bot, config, `${reason}-platform-hold`, { pauseMovement: true })
+        continue
+      }
+      activeStuckMs += elapsedSinceLastCheck
+      if (activeStuckMs > stuckTimeoutMs) {
         console.log(`[PLATFORM-HOLD] Stuck in platform hold for ${Math.round(stuckTimeoutMs / 1000)}s; disconnecting to reconnect.`)
         try { bot.quit('platform-hold-stuck') } catch {}
         return
@@ -16500,8 +17228,9 @@ function get6b6tTestHosts(config) {
   if (configured.length) return uniqueList(configured)
   return uniqueList([
     config.bot?.host,
-    'play.6b6t.org',
     'alt.6b6t.org',
+    'alt3.6b6t.org',
+    'play.6b6t.org',
     'alt2.6b6t.org'
   ])
 }
@@ -16514,14 +17243,7 @@ function get6b6tTestVersions(config) {
   }
   return uniqueList([
     config.bot?.version,
-    '1.20.4',
-    '1.20.6',
-    '1.21',
-    '1.21.1',
-    '1.21.4',
-    '1.21.7',
-    '1.21.8',
-    '1.21.11'
+    '1.20'
   ])
 }
 
@@ -17988,6 +18710,9 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
         try { writeMultiWorkerHeartbeat(workerConfig, assignment) } catch { }
       }, heartbeatMs)
       let session
+      if (runtimeHosts.length > 1) {
+        runtimeHostIndex = await chooseBest6b6tHostIndex(workerConfig, runtimeHosts, runtimeHostIndex, assignment.name || 'worker')
+      }
       const activeHost = runtimeHosts.length ? runtimeHosts[runtimeHostIndex] : workerConfig.bot?.host
       const sessionConfig = activeHost ? makeHostConfig(workerConfig, activeHost) : workerConfig
       try {
@@ -18227,6 +18952,9 @@ async function start() {
         console.log(`[RECONNECT] Starting attempt ${attempt}/${reconnect.maxAttempts}.`)
       }
 
+      if (runtimeHosts.length > 1) {
+        runtimeHostIndex = await chooseBest6b6tHostIndex(config, runtimeHosts, runtimeHostIndex, 'runtime')
+      }
       const activeHost = runtimeHosts.length ? runtimeHosts[runtimeHostIndex] : config.bot?.host
       const sessionConfig = activeHost ? makeHostConfig(config, activeHost) : config
       let session = await runSingleSession(sessionConfig, attempt)

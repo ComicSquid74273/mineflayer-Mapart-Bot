@@ -71,10 +71,10 @@
       },
       "6b6t": {
         "bot": {
-          "host": "alt3.6b6t.org",
+          "host": "alt.6b6t.org",
           "hosts": [
-            "alt3.6b6t.org",
             "alt.6b6t.org",
+            "alt3.6b6t.org",
             "play.6b6t.org",
             "alt2.6b6t.org"
           ],
@@ -315,6 +315,20 @@
     "autoEatFoodItem": "cooked_beef",
     "anvilPillarMinCount": 3,
     "anvilPillarScanLimit": 16,
+    "supportStockDashboardWarningsEnabled": true,
+    "supportStockFoodMinStacks": 5,
+    "supportStockXpBottleMinStacks": 5,
+    "supportStockEmptyMapMinStacks": 1,
+    "supportStockGlassPaneMinStacks": 1,
+    "supportStockChestOpenTimeoutMs": 8000,
+    "supportStockChestSyncWaitMs": 8000,
+    "supportStockChestStableMs": 800,
+    "supportStockChestOpenAttempts": 5,
+    "supportStockChestPollMs": 100,
+    "latencySafeModeEnterMs": 50,
+    "latencySafeModeResumeMs": 45,
+    "latencySafePlacementSettleMs": 50,
+    "latencySafePlacementMoveTimeoutMs": 12000,
     "sneakOnDispenserOnly": true,
     "resetChestWaitMs": 2000,
     "rescanEnabled": true,
