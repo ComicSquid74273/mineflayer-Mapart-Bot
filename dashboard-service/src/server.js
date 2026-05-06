@@ -1064,12 +1064,40 @@ function createAlert(level, category, title, message, details = {}) {
   }
 }
 
+function botHasLobbyPortal4Signal(bot) {
+  const fields = [
+    bot?.phase,
+    bot?.statusDetail,
+    bot?.location,
+    bot?.locationDetail,
+    bot?.lastError,
+    bot?.activeState,
+    bot?.clientState
+  ]
+  for (const value of fields) {
+    if (String(value || '').trim().toLowerCase() === 'lobby-portal-4') return true
+  }
+
+  const warningHit = Array.isArray(bot?.warnings) && bot.warnings.some((warning) => {
+    const text = `${warning?.category || ''} ${warning?.message || ''} ${JSON.stringify(warning?.details || {})}`.toLowerCase()
+    return text.includes('lobby-portal-4')
+  })
+  if (warningHit) return true
+
+  return Array.isArray(bot?.alerts) && bot.alerts.some((alert) => {
+    if (alert?.active === false) return false
+    const text = `${alert?.category || ''} ${alert?.message || ''} ${JSON.stringify(alert?.details || {})}`.toLowerCase()
+    return text.includes('lobby-portal-4')
+  })
+}
+
 function buildDashboardAlerts(bots, nodes, assignments) {
   const alerts = []
   const staleBots = bots.filter((bot) => bot.online === true && bot.activeState === 'stale')
   const offlineBots = bots.filter((bot) => bot.online !== true)
   const offlineNodes = nodes.filter((node) => Number(node.onlineCount || 0) <= 0)
   const errorBots = bots.filter((bot) => String(bot.lastError || '').trim())
+  const lobbyPortal4Bots = bots.filter(botHasLobbyPortal4Signal)
   const heldAssignments = assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
     if (!['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held'].includes(status)) return false
@@ -1095,6 +1123,14 @@ function buildDashboardAlerts(bots, nodes, assignments) {
     .filter((warning) => /stock|material|food|map|xp|bottle/i.test(`${warning.category || ''} ${warning.message || ''}`))
     .map((warning) => ({ bot, warning })))
 
+  if (lobbyPortal4Bots.length) {
+    const botNames = [...new Set(lobbyPortal4Bots.map((bot) => String(bot.botName || '').trim()).filter(Boolean))]
+    const hostLabels = [...new Set(lobbyPortal4Bots.map((bot) => String(bot.hostLabel || '').trim()).filter(Boolean))]
+    alerts.push(createAlert('critical', 'lobby-portal-4', 'Lobby portal error', `lobby-portal-4 reported by ${botNames.join(', ') || 'unknown bot'} on ${hostLabels.join(', ') || 'unknown node'}.`, {
+      botNames,
+      hostLabels
+    }))
+  }
   if (activeWaterBots.length) {
     alerts.push(createAlert('critical', 'platform-water', 'Water on platform', `${activeWaterBots.length} bot(s) are paused until water is removed from the carpet layer.`, {
       botNames: activeWaterBots.map((bot) => bot.botName)
