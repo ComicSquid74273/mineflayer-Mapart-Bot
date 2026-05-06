@@ -3103,7 +3103,6 @@ function createDefaultConfig() {
       xpBottleChest: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       xpBottleChests: [],
       xpButton: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
-      xpDispenser: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       anvil: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       foodChest: { enabled: false, position: { x: 0, y: 0, z: 0 }, accessPosition: null },
       mapMaterialChests: [],
@@ -3240,7 +3239,7 @@ function applyAnchorTranslation(config) {
     }))
   }
 
-  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpBottleChest', 'xpButton', 'xpDispenser', 'anvil', 'foodChest']) {
+  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpBottleChest', 'xpButton', 'anvil', 'foodChest']) {
     const node = machine[key]
     if (!node) continue
     node.position = translatePoint(node.position, delta)
@@ -3410,15 +3409,6 @@ function importNervFolderConfig(imported, baseConfig) {
     }
   }
 
-  const xpDispenserPos = toBlockPos(imported?.xpDispenser)
-  if (xpDispenserPos) {
-    merged.machine.xpDispenser = {
-      enabled: true,
-      position: xpDispenserPos,
-      accessPosition: toOpenPos(imported?.xpDispenser)
-    }
-  }
-
   const anvilPos = toBlockPos(imported?.anvil)
   if (anvilPos) {
     merged.machine.anvil = {
@@ -3502,7 +3492,6 @@ function mergeUserConfig(base, loaded, options = {}) {
         ? loaded.machine.xpBottleChests
         : (base.machine.xpBottleChests || []),
       xpButton: { ...base.machine.xpButton, ...(loaded.machine?.xpButton || {}) },
-      xpDispenser: { ...base.machine.xpDispenser, ...(loaded.machine?.xpDispenser || {}) },
       anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) },
       foodChest: { ...base.machine.foodChest, ...(loaded.machine?.foodChest || {}) }
     }
@@ -3518,7 +3507,6 @@ function mergeUserConfig(base, loaded, options = {}) {
         ? loaded.machine.xpBottleChests
         : (base.machine.xpBottleChests || []),
       xpButton: { ...base.machine.xpButton, ...(loaded.machine?.xpButton || {}) },
-      xpDispenser: { ...base.machine.xpDispenser, ...(loaded.machine?.xpDispenser || {}) },
       anvil: { ...base.machine.anvil, ...(loaded.machine?.anvil || {}) },
       foodChest: { ...base.machine.foodChest, ...(loaded.machine?.foodChest || {}) }
     }
@@ -5956,11 +5944,7 @@ async function checkSupportStockWarningsOnce(bot, config, reason = 'map-run') {
   }
 
   const foodChests = normalizeMachineChestList(machine.foodChest?.enabled !== false ? machine.foodChest : null)
-  const xpChests = normalizeMachineChestList(
-    machine.xpBottleChests,
-    machine.xpBottleChest?.enabled !== false ? machine.xpBottleChest : null,
-    machine.xpDispenser?.enabled !== false ? machine.xpDispenser : null
-  )
+  const xpChests = normalizeMachineChestList(machine.xpBottleChests)
   const mapChests = normalizeMachineChestList(machine.mapMaterialChests)
 
   await checkStackThreshold('Food', foodItem, foodChests, thresholds.food)
@@ -6532,11 +6516,7 @@ async function refillXpForPostPrint(bot, config) {
   const targetLevel = Math.max(minLevel, toNumber(advanced.postPrintTargetXpLevel, 5))
   const currentLevel = toNumber(bot.experience?.level, 0)
   const machine = config.machine || {}
-  const xpBottleChests = normalizeMachineChestList(
-    machine.xpBottleChests,
-    machine.xpBottleChest?.enabled !== false ? machine.xpBottleChest : null,
-    machine.xpDispenser?.enabled !== false ? machine.xpDispenser : null
-  )
+  const xpBottleChests = normalizeMachineChestList(machine.xpBottleChests)
   const xpButtonConfig = config.machine?.xpButton
 
   if (currentLevel >= minLevel) return
@@ -14892,8 +14872,10 @@ function collectSpatialLandmarks(config) {
   addSpatialLandmark(landmarks, 'finishedMapChest', machine.finishedMapChest, { expected: ['chest', 'trapped_chest', 'barrel'], required: machine.finishedMapChest?.enabled === true })
   addSpatialLandmark(landmarks, 'resetBlock', machine.resetBlock, { required: machine.resetBlock?.enabled === true })
   addSpatialLandmark(landmarks, 'xpButton', machine.xpButton, { expected: ['stone_button', 'oak_button', 'spruce_button', 'birch_button', 'jungle_button', 'acacia_button', 'dark_oak_button', 'mangrove_button', 'cherry_button', 'bamboo_button', 'crimson_button', 'warped_button', 'polished_blackstone_button'], required: machine.xpButton?.enabled === true })
-  addSpatialLandmark(landmarks, 'xpDispenser', machine.xpDispenser, { expected: ['dispenser', 'dropper'], required: machine.xpDispenser?.enabled === true, note: 'XP source; replaces xpBottleChest when configured.' })
-  addSpatialLandmark(landmarks, 'xpBottleChest', machine.xpBottleChest, { expected: ['chest', 'trapped_chest', 'barrel'], required: false, note: machine.xpDispenser?.enabled ? 'Ignored because xpDispenser is configured.' : '' })
+  const xpBottleChests = Array.isArray(machine.xpBottleChests) ? machine.xpBottleChests : []
+  xpBottleChests.forEach((node, index) => {
+    addSpatialLandmark(landmarks, `xpBottleChests.${index}`, node, { expected: ['chest', 'trapped_chest', 'barrel'], required: false })
+  })
   addSpatialLandmark(landmarks, 'anvil', machine.anvil, { expected: ['anvil', 'chipped_anvil', 'damaged_anvil'], required: machine.anvil?.enabled === true })
   addSpatialLandmark(landmarks, 'foodChest', machine.foodChest, { expected: ['chest', 'trapped_chest', 'barrel'], required: machine.foodChest?.enabled === true })
 
@@ -15169,9 +15151,6 @@ function buildSpatialSnapshot(bot, config) {
   const warnings = []
   if (!classification.platform) warnings.push(`not-on-platform:${classification.state}`)
   if (shouldReuseSavedScan) warnings.push(`reused-saved-spatial-scan:${savedSnapshot.createdAt || 'unknown'}`)
-  if (config.machine?.xpDispenser?.enabled === true) {
-    warnings.push('xpBottleChest ignored; xpDispenser is configured as XP source')
-  }
   for (const pending of requiredPending) {
     warnings.push(`required landmark pending/unloaded: ${pending.key} expected=${pending.expected.join('|') || 'any'}`)
   }
@@ -15956,11 +15935,15 @@ function logConfiguredCoordinateSummary(config) {
     console.log(`[COORDS] loginPortal enabled=${login.enabled !== false} center=${toNumber(login.x, 0)},${toNumber(login.y, 0)},${toNumber(login.z, 0)} radius=${toNumber(login.radius, 0)}`)
   }
 
-  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpButton', 'xpDispenser', 'anvil', 'foodChest']) {
+  for (const key of ['cartographyTable', 'finishedMapChest', 'resetBlock', 'xpButton', 'anvil', 'foodChest']) {
     const node = machine[key]
     if (!node) continue
     console.log(`[COORDS] machine ${key} enabled=${node.enabled !== false} position=${formatCoordTriplet(node.position)} access=${formatCoordTriplet(node.accessPosition)}`)
   }
+  const xpBottleChests = Array.isArray(machine.xpBottleChests) ? machine.xpBottleChests : []
+  xpBottleChests.forEach((node, index) => {
+    console.log(`[COORDS] machine xpBottleChests.${index} enabled=${node?.enabled !== false} position=${formatCoordTriplet(node?.position)} access=${formatCoordTriplet(node?.accessPosition)}`)
+  })
 }
 
 function logStartupSummary(config, reconnect) {
@@ -16573,10 +16556,8 @@ function runSpatialAwarenessTestSession(config) {
       for (const warning of snapshot.summary.warnings) {
         console.log(`[SPATIAL-WARN] ${warning}`)
       }
-      const xpDispenser = snapshot.landmarks.find((entry) => entry.key === 'xpDispenser')
       const xpButton = snapshot.landmarks.find((entry) => entry.key === 'xpButton')
       if (xpButton) console.log(`[SPATIAL-CHECK] xpButton actual=${xpButton.actual} ok=${xpButton.ok} pos=${JSON.stringify(xpButton.position)}`)
-      if (xpDispenser) console.log(`[SPATIAL-CHECK] xpDispenser actual=${xpDispenser.actual} ok=${xpDispenser.ok} pos=${JSON.stringify(xpDispenser.position)}`)
       return { snapshot, filePath }
     }
 

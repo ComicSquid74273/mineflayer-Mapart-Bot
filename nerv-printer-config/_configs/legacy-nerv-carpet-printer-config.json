@@ -59,18 +59,6 @@
     "yaw": 1258.669,
     "pitch": 57.149937
   },
-  "xpDispenser": {
-    "blockPos": {
-      "x": -628,
-      "y": -8,
-      "z": -963
-    },
-    "openPos": {
-      "x": -628,
-      "y": -9,
-      "z": -963
-    }
-  },
   "xpBottleChests": [
     {
       "blockPos": {

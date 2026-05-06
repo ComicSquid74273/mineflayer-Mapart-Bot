@@ -19652,40 +19652,6 @@
       "ok": true
     },
     {
-      "key": "xpDispenser",
-      "enabled": true,
-      "required": true,
-      "expected": [
-        "dispenser",
-        "dropper"
-      ],
-      "position": {
-        "x": 8765196,
-        "y": 67,
-        "z": 5890365
-      },
-      "accessPosition": {
-        "x": 8765196,
-        "y": 66,
-        "z": 5890365
-      },
-      "note": "XP source; replaces xpBottleChest when configured.",
-      "relativePosition": {
-        "dx": 78,
-        "dy": 1,
-        "dz": -1
-      },
-      "relativeAccessPosition": {
-        "dx": 78,
-        "dy": 0,
-        "dz": -1
-      },
-      "loaded": true,
-      "actual": "smooth_stone_slab",
-      "status": "mismatch",
-      "ok": false
-    },
-    {
       "key": "xpBottleChest",
       "enabled": false,
       "required": false,
@@ -19700,7 +19666,7 @@
         "z": 5891328
       },
       "accessPosition": null,
-      "note": "Ignored because xpDispenser is configured.",
+      "note": "",
       "relativePosition": {
         "dx": 706,
         "dy": 9,
@@ -23207,12 +23173,10 @@
   "summary": {
     "ok": false,
     "status": "failed",
-    "requiredFailures": 2,
+    "requiredFailures": 1,
     "requiredPending": 0,
-    "landmarks": 105,
+    "landmarks": 104,
     "warnings": [
-      "xpBottleChest ignored; xpDispenser is configured as XP source",
-      "required landmark failed: xpDispenser expected=dispenser|dropper actual=smooth_stone_slab",
       "required landmark failed: anvil expected=anvil|chipped_anvil|damaged_anvil actual=smooth_stone"
     ]
   }
