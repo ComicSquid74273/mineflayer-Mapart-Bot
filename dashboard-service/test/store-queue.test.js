@@ -32,6 +32,22 @@ function registerNode(store, hostLabel, botName = `${hostLabel}-bot`) {
   })
 }
 
+function upsertRuntimeBot(store, overrides = {}) {
+  const startedAt = overrides.currentNbtStartedAt || new Date(Date.now() - 31 * 60 * 1000).toISOString()
+  return store.upsertBotStatus({
+    botName: 'runtime-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'printing',
+    location: 'platform',
+    locationDetail: 'platform',
+    reconnectState: 'idle',
+    currentNbt: 'runtime-test.nbt',
+    currentNbtStartedAt: startedAt,
+    ...overrides
+  })
+}
+
 test('failed queue item below maxAttempts returns to pending for auto retry', () => {
   const { store } = makeStore()
   const file = createQueueFile(store, 'below-max.nbt', { maxAttempts: 3 })
@@ -173,4 +189,41 @@ test('same bot can refresh multiple held queue claims in one batch', () => {
   const refreshed = store.claimNextQueueFiles('node-a', 'bot-a', 10)
   assert.equal(refreshed.length, 10)
   assert.deepEqual(refreshed.map((item) => item.fileId), firstClaim.map((item) => item.fileId))
+})
+
+test('platform runtime watchdog queues reconnect after thirty minutes on platform', () => {
+  const { store } = makeStore()
+
+  upsertRuntimeBot(store)
+
+  const commands = store.listCommands((item) => item.targetBotName === 'runtime-bot' && item.commandType === 'reconnect')
+  assert.equal(commands.length, 1)
+  assert.equal(commands[0].requestedBy, 'dashboard-watchdog')
+  assert.equal(commands[0].reason, 'dashboard-platform-runtime-watchdog')
+
+  const events = store.listEvents()
+  assert.equal(events[0].action, 'runtime-watchdog-reconnect')
+})
+
+test('platform runtime watchdog does not reconnect off-platform bots', () => {
+  const { store } = makeStore()
+
+  upsertRuntimeBot(store, {
+    botName: 'off-platform-bot',
+    location: 'lobby',
+    locationDetail: 'lobby-portal-4'
+  })
+
+  const commands = store.listCommands((item) => item.targetBotName === 'off-platform-bot' && item.commandType === 'reconnect')
+  assert.equal(commands.length, 0)
+})
+
+test('platform runtime watchdog does not duplicate reconnect commands every heartbeat', () => {
+  const { store } = makeStore()
+
+  upsertRuntimeBot(store, { botName: 'duplicate-watchdog-bot' })
+  upsertRuntimeBot(store, { botName: 'duplicate-watchdog-bot' })
+
+  const commands = store.listCommands((item) => item.targetBotName === 'duplicate-watchdog-bot' && item.commandType === 'reconnect')
+  assert.equal(commands.length, 1)
 })
