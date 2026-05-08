@@ -57,9 +57,6 @@ function createStore(baseDir) {
   const NODE_TIMING_RECONCILE_MS = Math.max(1000, Number(process.env.DASHBOARD_NODE_TIMING_RECONCILE_MS || 10000))
   const QUEUE_BATCH_HIGH_WATER = Math.max(1, Number(process.env.DASHBOARD_QUEUE_BATCH_HIGH_WATER || 10))
   const QUEUE_BATCH_MAX_CLAIM = Math.max(1, Number(process.env.DASHBOARD_QUEUE_BATCH_MAX_CLAIM || 10))
-  const PLATFORM_RUNTIME_RECONNECT_MS = Math.max(60 * 1000, Number(process.env.DASHBOARD_PLATFORM_RUNTIME_RECONNECT_MS || 30 * 60 * 1000))
-  const PLATFORM_RUNTIME_RECONNECT_COOLDOWN_MS = Math.max(60 * 1000, Number(process.env.DASHBOARD_PLATFORM_RUNTIME_RECONNECT_COOLDOWN_MS || PLATFORM_RUNTIME_RECONNECT_MS))
-  const PLATFORM_RUNTIME_RECONNECT_REASON = 'dashboard-platform-runtime-watchdog'
   const COUNTED_NODE_PHASES = new Set(['printing', 'repair', 'rescan', 'post-print', 'cleanup'])
   const HOLD_NODE_PHASES = new Set([])
   const nextNodeTimingReconcileAtByHost = new Map()
@@ -391,77 +388,6 @@ function createStore(baseDir) {
 
   function isHoldNodePhase(phase) {
     return HOLD_NODE_PHASES.has(String(phase || '').trim().toLowerCase())
-  }
-
-  function isPlatformStatus(bot) {
-    const location = String(bot?.location || '').trim().toLowerCase()
-    const locationDetail = String(bot?.locationDetail || '').trim().toLowerCase()
-    return location === 'platform' || locationDetail === 'platform'
-  }
-
-  function hasActiveReconnectCommand(botName) {
-    const normalizedBot = String(botName || '').trim()
-    if (!normalizedBot) return false
-    return listCommands((item) =>
-      item.targetBotName === normalizedBot
-      && item.commandType === 'reconnect'
-      && (item.status === 'pending' || item.status === 'claimed')
-    ).length > 0
-  }
-
-  function hasRecentRuntimeWatchdogReconnect(botName, nowMs = Date.now()) {
-    const normalizedBot = String(botName || '').trim()
-    if (!normalizedBot) return false
-    return listCommands((item) => {
-      if (item.targetBotName !== normalizedBot) return false
-      if (item.commandType !== 'reconnect') return false
-      if (item.reason !== PLATFORM_RUNTIME_RECONNECT_REASON) return false
-      const createdAtMs = timestampMs(item.createdAt)
-      return createdAtMs > 0 && nowMs - createdAtMs >= 0 && nowMs - createdAtMs < PLATFORM_RUNTIME_RECONNECT_COOLDOWN_MS
-    }).length > 0
-  }
-
-  function maybeQueuePlatformRuntimeReconnect(bot) {
-    const botName = String(bot?.botName || '').trim()
-    if (!botName) return null
-    if (bot?.online !== true) return null
-    if (String(bot?.reconnectState || '').trim().toLowerCase() === 'reconnecting') return null
-    if (!isCountedNodePhase(bot?.phase)) return null
-    if (!isPlatformStatus(bot)) return null
-
-    const startedAtMs = timestampMs(bot?.currentNbtStartedAt)
-    if (!startedAtMs) return null
-    const nowMs = Date.now()
-    const elapsedMs = Math.max(0, nowMs - startedAtMs)
-    if (elapsedMs < PLATFORM_RUNTIME_RECONNECT_MS) return null
-    if (hasActiveReconnectCommand(botName)) return null
-    if (hasRecentRuntimeWatchdogReconnect(botName, nowMs)) return null
-
-    const command = createCommand({
-      targetBotName: botName,
-      commandType: 'reconnect',
-      requestedBy: 'dashboard-watchdog',
-      reason: PLATFORM_RUNTIME_RECONNECT_REASON
-    })
-    addEvent({
-      level: 'warn',
-      operator: 'dashboard-watchdog',
-      action: 'runtime-watchdog-reconnect',
-      message: `Queued force-reconnect for ${botName}: active platform runtime exceeded ${Math.round(PLATFORM_RUNTIME_RECONNECT_MS / 60000)} minutes.`,
-      details: {
-        botName,
-        hostLabel: bot.hostLabel || null,
-        phase: bot.phase || null,
-        location: bot.location || null,
-        locationDetail: bot.locationDetail || null,
-        currentNbt: bot.currentNbt || null,
-        currentNbtStartedAt: bot.currentNbtStartedAt || null,
-        elapsedMs,
-        thresholdMs: PLATFORM_RUNTIME_RECONNECT_MS,
-        commandId: command.commandId
-      }
-    })
-    return command
   }
 
   function getOpenSegmentDurationMs(run, endAt = null) {
@@ -982,7 +908,6 @@ function createStore(baseDir) {
     }
     bots[status.botName] = next
     writeJson(botsFile, bots)
-    maybeQueuePlatformRuntimeReconnect(next)
     reconcileQueueForBotLocalWork(next)
     const normalizedHost = String(next.hostLabel || '').trim()
     if (normalizedHost) {
@@ -1669,6 +1594,40 @@ function createStore(baseDir) {
     return { count: affected.length, items: affected }
   }
 
+  function resetDashboardForFreshStart() {
+    const previousFiles = listFiles()
+    const previousInventory = Object.keys(readNodeInventoryMap())
+    const previousCommands = listCommands()
+    const deletedUploadFiles = []
+    const uploadErrors = []
+
+    if (fs.existsSync(filesDir)) {
+      for (const entry of fs.readdirSync(filesDir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue
+        const filePath = path.join(filesDir, entry.name)
+        try {
+          fs.unlinkSync(filePath)
+          deletedUploadFiles.push(entry.name)
+        } catch (err) {
+          uploadErrors.push({ fileName: entry.name, error: err?.message || String(err) })
+        }
+      }
+    }
+
+    saveCommands([])
+    saveFiles([])
+    writeNodeInventoryMap({})
+    writeJson(nodeStatsFile, {})
+
+    return {
+      clearedQueueFiles: previousFiles.length,
+      clearedNodeInventories: previousInventory.length,
+      clearedCommands: previousCommands.length,
+      deletedUploadFiles: deletedUploadFiles.length,
+      uploadErrors
+    }
+  }
+
   function completeNodeCommand(hostLabel, commandId, status, resultMessage, botName = null) {
     const normalizedHost = String(hostLabel || '').trim()
     const normalizedBot = botName ? String(botName).trim() : null
@@ -1773,6 +1732,7 @@ function createStore(baseDir) {
     releaseQueueFile,
     retryQueueFile,
     retryFailedQueueFiles,
+    resetDashboardForFreshStart,
     completeNodeCommand,
     saveNodeLogDownload,
     getNodeLogDownload,

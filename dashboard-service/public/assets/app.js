@@ -158,7 +158,12 @@ function roleDefaults(role) {
   }
 }
 
+function isAdmin() {
+  return String(state.auth.role || '').toLowerCase() === 'admin'
+}
+
 function hasPermission(permissionName) {
+  if (permissionName === 'admin') return isAdmin()
   return Boolean(state.auth.permissions?.[permissionName])
 }
 
@@ -695,6 +700,44 @@ function renderSummary() {
   `).join('')
 }
 
+function formatAlertNodeBotDetails(alert) {
+  const details = alert?.details && typeof alert.details === 'object' ? alert.details : {}
+  const entries = []
+  const addEntry = (hostLabel, botName) => {
+    const host = String(hostLabel || '').trim()
+    const bot = String(botName || '').trim()
+    const label = host && bot ? `${host}/${bot}` : (host || bot)
+    if (label && !entries.includes(label)) entries.push(label)
+  }
+
+  if (Array.isArray(details.bots)) {
+    for (const item of details.bots) {
+      addEntry(item?.hostLabel, item?.botName)
+    }
+  }
+
+  if (Array.isArray(details.files)) {
+    for (const item of details.files) {
+      addEntry(item?.hostLabel, item?.botName)
+    }
+  }
+
+  if (!entries.length && Array.isArray(details.hostLabels)) {
+    const hosts = details.hostLabels.map((item) => String(item || '').trim()).filter(Boolean)
+    if (hosts.length) entries.push(`nodes: ${hosts.slice(0, 6).join(', ')}${hosts.length > 6 ? ` +${hosts.length - 6} more` : ''}`)
+  }
+
+  if (!entries.length && Array.isArray(details.botNames)) {
+    const bots = details.botNames.map((item) => String(item || '').trim()).filter(Boolean)
+    if (bots.length) entries.push(`bots: ${bots.slice(0, 6).join(', ')}${bots.length > 6 ? ` +${bots.length - 6} more` : ''}`)
+  }
+
+  if (!entries.length) return ''
+  const visible = entries.slice(0, 8)
+  const extra = entries.length > visible.length ? ` +${entries.length - visible.length} more` : ''
+  return `${visible.join(', ')}${extra}`
+}
+
 function renderAlerts() {
   if (!elements.alertsBar) return
   const sig = JSON.stringify(state.alerts || [])
@@ -712,11 +755,13 @@ function renderAlerts() {
     const level = String(alert.level || 'info').toLowerCase()
     const className = level === 'critical' || level === 'error' ? 'alert-critical'
       : (level === 'warn' ? 'alert-warn' : 'alert-info')
+    const nodeBotDetails = formatAlertNodeBotDetails(alert)
     return `
       <article class="alert-item ${className}">
         <div>
           <strong>${escapeHtml(alert.title || alert.category || 'Alert')}</strong>
           <p>${escapeHtml(alert.message || '')}</p>
+          ${nodeBotDetails ? `<p class="alert-meta">${escapeHtml(nodeBotDetails)}</p>` : ''}
         </div>
         <span class="tag ${className === 'alert-critical' ? 'status-offline' : 'status-neutral'}">${escapeHtml(alert.category || level)}</span>
       </article>`
@@ -782,6 +827,7 @@ function renderBotCard(bot) {
   const statusDetail = displayBotStatusDetail(bot)
   const locationText = bot.locationDetail || bot.location || 'unknown'
   const progress = formatBotProgress(bot)
+  const activeNbtRun = isActiveNbtRun(bot)
   const currentRunElapsed = bot.currentNbtStartedAt
     ? formatDuration(Date.now() - new Date(bot.currentNbtStartedAt).getTime())
     : 'n/a'
@@ -849,6 +895,7 @@ function renderBotCard(bot) {
       <div class="bot-actions">
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
         <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Stop Print</button>
+        ${activeNbtRun ? `<button class="danger-button small-button" type="button" data-action="reset-current-nbt" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-current-nbt="${escapeHtml(bot.currentNbt || '')}" title="Reset platform and restart this NBT from target 0">Reset NBT</button>` : ''}
         <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect from server (no auto-reconnect)">Disconnect</button>
         <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Reconnect to server">Reconnect</button>
       </div>
@@ -901,6 +948,7 @@ function renderBots() {
 
   const renderedNodes = state.nodes.map((node) => {
     const nodeBots = (botsByNode.get(node.hostLabel) || []).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
+    const nodeHasActiveNbt = nodeBots.some((bot) => isActiveNbtRun(bot))
     const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
     const configText = configFiles.length ? ` | Config ${configFiles.join(', ')}` : ''
     const editConfigName = configFiles.length === 1 ? configFiles[0] : ''
@@ -916,6 +964,7 @@ function renderBots() {
             <button class="ghost-button small-button" type="button" data-action="edit-node-config" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" data-config-name="${escapeHtml(editConfigName)}" title="${escapeHtml(editConfigName ? `Edit ${editConfigName}` : 'View config files')}">Edit Config</button>
             <button class="accent-button small-button" type="button" data-action="start-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Start Node</button>
             <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Stop Node</button>
+            ${nodeHasActiveNbt ? `<button class="danger-button small-button" type="button" data-action="reset-node-current-nbt" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Reset Node NBT</button>` : ''}
           </div>
         </div>
         ${renderNodeTimingMetrics(node)}
@@ -1185,15 +1234,18 @@ function renderNodes() {
   const totalFinishedMaps = state.nodes.reduce((total, node) => {
     return total + (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0)
   }, 0)
-  const bulkFinishedMapActions = hasPermission('canManageOperators') && totalFinishedMaps > 0
+  const bulkFinishedMapActions = isAdmin()
     ? `
       <article class="node-card">
         <div class="file-row">
           <div>
-            <strong>Finished map cleanup</strong>
+            <strong>Fresh-start maintenance</strong>
             <p class="file-meta">${escapeHtml(totalFinishedMaps)} finished .nbt file(s) reported across all nodes</p>
           </div>
-          <button class="danger-button small-button" type="button" data-action="delete-all-finished-maps" data-permission-needed="canManageOperators">Delete all finished</button>
+          <div class="bot-actions">
+            <button class="danger-button small-button" type="button" data-action="delete-all-finished-maps" data-permission-needed="admin">CLEANFINISHEDNBT</button>
+            <button class="danger-button small-button" type="button" data-action="reset-everything" data-permission-needed="admin">RESETEVERYTHING</button>
+          </div>
         </div>
       </article>
     `
@@ -1669,6 +1721,27 @@ async function onClearData() {
   }
 }
 
+async function onResetEverything() {
+  if (!isAdmin()) {
+    pushEvent('warn', 'Admin role required.')
+    return
+  }
+  const first = confirm('RESETEVERYTHING will clear dashboard queue/upload state, delete local and finished .nbt files on all reporting nodes, clear bot progress/queue state, and run platform cleanup on all known bots. Continue?')
+  if (!first) return
+  const typed = prompt('Type RESETEVERYTHING to confirm this fresh-start reset.')
+  if (String(typed || '').trim().toUpperCase() !== 'RESETEVERYTHING') {
+    pushEvent('info', 'Reset everything cancelled.')
+    return
+  }
+  try {
+    const result = await submitJson('/api/dashboard/reset-everything', { confirm: 'RESETEVERYTHING' })
+    pushEvent('warn', `Reset everything queued: ${result.nodeCommandCount || 0} node cleanup command(s), ${result.botCommandCount || 0} bot platform cleanup command(s).`)
+    await refreshData()
+  } catch (err) {
+    pushEvent('error', `Reset everything failed: ${err.message}`)
+  }
+}
+
 async function onDeleteDataFile(fileName) {
   if (!hasPermission('canManageOperators')) {
     pushEvent('warn', 'Admin permission required.')
@@ -2003,21 +2076,21 @@ async function onDeleteFinishedMap(hostLabel, fileName) {
 }
 
 async function onDeleteAllFinishedMaps() {
-  if (!hasPermission('canManageOperators')) {
-    pushEvent('warn', 'Admin permission required before deleting finished maps.')
+  if (!isAdmin()) {
+    pushEvent('warn', 'Admin role required before deleting finished maps across all nodes.')
     return
   }
   const totalFinishedMaps = state.nodes.reduce((total, node) => {
     return total + (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0)
   }, 0)
   if (!totalFinishedMaps) {
-    pushEvent('info', 'No finished maps are currently reported by nodes.')
+    pushEvent('info', 'No finished NBT files are currently reported by nodes.')
     return
   }
-  const confirmed = confirm(`Queue deletion for ${totalFinishedMaps} finished .nbt file(s) across all nodes?`)
+  const confirmed = confirm(`CLEANFINISHEDNBT: queue deletion for ${totalFinishedMaps} finished .nbt file(s) across all nodes?`)
   if (!confirmed) return
   const result = await submitJson('/api/dashboard/nodes/finished-maps/delete-all', {})
-  pushEvent('warn', `Queued ${result.count || 0} finished map delete command(s) across all nodes.`)
+  pushEvent('warn', `CLEANFINISHEDNBT queued ${result.count || 0} finished NBT delete command(s) across all nodes.`)
   await refreshData()
 }
 
@@ -2124,6 +2197,19 @@ async function onReconnectBot(botName) {
   await refreshData()
 }
 
+async function onResetCurrentNbt(botName, currentNbt = '') {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before resetting current NBT.')
+    return
+  }
+  const label = currentNbt ? `${botName} (${currentNbt})` : botName
+  const confirmed = confirm(`Reset current NBT for ${label}? This will reset saved progress to target 0, reconnect the bot, reset the platform, then restart the same NBT.`)
+  if (!confirmed) return
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/reset-current-nbt`, { reason: 'dashboard-ui reset current NBT' })
+  pushEvent('warn', `Queued current NBT reset for ${botName}`)
+  await refreshData()
+}
+
 async function onTpaBot(botName, tpaTarget) {
   if (!hasPermission('canOperate')) {
     pushEvent('warn', 'Login as an operator before sending TPA commands.')
@@ -2157,6 +2243,11 @@ async function onFleetAction(action, botName = null) {
   } else if (action === 'stop-node' && botName) {
     await submitJson(`/api/dashboard/nodes/${encodeURIComponent(botName)}/commands/stop`, { reason: 'dashboard-ui node stop' })
     pushEvent('warn', `Queued print stop for node ${botName}`)
+  } else if (action === 'reset-node-current-nbt' && botName) {
+    const confirmed = confirm(`Reset current NBT for all active bots on node ${botName}? This resets saved progress to target 0, reconnects each bot, resets the platform, then restarts the same NBT.`)
+    if (!confirmed) return
+    await submitJson(`/api/dashboard/nodes/${encodeURIComponent(botName)}/commands/reset-current-nbt`, { reason: 'dashboard-ui node reset current NBT' })
+    pushEvent('warn', `Queued current NBT reset for node ${botName}`)
   }
   await refreshData()
 }
@@ -2226,6 +2317,8 @@ document.addEventListener('click', async (event) => {
       await onDeleteFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
     } else if (button.dataset.action === 'delete-all-finished-maps') {
       await onDeleteAllFinishedMaps()
+    } else if (button.dataset.action === 'reset-everything') {
+      await onResetEverything()
     } else if (button.dataset.action === 'reprint-finished-map') {
       await onReprintFinishedMap(button.dataset.hostLabel || '', button.dataset.fileName || '')
     } else if (button.dataset.action === 'queue-release') {
@@ -2252,6 +2345,8 @@ document.addEventListener('click', async (event) => {
     } else if (button.dataset.action === 'download-node-config') {
       await downloadNodeConfigFile(button.dataset.hostLabel || '', button.dataset.configName || '')
       pushEvent('info', `Downloaded config ${button.dataset.configName || ''} from ${button.dataset.hostLabel || 'node'}`)
+    } else if (button.dataset.action === 'reset-node-current-nbt') {
+      await onFleetAction('reset-node-current-nbt', button.dataset.hostLabel || '')
     } else if (button.dataset.action === 'verify-done') {
       await onVerifyBot(button.dataset.botName || '', 'verified')
     } else if (button.dataset.action === 'verify-refresh') {
@@ -2264,6 +2359,8 @@ document.addEventListener('click', async (event) => {
       await onDisconnectBot(button.dataset.botName || '')
     } else if (button.dataset.action === 'reconnect-bot') {
       await onReconnectBot(button.dataset.botName || '')
+    } else if (button.dataset.action === 'reset-current-nbt') {
+      await onResetCurrentNbt(button.dataset.botName || '', button.dataset.currentNbt || '')
     } else if (button.dataset.action === 'edit-config') {
       await onEditConfig(button.dataset.configName || '')
     } else if (button.dataset.action === 'edit-node-config') {

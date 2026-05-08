@@ -52,7 +52,8 @@ const stdinCommandState = {
   rl: null,
   status: null,
   verificationWaiter: null,
-  runtimeControl: null
+  runtimeControl: null,
+  resetCurrentNbt: null
 }
 
 function getBootstrapLogConfig() {
@@ -766,6 +767,48 @@ function mapDashboardLocationDetail(runtime) {
   return 'unknown'
 }
 
+function stripMinecraftChatFormatting(text) {
+  return String(text || '').replace(/§[0-9A-FK-OR]/gi, '').trim()
+}
+
+function extractBotDeathMessage(text, botName) {
+  const clean = stripMinecraftChatFormatting(text).replace(/\s+/g, ' ').trim()
+  const name = String(botName || '').trim()
+  if (!clean || !name) return ''
+  const lower = clean.toLowerCase()
+  if (!lower.includes(name.toLowerCase())) return ''
+
+  const deathPatterns = [
+    /\bwas slain by\b/i,
+    /\bwas shot by\b/i,
+    /\bwas killed by\b/i,
+    /\bwas blown up by\b/i,
+    /\bwas fireballed by\b/i,
+    /\bwas impaled by\b/i,
+    /\bwas squashed by\b/i,
+    /\bwas doomed to fall\b/i,
+    /\bwas pricked to death\b/i,
+    /\bwas squashed too much\b/i,
+    /\bwas poked to death\b/i,
+    /\bwas stung to death\b/i,
+    /\bwas obliterated by\b/i,
+    /\bfell from a high place\b/i,
+    /\bfell out of the world\b/i,
+    /\bhit the ground too hard\b/i,
+    /\bwent up in flames\b/i,
+    /\bburned to death\b/i,
+    /\bdrowned\b/i,
+    /\bsuffocated in a wall\b/i,
+    /\bstarved to death\b/i,
+    /\bwithered away\b/i,
+    /\bblew up\b/i,
+    /\bexperienced kinetic energy\b/i,
+    /\bwalked into danger zone\b/i,
+    /\bdidn't want to live in the same world as\b/i
+  ]
+  return deathPatterns.some((pattern) => pattern.test(clean)) ? clean : ''
+}
+
 function mapPostPrintStatusDetail(step) {
   const value = String(step || '').trim().toLowerCase()
   if (value.startsWith('blocked-')) return `blocked-${mapPostPrintStatusDetail(value.slice('blocked-'.length))}`
@@ -897,6 +940,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     activeQueueFile: null,
     lastError: '',
     lastErrorAt: null,
+    deathMessage: '',
+    deathMessageAt: null,
+    deathClearAfterAt: 0,
     warnings: [],
     alerts: [],
     nodeInventoryCache: {
@@ -910,11 +956,36 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     lastActivityAt: Date.now(),
     startRequested: false,
     stopRequested: false,
+    platformCleanupRequested: false,
     commandBusy: false,
     queueBatchLimited: false,
     heartbeatTimer: null,
     commandTimer: null,
     stopped: false
+  }
+
+  function recordDeathMessage(message, source = 'runtime') {
+    const text = stripMinecraftChatFormatting(message).replace(/\s+/g, ' ').trim() || `${botName} died`
+    state.deathMessage = text
+    state.deathMessageAt = new Date().toISOString()
+    state.deathClearAfterAt = Date.now() + 15000
+    state.statusDetail = 'death-detected'
+    noteActivity()
+    console.log(`[DEATH-ALERT] ${botName}: ${text} source=${source}`)
+    void postStatus()
+  }
+
+  function clearDeathMessageIfOnPlatform(runtimeLocation = null) {
+    if (!state.deathMessage) return
+    const resolved = runtimeLocation || currentRuntimeLocation()
+    if (resolved?.classification?.platform !== true) return
+    if (Date.now() < Math.max(0, toNumber(state.deathClearAfterAt, 0))) return
+    if (Number.isFinite(Number(bot?.health)) && Number(bot.health) <= 0) return
+    console.log(`[DEATH-ALERT] ${botName}: cleared because bot is back on platform.`)
+    state.deathMessage = ''
+    state.deathMessageAt = null
+    state.deathClearAfterAt = 0
+    noteActivity()
   }
 
   // Buffer incoming in-game chat for the dashboard to read
@@ -923,6 +994,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     if (!text) return
     chatBuffer.push({ ts: new Date().toISOString(), text })
     if (chatBuffer.length > maxChatBuffer) chatBuffer.shift()
+    const deathMessage = extractBotDeathMessage(text, botName)
+    if (deathMessage) recordDeathMessage(deathMessage, 'chat')
+  })
+
+  bot.on('death', () => {
+    const recentDeathChat = [...chatBuffer].reverse()
+      .find((entry) => Date.now() - new Date(entry?.ts || 0).getTime() <= 5000 && extractBotDeathMessage(entry?.text, botName))
+    recordDeathMessage(recentDeathChat?.text || `${botName} died`, 'death-event')
   })
 
   function noteActivity() {
@@ -1115,6 +1194,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       ? isDashboardBotOnline()
       : onlineOverride
     const runtimeLocation = currentRuntimeLocation()
+    clearDeathMessageIfOnPlatform(runtimeLocation)
     const location = mapDashboardLocation(runtimeLocation)
     const locationDetail = mapDashboardLocationDetail(runtimeLocation)
     let statusDetail = state.statusDetail || (phase === 'idle' ? 'idle' : phase)
@@ -1159,6 +1239,8 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       progress: progressPayload,
       lastError: state.lastError || null,
       lastErrorAt: state.lastError ? state.lastErrorAt : null,
+      deathMessage: state.deathMessage || null,
+      deathMessageAt: state.deathMessage ? state.deathMessageAt : null,
       warnings: state.warnings.slice(-5),
       alerts: state.alerts.filter((item) => item.active === true).slice(-8),
       assignedInterval,
@@ -1219,6 +1301,74 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       status,
       resultMessage
     })
+  }
+
+  async function requestCurrentNbtReset(source = 'dashboard', commandId = null) {
+    const reason = 'dashboard-reset-current-nbt'
+    let resetProgress = null
+    try {
+      resetProgress = markCurrentNbtResetRequested(config, reason, sessionNumber)
+    } catch (error) {
+      const message = `reset-current-nbt failed: ${error?.message || error}`
+      if (commandId) await reportCommandResult(commandId, 'failed', message)
+      return message
+    }
+
+    printingIntentActive = true
+    state.startRequested = true
+    state.stopRequested = false
+    state.phase = 'cleanup'
+    state.statusDetail = 'reset-current-nbt'
+    state.currentNbt = path.basename(String(resetProgress.sourceName || resetProgress.sourcePath || state.currentNbt || '').trim()) || state.currentNbt
+    noteActivity()
+
+    const message = `reset requested for ${resetProgress.sourceName || resetProgress.sourcePath || 'current NBT'}; reconnecting before restart`
+    if (commandId) {
+      try {
+        await reportCommandResult(commandId, 'succeeded', message)
+      } catch (error) {
+        console.log(`[RESET-CURRENT-NBT-WARN] Could not report reset command result before reconnect: ${error?.message || error}`)
+      }
+      try {
+        resetProgress = markCurrentNbtResetRequested(config, reason, sessionNumber)
+      } catch (error) {
+        console.log(`[RESET-CURRENT-NBT-WARN] Could not refresh reset checkpoint after reporting command result: ${error?.message || error}`)
+      }
+    }
+
+    console.log(`[RESET-CURRENT-NBT] ${source}: ${message}`)
+    stopBotMovement(bot)
+    closeCurrentWindowIfOpen(bot, reason)
+    bot.__nervForcedEndReason = reason
+    try { bot.quit(reason) } catch {}
+    return message
+  }
+
+  async function requestPlatformCleanup(source = 'dashboard', commandId = null) {
+    printingIntentActive = false
+    state.platformCleanupRequested = true
+    state.startRequested = false
+    state.stopRequested = runtimeControl?.isRunActive?.() === true
+    state.phase = 'cleanup'
+    state.statusDetail = 'platform-cleanup-pending'
+    if (state.stopRequested) {
+      runtimeControl?.requestStop(source)
+      state.statusDetail = 'cleanup-after-current-step'
+    }
+    noteActivity()
+
+    const message = state.stopRequested
+      ? 'platform cleanup queued; bot will stop current work first'
+      : 'platform cleanup queued'
+    if (commandId) {
+      try {
+        await reportCommandResult(commandId, 'succeeded', message)
+      } catch (error) {
+        console.log(`[PLATFORM-CLEANUP-WARN] Could not report cleanup command result: ${error?.message || error}`)
+      }
+    }
+    console.log(`[PLATFORM-CLEANUP] ${source}: ${message}`)
+    return message
   }
 
   async function reportFileResult(fileId, deliveryStatus, failedReason = null) {
@@ -1661,6 +1811,30 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         await reportNodeCommandResult(command.commandId, 'succeeded', `deleted finished map ${command.fileName}`)
         return true
       }
+      case 'fresh-start-clean-node': {
+        try {
+          if (runtimeControl?.isRunActive?.() === true) {
+            printingIntentActive = false
+            state.platformCleanupRequested = true
+            state.startRequested = false
+            state.stopRequested = true
+            runtimeControl?.requestStop('dashboard-reset-everything')
+            noteActivity()
+            await reportNodeCommandResult(command.commandId, 'succeeded', 'fresh-start cleanup deferred until current work stops')
+            return true
+          }
+          const cleanup = cleanLocalFreshStartFiles(config, command.reason || 'dashboard-reset-everything')
+          invalidateNodeInventoryCache()
+          state.currentNbt = null
+          state.activeQueueFile = null
+          noteActivity()
+          const message = `fresh-start cleanup deleted node=${cleanup.nodeNbtDeleted.length} finished=${cleanup.finishedNbtDeleted.length} state=${cleanup.stateDeleted.length} sync=${cleanup.syncDeleted.length} errors=${cleanup.errors.length}`
+          await reportNodeCommandResult(command.commandId, cleanup.errors.length ? 'failed' : 'succeeded', message)
+        } catch (error) {
+          await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
+        }
+        return true
+      }
       case 'reprint-finished-map': {
         const fileName = path.basename(String(command.fileName || '').trim())
         if (!fileName || !fileName.toLowerCase().endsWith('.nbt')) {
@@ -1902,6 +2076,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         try { bot.quit('dashboard-reconnect') } catch { }
         break
       }
+      case 'reset-current-nbt': {
+        await requestCurrentNbtReset('dashboard', claimed.commandId)
+        break
+      }
+      case 'platform-cleanup': {
+        await requestPlatformCleanup('dashboard', claimed.commandId)
+        break
+      }
       case 'restart': {
         await reportCommandResult(claimed.commandId, 'failed', 'restart is not implemented in direct bot mode')
         break
@@ -1942,6 +2124,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
   return {
     start() {
+      stdinCommandState.resetCurrentNbt = async (source = 'terminal') => requestCurrentNbtReset(source)
       void postStatus(false)
       scheduleLoop('heartbeatTimer', dashboard.heartbeatMs, async () => {
         await postStatus()
@@ -1954,6 +2137,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       state.stopped = true
       if (state.heartbeatTimer) clearTimeout(state.heartbeatTimer)
       if (state.commandTimer) clearTimeout(state.commandTimer)
+      if (stdinCommandState.resetCurrentNbt) stdinCommandState.resetCurrentNbt = null
       state.phase = normalizeDashboardPhase(finalPhase)
       state.statusDetail = state.phase
       void postStatus(online)
@@ -2097,6 +2281,14 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     getActiveQueueNbtPath() {
       return getActiveQueueNbtPath()
     },
+    consumePlatformCleanupRequest() {
+      if (state.platformCleanupRequested !== true) return false
+      state.platformCleanupRequested = false
+      state.stopRequested = false
+      state.startRequested = false
+      noteActivity()
+      return true
+    },
     consumeStartRequest() {
       if (!state.startRequested) return false
       state.startRequested = false
@@ -2118,6 +2310,23 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, initialStartRequested = false) {
   let pendingStart = initialStartRequested
   while (isBotSessionLive(bot) && bot.__nervSessionActive !== false) {
+    if (dashboardRuntime?.consumePlatformCleanupRequest?.() === true) {
+      printingIntentActive = false
+      dashboardRuntime?.setCurrentNbt(null)
+      dashboardRuntime?.setPhase('cleanup', 'reset-everything-platform-cleanup')
+      const cleanup = cleanLocalFreshStartFiles(config, 'dashboard-reset-everything')
+      console.log(`[RESET-EVERYTHING] Local cleanup deleted node=${cleanup.nodeNbtDeleted.length} finished=${cleanup.finishedNbtDeleted.length} state=${cleanup.stateDeleted.length} sync=${cleanup.syncDeleted.length} errors=${cleanup.errors.length}.`)
+      try {
+        await runPlatformResetPreflight(bot, config, 'reset-everything')
+        dashboardRuntime?.markRunStopped?.('reset-everything-complete')
+      } catch (err) {
+        dashboardRuntime?.setLastError?.(`reset-everything platform cleanup failed: ${err?.message || err}`)
+        dashboardRuntime?.markRunStopped?.('reset-everything-platform-cleanup-failed')
+      }
+      await delay(1000)
+      continue
+    }
+
     if (runtimeControl?.isStopRequested()) {
       dashboardRuntime?.markRunStopped?.('stopped')
       await delay(1000)
@@ -2901,6 +3110,82 @@ function writeProgressSnapshot(filePath, input, totalTargets, processedTargets, 
   writeProgressState(filePath, createProgressState(input, totalTargets, processedTargets, phase, details))
 }
 
+function getProgressFilePath(config) {
+  return path.resolve(process.cwd(), config.files?.progressFile || './logs/nerv-printer-progress.json')
+}
+
+function unlinkFileIfExists(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return false
+  const stats = fs.statSync(filePath)
+  if (!stats.isFile()) return false
+  fs.unlinkSync(filePath)
+  return true
+}
+
+function deleteFilesInFolder(folderPath, predicate) {
+  const folder = path.resolve(process.cwd(), folderPath)
+  const deleted = []
+  const errors = []
+  if (!fs.existsSync(folder)) return { deleted, errors }
+
+  for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+    if (!entry.isFile()) continue
+    if (typeof predicate === 'function' && !predicate(entry.name)) continue
+    const filePath = path.join(folder, entry.name)
+    try {
+      fs.unlinkSync(filePath)
+      deleted.push(entry.name)
+    } catch (err) {
+      errors.push({ fileName: entry.name, error: err?.message || String(err) })
+    }
+  }
+
+  return { deleted, errors }
+}
+
+function cleanLocalFreshStartFiles(config, reason = 'reset-everything') {
+  const nbtFolder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
+  const finishedFolder = path.resolve(process.cwd(), config.files?.finishedFolder || './finished-maps')
+  const syncFolder = resolveMultiSyncFolder(config)
+  const result = {
+    reason,
+    nodeNbtDeleted: [],
+    finishedNbtDeleted: [],
+    stateDeleted: [],
+    syncDeleted: [],
+    errors: []
+  }
+
+  const nodeDelete = deleteFilesInFolder(nbtFolder, (name) => String(name || '').toLowerCase().endsWith('.nbt'))
+  result.nodeNbtDeleted.push(...nodeDelete.deleted)
+  result.errors.push(...nodeDelete.errors.map((entry) => ({ ...entry, scope: 'node-nbt' })))
+
+  const finishedDelete = deleteFilesInFolder(finishedFolder, (name) => String(name || '').toLowerCase().endsWith('.nbt'))
+  result.finishedNbtDeleted.push(...finishedDelete.deleted)
+  result.errors.push(...finishedDelete.errors.map((entry) => ({ ...entry, scope: 'finished-nbt' })))
+
+  const stateFiles = [
+    getProgressFilePath(config),
+    path.join(nbtFolder, '.dashboard-queue.json'),
+    path.join(nbtFolder, '.dashboard-queue-results.json')
+  ]
+  for (const filePath of stateFiles) {
+    try {
+      if (unlinkFileIfExists(filePath)) result.stateDeleted.push(path.basename(filePath))
+    } catch (err) {
+      result.errors.push({ scope: 'state', fileName: path.basename(filePath), error: err?.message || String(err) })
+    }
+  }
+
+  if (syncFolder && fs.existsSync(syncFolder)) {
+    const syncDelete = deleteFilesInFolder(syncFolder, (name) => String(name || '').toLowerCase().endsWith('.json'))
+    result.syncDeleted.push(...syncDelete.deleted)
+    result.errors.push(...syncDelete.errors.map((entry) => ({ ...entry, scope: 'multi-sync' })))
+  }
+
+  return result
+}
+
 function normalizeResumePhase(phase) {
   const value = String(phase || 'printing').toLowerCase()
   if (value === 'repair' || value.startsWith('repair_')) return 'repair'
@@ -2909,11 +3194,64 @@ function normalizeResumePhase(phase) {
   return 'printing'
 }
 
+function markCurrentNbtResetRequested(config, reason = 'dashboard-reset-current-nbt', sessionNumber = null) {
+  const files = config.files || {}
+  if (files.resumeProgress === false) {
+    throw new Error('progress resume is disabled; cannot reset current NBT safely')
+  }
+
+  const progressFile = getProgressFilePath(config)
+  const previous = readProgressState(progressFile)
+  if (!previous) {
+    throw new Error('no active progress checkpoint found for current NBT')
+  }
+
+  const phase = normalizeResumePhase(previous.phase)
+  if (phase === 'finished') {
+    throw new Error('current NBT progress is already finished')
+  }
+
+  const sourceName = String(previous.sourceName || '').trim()
+  const sourcePath = String(previous.sourcePath || '').trim()
+  if (!sourceName && !sourcePath) {
+    throw new Error('current progress checkpoint has no source NBT')
+  }
+
+  const {
+    postPrintStep,
+    postPrintCartographyComplete,
+    cartographyComplete,
+    pass,
+    maxPasses,
+    errorCount,
+    ...base
+  } = previous
+
+  const now = new Date().toISOString()
+  const next = {
+    ...base,
+    processedTargets: 0,
+    phase: 'printing',
+    state: 'dashboard_reset_requested',
+    action: 'reset-current-nbt',
+    resetBeforeResume: true,
+    resetRequestedAt: now,
+    resetReason: reason,
+    interrupted: true,
+    lastEndReason: reason,
+    lastDisconnectAt: now,
+    updatedAt: now
+  }
+  if (sessionNumber != null) next.lastSession = sessionNumber
+  writeJson(progressFile, next)
+  return next
+}
+
 function markProgressInterrupted(config, reason, sessionNumber) {
   const files = config.files || {}
   if (files.resumeProgress === false) return
 
-  const progressFile = path.resolve(process.cwd(), files.progressFile || './logs/nerv-printer-progress.json')
+  const progressFile = getProgressFilePath(config)
   const previous = readProgressState(progressFile)
   if (!previous || previous.phase === 'finished') return
 
@@ -2930,7 +3268,7 @@ function hasUnfinishedProgressIntent(config) {
   const files = config.files || {}
   if (files.resumeProgress === false) return false
 
-  const progressFile = path.resolve(process.cwd(), files.progressFile || './logs/nerv-printer-progress.json')
+  const progressFile = getProgressFilePath(config)
   const previous = readProgressState(progressFile)
   if (!previous) return false
 
@@ -6673,6 +7011,31 @@ function getMapCenterPosition(config) {
     y: corner.y,
     z: corner.z + Math.floor((height - 1) / 2)
   }
+}
+
+async function runPlatformResetPreflight(bot, config, reason = 'reset-current-nbt') {
+  const advanced = config.advanced || {}
+  const resetConfig = config.machine?.resetBlock?.enabled ? config.machine.resetBlock : null
+  const center = getMapCenterPosition(config)
+
+  console.log(`[RESET-PREFLIGHT] Starting platform reset before restarting current NBT. reason=${reason}`)
+  await waitForPlatformReady(bot, config, `${reason}-platform-ready`)
+
+  if (!resetConfig?.position) {
+    throw new Error('reset block/chest is not configured; cannot reset platform before restarting current NBT')
+  }
+
+  await interactWithConfiguredBlock(bot, config, resetConfig, 'reset-block')
+  await waitForPlatformReady(bot, config, `${reason}-after-reset`)
+  await bot.pathfinder.goto(new GoalNear(center.x, center.y, center.z, 1))
+
+  const centerWaitMs = Math.max(0, toNumber(advanced.resetPreflightCenterWaitMs, toNumber(advanced.postPrintCenterWaitMs, 3000)))
+  if (centerWaitMs > 0) {
+    console.log(`[RESET-PREFLIGHT] Waiting at center for ${centerWaitMs}ms before restarting print.`)
+    await delay(centerWaitMs)
+  }
+
+  console.log('[RESET-PREFLIGHT] Platform reset preflight complete; restarting current NBT from target 0.')
 }
 
 function getItemId(bot, itemName) {
@@ -11113,6 +11476,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   let resumePhase = 'printing'  // tracks which bot phase to resume after crash
   let resumePostPrintStep = 'withdraw'
   let resumePostPrintCartographyComplete = false
+  let shouldRunResetPreflight = false
   let runtimeStopPhase = 'printing'
   let runtimeStopAction = 'dashboard-stop'
   let runtimeStopMeta = {}
@@ -11136,12 +11500,20 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     if (sameInput) {
       resumeFrom = Math.max(0, Math.min(orderedTargets.length, toNumber(previous.processedTargets, 0)))
       const previousPhase = normalizeResumePhase(previous.phase)
+      if (previous.resetBeforeResume === true) {
+        shouldRunResetPreflight = true
+        resumeFrom = 0
+        resumePhase = 'printing'
+        resumePostPrintStep = 'withdraw'
+        resumePostPrintCartographyComplete = false
+        console.log(`[RESET-RESUME] Reset requested for ${input.sourceName}; restarting from target 0 after platform reset preflight.`)
+      }
       // If the bot crashed inside repair or post_print, skip the main sweep and jump directly there.
-      if (previousPhase === 'repair' || previousPhase === 'post_print') {
+      if (!shouldRunResetPreflight && (previousPhase === 'repair' || previousPhase === 'post_print')) {
         resumePhase = previousPhase
         resumeFrom = orderedTargets.length
       }
-      if (previousPhase === 'post_print') {
+      if (!shouldRunResetPreflight && previousPhase === 'post_print') {
         resumePostPrintStep = String(previous.postPrintStep || 'withdraw')
         resumePostPrintCartographyComplete = previous.postPrintCartographyComplete === true ||
           String(previous.action || '') === 'cartography-complete'
@@ -11151,6 +11523,24 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   }
 
   const pending = orderedTargets.slice(resumeFrom)
+  if (shouldRunResetPreflight) {
+    dashboardRuntime?.setPhase('cleanup', 'reset-current-nbt')
+    if (progressEnabled) {
+      writeProgressSnapshot(progressFile, input, orderedTargets.length, 0, 'printing', {
+        state: 'reset_preflight',
+        action: 'reset-platform-before-restart',
+        resetBeforeResume: true
+      })
+    }
+    await runPlatformResetPreflight(bot, config, 'reset-current-nbt')
+    if (progressEnabled) {
+      writeProgressSnapshot(progressFile, input, orderedTargets.length, 0, 'printing', {
+        state: 'printing_start',
+        action: 'reset-preflight-complete'
+      })
+    }
+    dashboardRuntime?.setPhase('printing')
+  }
   await checkPlatformWater('startup-water-check')
   const makePostPrintContext = (extra = {}) => ({
     sourceName: input.sourceName,
@@ -14363,6 +14753,10 @@ function shouldRetryReconnect(session, config) {
   const kicked = String(session?.kickedReason || '').toLowerCase()
   const text = `${endReason} ${lastError} ${kicked}`
 
+  if (endReason.includes('dashboard-reset-current-nbt')) {
+    return true
+  }
+
   if (config?.bot?.skipReconnectOnModdedKick !== false) {
     if (text.includes('fabric') || text.includes('registry entry namespaces')) {
       console.log('[RECONNECT] Skipped reconnect because server requires unsupported client mods.')
@@ -14403,6 +14797,10 @@ function shouldRetryReconnect(session, config) {
 function shouldForceReconnectForPlatformStall(session, config) {
   if (config?.advanced?.platformStallReconnectEnabled === false) return false
   return String(session?.endReason || '').toLowerCase().startsWith('platform-stall-')
+}
+
+function shouldForceReconnectForDashboardReset(session) {
+  return String(session?.endReason || '').toLowerCase().includes('dashboard-reset-current-nbt')
 }
 
 function isDdosProtectionText(value) {
@@ -14537,7 +14935,7 @@ function ensureStdinCommandInterface() {
     }
 
     if (value === 'help' || value === '?') {
-      console.log('[COMMAND] Commands: status, start, stop, verified, refresh, clear')
+      console.log('[COMMAND] Commands: status, start, stop, reset, verified, refresh, clear')
       return
     }
 
@@ -14558,6 +14956,18 @@ function ensureStdinCommandInterface() {
       }
       printingIntentActive = false
       console.log(`[COMMAND] ${stdinCommandState.runtimeControl.requestStop('terminal')}`)
+      return
+    }
+
+    if (value === 'reset' || value === 'reset-current-nbt' || value === 'reset-nbt') {
+      if (typeof stdinCommandState.resetCurrentNbt !== 'function') {
+        console.log('[COMMAND] No managed runtime is active. Reset current NBT is only available while the bot is connected under dashboard/command control.')
+        return
+      }
+      printingIntentActive = true
+      void stdinCommandState.resetCurrentNbt('terminal')
+        .then((message) => console.log(`[COMMAND] ${message}`))
+        .catch((err) => console.log(`[COMMAND] reset-current-nbt failed: ${err?.message || err}`))
       return
     }
 
@@ -14587,7 +14997,7 @@ function ensureStdinCommandInterface() {
     console.log('[COMMAND] No active token verification prompt right now. This does not apply to Microsoft browser login.')
   })
 
-  console.log('[COMMAND] Interactive commands enabled. Type "status", "start", "stop", "verified", or "refresh" while the bot is running.')
+  console.log('[COMMAND] Interactive commands enabled. Type "status", "start", "stop", "reset", "verified", or "refresh" while the bot is running.')
   return rl
 }
 
@@ -18760,10 +19170,11 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
         clearInterval(heartbeatTimer)
       }
       const retryable = shouldRetryReconnect(session, sessionConfig)
-      const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig)
+      const forceDashboardResetReconnect = shouldForceReconnectForDashboardReset(session)
+      const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig) || forceDashboardResetReconnect
       console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
 
-      if (!reconnectAllowed || !retryable || attempt >= reconnect.maxAttempts) {
+      if (!reconnectAllowed || !retryable || (attempt >= reconnect.maxAttempts && !forceDashboardResetReconnect)) {
         break
       }
 
@@ -18998,7 +19409,8 @@ async function start() {
         config: sessionConfig
       })
       const retryable = shouldRetryReconnect(session, sessionConfig)
-      const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig)
+      const forceDashboardResetReconnect = shouldForceReconnectForDashboardReset(session)
+      const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig) || forceDashboardResetReconnect
       lastEndReason = session.endReason
       console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
 
@@ -19011,7 +19423,7 @@ async function start() {
         break
       }
 
-      if (attempt >= reconnect.maxAttempts) {
+      if (attempt >= reconnect.maxAttempts && !forceDashboardResetReconnect) {
         console.log(`[RECONNECT] Stopping after ${attempt} attempts. Last reason: ${session.endReason}`)
         break
       }

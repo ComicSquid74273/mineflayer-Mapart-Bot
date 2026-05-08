@@ -24,6 +24,7 @@ const ETA_MAP_TIME_MS = Math.max(60 * 1000, Number(process.env.DASHBOARD_ETA_MAP
 const NODE_DOWNLOAD_TIMEOUT_MS = Math.max(15000, Number(process.env.DASHBOARD_NODE_DOWNLOAD_TIMEOUT_MS || 60000))
 const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
 const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
+const RUNTIME_DURATION_ALERT_MS = Math.max(60 * 1000, Number(process.env.DASHBOARD_RUNTIME_DURATION_ALERT_MS || 30 * 60 * 1000))
 const MAX_REQUEST_BODY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_REQUEST_BYTES || 64 * 1024 * 1024))
 const MAX_UPLOAD_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_UPLOAD_BYTES || 512 * 1024 * 1024))
 const MAX_ZIP_ENTRY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_ZIP_ENTRY_BYTES || 64 * 1024 * 1024))
@@ -190,6 +191,7 @@ function summarizeOperatorAccount(account) {
 
 function actorHasPermission(actor, requiredPermission) {
   if (requiredPermission === 'authenticated') return Boolean(actor)
+  if (requiredPermission === 'admin') return normalizeRole(actor?.role, '') === 'admin'
   return Boolean(actor?.permissions?.[requiredPermission])
 }
 
@@ -200,6 +202,7 @@ function getAuthRequirement(pathname, method) {
   if (reqIsLogDeletePath(pathname, method)) return 'canManageOperators'
   if (reqIsDashboardFileReadPath(pathname, method)) return 'canOperate'
   if (reqIsOperatorManagementPath(pathname)) return 'canManageOperators'
+  if (reqIsAdminOnlyPath(pathname, method)) return 'admin'
   if (reqIsDataManagementPath(pathname)) return 'canManageOperators'
   if (reqIsConfigManagementPath(pathname)) return 'canManageOperators'
   if (reqIsFinishedMapDeletePath(pathname, method)) return 'canManageOperators'
@@ -297,6 +300,13 @@ function reqIsFinishedMapDeletePath(pathname, method) {
   )
 }
 
+function reqIsAdminOnlyPath(pathname, method) {
+  return method === 'POST' && (
+    pathname === '/api/dashboard/reset-everything'
+    || pathname === '/api/dashboard/nodes/finished-maps/delete-all'
+  )
+}
+
 function reqIsLogDeletePath(pathname, method) {
   return method === 'POST' && Boolean(matchPath(pathname, '/api/dashboard/logs/:fileName/delete'))
 }
@@ -313,6 +323,7 @@ function reqIsOperatorManagementPath(pathname) {
 function reqIsDataManagementPath(pathname) {
   return pathname === '/api/dashboard/data'
     || pathname === '/api/dashboard/data/clear'
+    || pathname === '/api/dashboard/reset-everything'
     || Boolean(matchPath(pathname, '/api/dashboard/data/:fileName/delete'))
 }
 
@@ -329,9 +340,11 @@ function reqIsDashboardOperationPath(pathname, method) {
     || pathname === '/api/dashboard/commands/stop-all'
     || pathname === '/api/dashboard/files'
     || pathname === '/api/dashboard/uploads'
+    || pathname === '/api/dashboard/reset-everything'
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/stop'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/reset-current-nbt'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/reprint'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/stop'))
@@ -339,6 +352,7 @@ function reqIsDashboardOperationPath(pathname, method) {
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/chat'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/disconnect'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/reconnect'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/reset-current-nbt'))
     || Boolean(matchPath(pathname, '/api/dashboard/files/:fileId/assign'))
     || Boolean(matchPath(pathname, '/api/dashboard/queue/:fileId/release'))
     || Boolean(matchPath(pathname, '/api/dashboard/queue/:fileId/retry'))
@@ -740,6 +754,8 @@ function summarizeBot(bot) {
     reportedLastStatusAt: bot.reportedLastStatusAt || bot.lastStatusAt || null,
     lastError: recentError ? bot.lastError : null,
     lastErrorAt: recentError ? bot.lastErrorAt : null,
+    deathMessage: String(bot.deathMessage || '').trim() || null,
+    deathMessageAt: bot.deathMessage ? bot.deathMessageAt || null : null,
     warnings,
     alerts: fresh ? (Array.isArray(bot.alerts) ? bot.alerts.filter((item) => item && item.active === true).slice(-8) : []) : [],
     progress: bot.progress || null,
@@ -1091,13 +1107,31 @@ function botHasLobbyPortal4Signal(bot) {
   })
 }
 
+function isActiveRuntimePhase(phase) {
+  return ['printing', 'repair', 'rescan', 'post-print', 'cleanup'].includes(String(phase || '').trim().toLowerCase())
+}
+
+function getRuntimeElapsedMs(bot, now = Date.now()) {
+  if (bot?.online !== true) return 0
+  if (!isActiveRuntimePhase(bot?.phase)) return 0
+  if (!String(bot?.currentNbt || '').trim()) return 0
+  const startedAtMs = timestampMs(bot?.currentNbtStartedAt)
+  if (!startedAtMs) return 0
+  return Math.max(0, now - startedAtMs)
+}
+
 function buildDashboardAlerts(bots, nodes, assignments) {
   const alerts = []
+  const now = Date.now()
   const staleBots = bots.filter((bot) => bot.online === true && bot.activeState === 'stale')
   const offlineBots = bots.filter((bot) => bot.online !== true)
   const offlineNodes = nodes.filter((node) => Number(node.onlineCount || 0) <= 0)
   const errorBots = bots.filter((bot) => String(bot.lastError || '').trim())
+  const deathBots = bots.filter((bot) => String(bot.deathMessage || '').trim())
   const lobbyPortal4Bots = bots.filter(botHasLobbyPortal4Signal)
+  const longRuntimeBots = bots
+    .map((bot) => ({ bot, elapsedMs: getRuntimeElapsedMs(bot, now) }))
+    .filter((entry) => entry.elapsedMs >= RUNTIME_DURATION_ALERT_MS)
   const heldAssignments = assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
     if (!['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held'].includes(status)) return false
@@ -1128,12 +1162,42 @@ function buildDashboardAlerts(bots, nodes, assignments) {
     const hostLabels = [...new Set(lobbyPortal4Bots.map((bot) => String(bot.hostLabel || '').trim()).filter(Boolean))]
     alerts.push(createAlert('critical', 'lobby-portal-4', 'Lobby portal error', `lobby-portal-4 reported by ${botNames.join(', ') || 'unknown bot'} on ${hostLabels.join(', ') || 'unknown node'}.`, {
       botNames,
-      hostLabels
+      hostLabels,
+      bots: lobbyPortal4Bots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
     }))
   }
   if (activeWaterBots.length) {
     alerts.push(createAlert('critical', 'platform-water', 'Water on platform', `${activeWaterBots.length} bot(s) are paused until water is removed from the carpet layer.`, {
-      botNames: activeWaterBots.map((bot) => bot.botName)
+      botNames: activeWaterBots.map((bot) => bot.botName),
+      bots: activeWaterBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+    }))
+  }
+  if (longRuntimeBots.length) {
+    const alertMinutes = Math.round(RUNTIME_DURATION_ALERT_MS / 60000)
+    alerts.push(createAlert('critical', 'runtime-duration', `Runtime over ${alertMinutes}m`, `${longRuntimeBots.length} bot(s) have been running the current NBT for more than ${alertMinutes} minutes.`, {
+      bots: longRuntimeBots.map(({ bot, elapsedMs }) => ({
+        botName: bot.botName,
+        hostLabel: bot.hostLabel || null,
+        phase: bot.phase || null,
+        currentNbt: bot.currentNbt || null,
+        currentNbtStartedAt: bot.currentNbtStartedAt || null,
+        elapsedMs
+      }))
+    }))
+  }
+  if (deathBots.length) {
+    const summaries = deathBots.slice(0, 3).map((bot) => `${bot.botName || 'unknown bot'}: ${bot.deathMessage}`)
+    const extra = deathBots.length > summaries.length ? ` +${deathBots.length - summaries.length} more` : ''
+    alerts.push(createAlert('critical', 'bot-death', 'Bot death detected', `${summaries.join(' | ')}${extra}. Waiting until bot is back on platform.`, {
+      botNames: deathBots.map((bot) => bot.botName),
+      bots: deathBots.map((bot) => ({
+        botName: bot.botName,
+        hostLabel: bot.hostLabel || null,
+        deathMessage: bot.deathMessage || null,
+        deathMessageAt: bot.deathMessageAt || null,
+        location: bot.location || null,
+        locationDetail: bot.locationDetail || null
+      }))
     }))
   }
   if (offlineNodes.length) {
@@ -1143,27 +1207,32 @@ function buildDashboardAlerts(bots, nodes, assignments) {
   }
   if (offlineBots.length) {
     alerts.push(createAlert('warn', 'offline-bots', 'Offline bots', `${offlineBots.length}/${bots.length} bot(s) are offline.`, {
-      botNames: offlineBots.map((bot) => bot.botName).slice(0, 20)
+      botNames: offlineBots.map((bot) => bot.botName).slice(0, 20),
+      bots: offlineBots.slice(0, 20).map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
     }))
   }
   if (staleBots.length) {
     alerts.push(createAlert('warn', 'stale-bots', 'Stale bots', `${staleBots.length} bot(s) stopped sending fresh activity.`, {
-      botNames: staleBots.map((bot) => bot.botName)
+      botNames: staleBots.map((bot) => bot.botName),
+      bots: staleBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
     }))
   }
   if (errorBots.length) {
     alerts.push(createAlert('critical', 'bot-errors', 'Bot errors', `${errorBots.length} bot(s) reported a last error.`, {
-      botNames: errorBots.map((bot) => bot.botName)
+      botNames: errorBots.map((bot) => bot.botName),
+      bots: errorBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
     }))
   }
   if (stockWarnings.length) {
+    const stockWarningBots = [...new Map(stockWarnings.map((item) => [item.bot.botName, item.bot])).values()]
     alerts.push(createAlert('warn', 'stock-warnings', 'Missing stock warnings', `${stockWarnings.length} active material/food/map/XP warning(s).`, {
-      botNames: [...new Set(stockWarnings.map((item) => item.bot.botName))]
+      botNames: stockWarningBots.map((bot) => bot.botName),
+      bots: stockWarningBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
     }))
   }
   if (heldAssignments.length) {
     alerts.push(createAlert('warn', 'queue-held', 'Held queue files', `${heldAssignments.length} queue file(s) are held for an offline or stale bot.`, {
-      files: heldAssignments.slice(0, 20).map((item) => ({ fileName: item.fileName, botName: item.claimedByBotName }))
+      files: heldAssignments.slice(0, 20).map((item) => ({ fileName: item.fileName, botName: item.claimedByBotName, hostLabel: item.claimedByHostLabel || null }))
     }))
   }
   if (retryingFailures.length) {
@@ -1435,6 +1504,53 @@ async function route(req, res) {
     }
     auditOperatorAction(actor, 'clear-data', `Cleared data folder: deleted ${deleted.length} file(s).`, { deleted }, 'warn')
     return sendJson(res, 200, { ok: true, deleted, errors })
+  }
+
+  if (req.method === 'POST' && pathname === '/api/dashboard/reset-everything') {
+    if (normalizeRole(actor?.role, '') !== 'admin') return forbidden(res, 'admin role required')
+    const body = await readBody(req)
+    const phrase = String(body?.confirm || '').trim().toUpperCase()
+    if (phrase !== 'RESETEVERYTHING') return badRequest(res, 'confirm must be RESETEVERYTHING')
+
+    const nodes = store.listNodes()
+    const bots = store.listBots()
+    const reset = store.resetDashboardForFreshStart()
+    const nodeCommands = []
+    const botCommands = []
+    for (const node of nodes) {
+      const hostLabel = String(node.hostLabel || '').trim()
+      if (!hostLabel) continue
+      nodeCommands.push(store.createCommand({
+        targetHostLabel: hostLabel,
+        commandType: 'fresh-start-clean-node',
+        reason: 'dashboard reset everything',
+        requestedBy: actor.username
+      }))
+    }
+    for (const bot of bots) {
+      const botName = String(bot.botName || '').trim()
+      if (!botName) continue
+      botCommands.push(store.createCommand({
+        targetBotName: botName,
+        commandType: 'platform-cleanup',
+        reason: 'dashboard reset everything',
+        requestedBy: actor.username
+      }))
+    }
+
+    auditOperatorAction(actor, 'reset-everything', `Reset dashboard state and queued fresh-start cleanup for ${nodes.length} node(s), ${bots.length} bot(s).`, {
+      nodeCommandCount: nodeCommands.length,
+      botCommandCount: botCommands.length,
+      reset
+    }, 'critical')
+    return sendJson(res, 201, {
+      ok: true,
+      reset,
+      nodeCommandCount: nodeCommands.length,
+      botCommandCount: botCommands.length,
+      nodeCommands,
+      botCommands
+    })
   }
 
   if (pathname === '/api/dashboard/config') {
@@ -1772,12 +1888,15 @@ async function route(req, res) {
     if (status !== 'succeeded' && status !== 'failed') return badRequest(res, 'status must be succeeded or failed')
     const command = store.completeNodeCommand(params.hostLabel, params.commandId, status, body?.resultMessage, body?.botName || null)
     if (!command) return notFound(res)
-    if (command.commandType === 'delete-node-file' || command.commandType === 'delete-finished-map') {
+    if (command.commandType === 'delete-node-file' || command.commandType === 'delete-finished-map' || command.commandType === 'fresh-start-clean-node') {
       const finishedMapDelete = command.commandType === 'delete-finished-map'
+      const freshStartCleanup = command.commandType === 'fresh-start-clean-node'
       store.addEvent({
         operator: `bot:${body?.botName || params.hostLabel}`,
-        action: finishedMapDelete ? 'delete-finished-map-completed' : 'delete-node-file-completed',
-        message: `${status === 'succeeded' ? 'Deleted' : 'Failed to delete'} ${finishedMapDelete ? 'finished map ' : ''}${command.fileName || 'unknown'} on node ${params.hostLabel}.`,
+        action: freshStartCleanup ? 'fresh-start-clean-node-completed' : (finishedMapDelete ? 'delete-finished-map-completed' : 'delete-node-file-completed'),
+        message: freshStartCleanup
+          ? `${status === 'succeeded' ? 'Cleaned' : 'Failed to clean'} fresh-start files on node ${params.hostLabel}.`
+          : `${status === 'succeeded' ? 'Deleted' : 'Failed to delete'} ${finishedMapDelete ? 'finished map ' : ''}${command.fileName || 'unknown'} on node ${params.hostLabel}.`,
         details: { hostLabel: params.hostLabel, fileName: command.fileName, commandId: params.commandId, status, resultMessage: body?.resultMessage || null },
         level: status === 'succeeded' ? 'info' : 'warn'
       })
@@ -1951,6 +2070,25 @@ async function route(req, res) {
     return sendJson(res, 201, { items })
   }
 
+  params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/reset-current-nbt')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const bots = store.listBotsForHost(params.hostLabel)
+      .filter((bot) => {
+        const currentNbt = String(bot?.currentNbt || '').trim()
+        return bot?.online === true && currentNbt && currentNbt.toLowerCase() !== 'none'
+      })
+    if (!bots.length) return badRequest(res, `node ${params.hostLabel} has no active NBT bot to reset`)
+    const botNames = bots.map((item) => item.botName)
+    const items = store.createCommandsForBots(botNames, 'reset-current-nbt', {
+      requestedBy: actor.username,
+      reason: body?.reason || 'dashboard-ui node reset current NBT'
+    })
+    auditOperatorAction(actor, 'reset-node-current-nbt', `Queued current NBT reset for node ${params.hostLabel}.`, { hostLabel: params.hostLabel, botNames, reason: body?.reason || null }, 'warn')
+    return sendJson(res, 201, { items })
+  }
+
   params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/start')
   if (params) {
     if (req.method !== 'POST') return methodNotAllowed(res)
@@ -2020,6 +2158,20 @@ async function route(req, res) {
     if (req.method !== 'POST') return methodNotAllowed(res)
     const command = store.createCommand({ targetBotName: params.botName, commandType: 'reconnect', requestedBy: actor.username })
     auditOperatorAction(actor, 'reconnect-bot', `Queued force-reconnect for ${params.botName}.`, { botName: params.botName })
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/reset-current-nbt')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const command = store.createCommand({
+      targetBotName: params.botName,
+      commandType: 'reset-current-nbt',
+      reason: body?.reason || 'dashboard-ui reset current NBT',
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'reset-current-nbt', `Queued current NBT reset for ${params.botName}.`, { botName: params.botName, reason: body?.reason || null }, 'warn')
     return sendJson(res, 201, { command })
   }
 
@@ -2095,6 +2247,7 @@ async function route(req, res) {
   }
 
   if (req.method === 'POST' && pathname === '/api/dashboard/nodes/finished-maps/delete-all') {
+    if (normalizeRole(actor?.role, '') !== 'admin') return forbidden(res, 'admin role required')
     const existingDeletes = new Set(store.listCommands((command) =>
       command.commandType === 'delete-finished-map'
       && (command.status === 'pending' || command.status === 'claimed')

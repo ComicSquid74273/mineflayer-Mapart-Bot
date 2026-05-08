@@ -177,6 +177,12 @@ h1 {
   font-size: 0.92rem;
 }
 
+.alert-item .alert-meta {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .alert-critical {
   border-color: rgba(181, 73, 56, 0.42);
   background: rgba(181, 73, 56, 0.14);
