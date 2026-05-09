@@ -264,6 +264,11 @@ function isActiveNbtRun(bot) {
   return Boolean(bot?.online && currentNbt && currentNbt !== 'none' && bot?.currentNbtStartedAt)
 }
 
+function hasResettableCurrentNbt(bot) {
+  const currentNbt = String(bot?.currentNbt || '').trim().toLowerCase()
+  return Boolean(bot?.online && currentNbt && currentNbt !== 'none')
+}
+
 function displayBotPhase(bot) {
   const phase = String(bot?.phase || '').trim().toLowerCase()
   const detail = String(bot?.statusDetail || '').trim()
@@ -828,6 +833,7 @@ function renderBotCard(bot) {
   const locationText = bot.locationDetail || bot.location || 'unknown'
   const progress = formatBotProgress(bot)
   const activeNbtRun = isActiveNbtRun(bot)
+  const resettableCurrentNbt = hasResettableCurrentNbt(bot)
   const currentRunElapsed = bot.currentNbtStartedAt
     ? formatDuration(Date.now() - new Date(bot.currentNbtStartedAt).getTime())
     : 'n/a'
@@ -895,7 +901,7 @@ function renderBotCard(bot) {
       <div class="bot-actions">
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
         <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Stop Print</button>
-        ${activeNbtRun ? `<button class="danger-button small-button" type="button" data-action="reset-current-nbt" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-current-nbt="${escapeHtml(bot.currentNbt || '')}" title="Reset platform and restart this NBT from target 0">Reset NBT</button>` : ''}
+        ${resettableCurrentNbt ? `<button class="danger-button small-button" type="button" data-action="reset-current-nbt" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-current-nbt="${escapeHtml(bot.currentNbt || '')}" title="Reset platform and restart this NBT from target 0">Reset NBT</button>` : ''}
         <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect from server (no auto-reconnect)">Disconnect</button>
         <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Reconnect to server">Reconnect</button>
       </div>
@@ -948,7 +954,7 @@ function renderBots() {
 
   const renderedNodes = state.nodes.map((node) => {
     const nodeBots = (botsByNode.get(node.hostLabel) || []).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
-    const nodeHasActiveNbt = nodeBots.some((bot) => isActiveNbtRun(bot))
+    const nodeHasActiveNbt = nodeBots.some((bot) => hasResettableCurrentNbt(bot))
     const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
     const configText = configFiles.length ? ` | Config ${configFiles.join(', ')}` : ''
     const editConfigName = configFiles.length === 1 ? configFiles[0] : ''
@@ -1217,19 +1223,9 @@ function renderQueueSummary() {
 }
 
 function renderNodes() {
-  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch, canManageOperators: hasPermission('canManageOperators') })
+  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch, role: state.auth.role, isAdmin: isAdmin() })
   if (state.renderCache.nodes === nodesSignature) return
   state.renderCache.nodes = nodesSignature
-
-  if (!state.nodes.length) {
-    elements.nodesGrid.innerHTML = `
-      <article class="empty-card">
-        <h3>No node inventory yet</h3>
-        <p>Once a node reports its shared NBT folder, the files will appear here.</p>
-      </article>
-    `
-    return
-  }
 
   const totalFinishedMaps = state.nodes.reduce((total, node) => {
     return total + (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0)
@@ -1250,6 +1246,16 @@ function renderNodes() {
       </article>
     `
     : ''
+
+  if (!state.nodes.length) {
+    elements.nodesGrid.innerHTML = `${bulkFinishedMapActions}
+      <article class="empty-card">
+        <h3>No node inventory yet</h3>
+        <p>Once a node reports its shared NBT folder, the files will appear here.</p>
+      </article>
+    `
+    return
+  }
 
   elements.nodesGrid.innerHTML = bulkFinishedMapActions + state.nodes.map((node) => {
     const query = String(state.nbtSearch || '').trim().toLowerCase()
