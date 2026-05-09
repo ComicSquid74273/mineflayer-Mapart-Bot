@@ -2095,6 +2095,11 @@ async function onDeleteAllFinishedMaps() {
   }
   const confirmed = confirm(`CLEANFINISHEDNBT: queue deletion for ${totalFinishedMaps} finished .nbt file(s) across all nodes?`)
   if (!confirmed) return
+  const typed = prompt('Type CLEANFINISHEDNBT to confirm finished NBT cleanup.')
+  if (String(typed || '').trim().toUpperCase() !== 'CLEANFINISHEDNBT') {
+    pushEvent('info', 'CLEANFINISHEDNBT cancelled.')
+    return
+  }
   const result = await submitJson('/api/dashboard/nodes/finished-maps/delete-all', {})
   pushEvent('warn', `CLEANFINISHEDNBT queued ${result.count || 0} finished NBT delete command(s) across all nodes.`)
   await refreshData()
