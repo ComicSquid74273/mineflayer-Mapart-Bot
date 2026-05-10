@@ -154,6 +154,67 @@ h1 {
   border-color: rgba(209, 154, 42, 0.45);
 }
 
+.fleet-jump {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(100%, 980px);
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(14, 28, 40, 0.82);
+}
+
+.fleet-jump-head {
+  flex: 0 0 auto;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.68rem;
+}
+
+.fleet-jump-buttons {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fleet-jump-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid rgba(151, 177, 190, 0.16);
+  background: rgba(151, 177, 190, 0.1);
+  color: var(--ink);
+}
+
+.fleet-jump-button strong {
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.fleet-jump-button span {
+  max-width: 72px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-jump-online {
+  border-color: rgba(28, 143, 114, 0.32);
+}
+
+.fleet-jump-offline {
+  border-color: rgba(181, 73, 56, 0.3);
+}
+
 .alerts-bar {
   display: grid;
   gap: 10px;
@@ -878,6 +939,12 @@ button:disabled {
   .queue-tracker {
     width: 100%;
     min-width: 0;
+  }
+
+  .fleet-jump {
+    width: 100%;
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .queue-tracker-grid {

@@ -43,6 +43,7 @@ const state = {
     dataFiles: '',
     uploadAssignments: '',
     failedQueue: '',
+    fleetJump: '',
     queueSummary: '',
     events: '',
     alerts: '',
@@ -77,6 +78,7 @@ const elements = {
   botSummary: document.getElementById('botSummary'),
   eventLog: document.getElementById('eventLog'),
   fileInput: document.getElementById('fileInput'),
+  fleetJump: document.getElementById('fleetJump'),
   lastRefresh: document.getElementById('lastRefresh'),
   logsList: document.getElementById('logsList'),
   nbtSearchInput: document.getElementById('nbtSearchInput'),
@@ -672,6 +674,75 @@ function restoreFormState(snapshot) {
   elements.uploadNodeSelect.required = !distribute
 }
 
+function nodeAnchorId(hostLabel, index = 0) {
+  const fallback = `node-${index + 1}`
+  const raw = String(hostLabel || fallback).trim() || fallback
+  const encoded = encodeURIComponent(raw)
+    .replace(/%/g, '_')
+    .replace(/[^A-Za-z0-9_-]/g, '_')
+  return `fleet-node-${encoded || fallback}`
+}
+
+function renderFleetJump() {
+  if (!elements.fleetJump) return
+  const knownNodes = Array.isArray(state.nodes) ? state.nodes : []
+  const signature = JSON.stringify({
+    nodes: knownNodes.map((node) => [
+      node.hostLabel,
+      Number(node.onlineCount || 0),
+      Number(node.botCount || 0)
+    ]),
+    bots: state.bots.map((bot) => [
+      bot.botName,
+      bot.hostLabel,
+      bot.online,
+      bot.phase,
+      bot.statusDetail,
+      bot.currentNbt,
+      bot.currentNbtStartedAt,
+      bot.idle,
+      bot.activeState
+    ])
+  })
+  if (state.renderCache.fleetJump === signature) return
+  state.renderCache.fleetJump = signature
+
+  if (!knownNodes.length) {
+    elements.fleetJump.innerHTML = ''
+    elements.fleetJump.classList.add('hidden')
+    return
+  }
+
+  elements.fleetJump.classList.remove('hidden')
+  elements.fleetJump.innerHTML = `
+    <div class="fleet-jump-head">
+      <span>Known nodes</span>
+    </div>
+    <div class="fleet-jump-buttons">
+      ${knownNodes.map((node, index) => {
+        const onlineCount = Number(node.onlineCount || 0)
+        const botCount = Number(node.botCount || 0)
+        const hostLabel = String(node.hostLabel || `Node-${index + 1}`).trim() || `Node-${index + 1}`
+        const nodeBots = state.bots.filter((bot) => String(bot.hostLabel || '').trim() === hostLabel)
+        const printing = nodeBots.filter((bot) => isBotPrinting(bot)).length
+        const stale = nodeBots.filter((bot) => bot.online && bot.activeState === 'stale').length
+        const idle = nodeBots.filter((bot) => bot.online && bot.idle).length
+        const statusText = onlineCount <= 0 ? 'Offline'
+          : (printing > 0 ? `${printing} printing`
+            : (stale > 0 ? `${stale} stale`
+              : (idle > 0 ? `${idle} idle` : 'Online')))
+        const onlineClass = onlineCount > 0 ? 'fleet-jump-online' : 'fleet-jump-offline'
+        return `
+          <button class="fleet-jump-button ${onlineClass}" type="button" data-action="jump-node" data-node-target="${escapeHtml(nodeAnchorId(hostLabel, index))}" title="${escapeHtml(`${hostLabel}: ${onlineCount}/${botCount} online, ${statusText}`)}" aria-label="${escapeHtml(`Jump to ${hostLabel}`)}">
+            <strong>${escapeHtml(index + 1)}</strong>
+            <span>${escapeHtml(statusText)}</span>
+          </button>
+        `
+      }).join('')}
+    </div>
+  `
+}
+
 function renderSummary() {
   const summarySignature = JSON.stringify({
     botCount: state.bots.length,
@@ -952,14 +1023,14 @@ function renderBots() {
     botsByNode.set(hostLabel, group)
   }
 
-  const renderedNodes = state.nodes.map((node) => {
+  const renderedNodes = state.nodes.map((node, index) => {
     const nodeBots = (botsByNode.get(node.hostLabel) || []).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
     const nodeHasActiveNbt = nodeBots.some((bot) => hasResettableCurrentNbt(bot))
     const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
     const configText = configFiles.length ? ` | Config ${configFiles.join(', ')}` : ''
     const editConfigName = configFiles.length === 1 ? configFiles[0] : ''
     return `
-      <article class="fleet-node-group">
+      <article id="${escapeHtml(nodeAnchorId(node.hostLabel, index))}" class="fleet-node-group">
         <div class="fleet-node-head">
           <div>
             <h3 class="bot-name">${escapeHtml(node.hostLabel)}</h3>
@@ -1850,6 +1921,7 @@ async function refreshData(options = {}) {
     elements.lastRefresh.textContent = formatTime(new Date().toISOString())
     renderAlerts()
     renderSummary()
+    renderFleetJump()
     renderBots()
     renderFiles()
     renderFailedQueueRetries()
@@ -2318,6 +2390,11 @@ document.addEventListener('click', async (event) => {
   const requiredPermission = button.dataset.permissionNeeded || ''
   if (requiredPermission && !hasPermission(requiredPermission)) {
     pushEvent('warn', 'Login with approved access before using this dashboard action.')
+    return
+  }
+  if (button.dataset.action === 'jump-node') {
+    const target = document.getElementById(button.dataset.nodeTarget || '')
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
     return
   }
   try {
