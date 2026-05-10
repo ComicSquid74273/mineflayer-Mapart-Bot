@@ -1688,6 +1688,13 @@ function createStore(baseDir) {
     return path.join(filesDir, item.storedName)
   }
 
+  function invalidateDataFileCache(filePaths) {
+    for (const filePath of Array.isArray(filePaths) ? filePaths : [filePaths]) {
+      if (!filePath) continue
+      jsonCache.delete(path.resolve(filePath))
+    }
+  }
+
   const existingCommands = readJson(commandsFile, [])
   const compactedCommands = compactCommandList(existingCommands)
   if (compactedCommands.changed) writeJson(commandsFile, compactedCommands.items)
@@ -1736,6 +1743,7 @@ function createStore(baseDir) {
     completeNodeCommand,
     saveNodeLogDownload,
     getNodeLogDownload,
+    invalidateDataFileCache,
     resolveFilePath
   }
 }

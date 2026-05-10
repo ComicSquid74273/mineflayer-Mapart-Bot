@@ -1252,6 +1252,10 @@ function buildDashboardAlerts(bots, nodes, assignments) {
 
 let snapshotCache = { expiresAt: 0, payload: null }
 
+function invalidateSnapshotCache() {
+  snapshotCache = { expiresAt: 0, payload: null }
+}
+
 function buildDashboardSnapshot(actor = null) {
   const now = Date.now()
   const cacheKey = actor?.permissions?.canOperate === true ? 'operate' : 'public'
@@ -1478,6 +1482,8 @@ async function route(req, res) {
     const filePath = resolveDeletableDataFilePath(fileName)
     if (!filePath) return notFound(res)
     fs.unlinkSync(filePath)
+    store.invalidateDataFileCache(filePath)
+    invalidateSnapshotCache()
     if (fileName.toLowerCase() !== 'events.json') {
       auditOperatorAction(actor, 'delete-data-file', `Deleted data file ${fileName}.`, { fileName }, 'warn')
     }
@@ -1486,6 +1492,7 @@ async function route(req, res) {
 
   if (req.method === 'POST' && pathname === '/api/dashboard/data/clear') {
     const deleted = []
+    const deletedPaths = []
     const errors = []
     try {
       for (const entry of fs.readdirSync(DATA_DIR, { withFileTypes: true })) {
@@ -1495,6 +1502,7 @@ async function route(req, res) {
         try {
           fs.unlinkSync(filePath)
           deleted.push(entry.name)
+          deletedPaths.push(filePath)
         } catch (err) {
           errors.push({ name: entry.name, error: err?.message || String(err) })
         }
@@ -1502,6 +1510,8 @@ async function route(req, res) {
     } catch (err) {
       return sendJson(res, 500, { ok: false, error: err?.message || String(err) })
     }
+    store.invalidateDataFileCache(deletedPaths)
+    invalidateSnapshotCache()
     auditOperatorAction(actor, 'clear-data', `Cleared data folder: deleted ${deleted.length} file(s).`, { deleted }, 'warn')
     return sendJson(res, 200, { ok: true, deleted, errors })
   }
