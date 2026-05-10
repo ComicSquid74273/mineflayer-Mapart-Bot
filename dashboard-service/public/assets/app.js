@@ -74,6 +74,7 @@ const UI_ACTIVITY_HOLD_MS = 15000
 const elements = {
   authStatus: document.getElementById('authStatus'),
   alertsBar: document.getElementById('alertsBar'),
+  backToTopButton: document.getElementById('backToTopButton'),
   botsGrid: document.getElementById('botsGrid'),
   botSummary: document.getElementById('botSummary'),
   eventLog: document.getElementById('eventLog'),
@@ -459,6 +460,11 @@ function renderAuthState() {
   }
 }
 
+function updateBackToTopVisibility() {
+  if (!elements.backToTopButton) return
+  elements.backToTopButton.classList.toggle('hidden', window.scrollY <= 360)
+}
+
 async function requestJson(url, options = {}) {
   const headers = {
     'content-type': 'application/json',
@@ -683,9 +689,22 @@ function nodeAnchorId(hostLabel, index = 0) {
   return `fleet-node-${encoded || fallback}`
 }
 
+function compareNodeLabels(left, right) {
+  return String(left?.hostLabel || '').localeCompare(String(right?.hostLabel || ''), undefined, {
+    numeric: true,
+    sensitivity: 'base'
+  })
+}
+
+function nodeShortcutLabel(hostLabel, index = 0) {
+  const text = String(hostLabel || '').trim()
+  const match = text.match(/(\d+)\s*$/)
+  return match ? match[1] : String(index + 1)
+}
+
 function renderFleetJump() {
   if (!elements.fleetJump) return
-  const knownNodes = Array.isArray(state.nodes) ? state.nodes : []
+  const knownNodes = (Array.isArray(state.nodes) ? state.nodes : []).slice().sort(compareNodeLabels)
   const signature = JSON.stringify({
     nodes: knownNodes.map((node) => [
       node.hostLabel,
@@ -727,6 +746,7 @@ function renderFleetJump() {
         const printing = nodeBots.filter((bot) => isBotPrinting(bot)).length
         const stale = nodeBots.filter((bot) => bot.online && bot.activeState === 'stale').length
         const idle = nodeBots.filter((bot) => bot.online && bot.idle).length
+        const shortcutLabel = nodeShortcutLabel(hostLabel, index)
         const statusText = onlineCount <= 0 ? 'Offline'
           : (printing > 0 ? `${printing} printing`
             : (stale > 0 ? `${stale} stale`
@@ -734,7 +754,7 @@ function renderFleetJump() {
         const onlineClass = onlineCount > 0 ? 'fleet-jump-online' : 'fleet-jump-offline'
         return `
           <button class="fleet-jump-button ${onlineClass}" type="button" data-action="jump-node" data-node-target="${escapeHtml(nodeAnchorId(hostLabel, index))}" title="${escapeHtml(`${hostLabel}: ${onlineCount}/${botCount} online, ${statusText}`)}" aria-label="${escapeHtml(`Jump to ${hostLabel}`)}">
-            <strong>${escapeHtml(index + 1)}</strong>
+            <strong>${escapeHtml(shortcutLabel)}</strong>
             <span>${escapeHtml(statusText)}</span>
           </button>
         `
@@ -1023,7 +1043,8 @@ function renderBots() {
     botsByNode.set(hostLabel, group)
   }
 
-  const renderedNodes = state.nodes.map((node, index) => {
+  const sortedNodes = state.nodes.slice().sort(compareNodeLabels)
+  const renderedNodes = sortedNodes.map((node, index) => {
     const nodeBots = (botsByNode.get(node.hostLabel) || []).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
     const nodeHasActiveNbt = nodeBots.some((bot) => hasResettableCurrentNbt(bot))
     const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
@@ -1058,7 +1079,7 @@ function renderBots() {
     `
   })
 
-  const orphanBots = state.bots.filter((bot) => !state.nodes.some((node) => node.hostLabel === bot.hostLabel))
+  const orphanBots = state.bots.filter((bot) => !sortedNodes.some((node) => node.hostLabel === bot.hostLabel))
   if (orphanBots.length) {
     renderedNodes.push(`
       <article class="fleet-node-group">
@@ -2503,6 +2524,14 @@ for (const eventName of ['focusin', 'input', 'keydown', 'pointerdown']) {
 elements.refreshButton.addEventListener('click', () => {
   void refreshData()
 })
+
+if (elements.backToTopButton) {
+  elements.backToTopButton.addEventListener('click', () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  })
+  window.addEventListener('scroll', updateBackToTopVisibility, { passive: true })
+  updateBackToTopVisibility()
+}
 
 elements.loginButton.addEventListener('click', async () => {
   state.auth.operator = elements.operatorUsername.value.trim()

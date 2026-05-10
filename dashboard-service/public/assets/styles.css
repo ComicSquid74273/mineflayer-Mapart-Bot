@@ -879,6 +879,18 @@ button:disabled {
   border-left-color: rgba(159, 42, 28, 0.38);
 }
 
+.back-to-top {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 20;
+  padding: 10px 14px;
+  border: 1px solid rgba(28, 143, 114, 0.32);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  background: rgba(14, 28, 40, 0.94);
+  color: var(--ink);
+}
+
 .hidden {
   display: none;
 }
@@ -953,6 +965,12 @@ button:disabled {
 
   .auth-box input {
     width: 100%;
+  }
+
+  .back-to-top {
+    right: 14px;
+    bottom: 14px;
+    padding: 9px 12px;
   }
 }
 
