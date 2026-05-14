@@ -2320,6 +2320,23 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, initialStartRequested = false) {
   let pendingStart = initialStartRequested
   let pauseParked = false
+  let lastPauseParkAttemptAt = 0
+  const pauseParkRetryMs = Math.max(1000, toNumber(config.advanced?.pauseParkRetryMs, 10000))
+  const tryPausePark = async (reason) => {
+    if (!isOperatorPaused(config)) return false
+    const now = Date.now()
+    if (pauseParked) {
+      dashboardRuntime?.setPhase?.('paused', 'paused')
+      return true
+    }
+    if (lastPauseParkAttemptAt && now - lastPauseParkAttemptAt < pauseParkRetryMs) {
+      dashboardRuntime?.setPhase?.('paused', 'paused')
+      return false
+    }
+    lastPauseParkAttemptAt = now
+    pauseParked = await parkAtCartographyAccessForPause(bot, config, dashboardRuntime, reason)
+    return pauseParked
+  }
   while (isBotSessionLive(bot) && bot.__nervSessionActive !== false) {
     if (dashboardRuntime?.consumePlatformCleanupRequest?.() === true) {
       printingIntentActive = false
@@ -2340,16 +2357,17 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
 
     if (runtimeControl?.isStopRequested()) {
       dashboardRuntime?.markRunStopped?.(isOperatorPaused(config) ? 'paused' : 'stopped')
-      if (isOperatorPaused(config) && !pauseParked) {
-        pauseParked = await parkAtCartographyAccessForPause(bot, config, dashboardRuntime, 'operator-pause-idle')
-      }
+      await tryPausePark('operator-pause-idle')
       await delay(1000)
       continue
     }
 
     const shouldStart = pendingStart || runtimeControl?.consumeStartRequest() === true || dashboardRuntime?.consumeStartRequest() === true
     pendingStart = false
-    if (shouldStart) pauseParked = false
+    if (shouldStart) {
+      pauseParked = false
+      lastPauseParkAttemptAt = 0
+    }
 
     const activeQueueFile = dashboardRuntime?.getActiveQueueFile?.()
     const activeQueuePath = dashboardRuntime?.getActiveQueueNbtPath?.()
@@ -2365,11 +2383,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
 
     if (!shouldStart) {
       if (isOperatorPaused(config)) {
-        if (!pauseParked) {
-          pauseParked = await parkAtCartographyAccessForPause(bot, config, dashboardRuntime, 'operator-pause-idle')
-        } else {
-          dashboardRuntime?.setPhase('paused', 'paused')
-        }
+        await tryPausePark('operator-pause-idle')
         await delay(1000)
         continue
       }
@@ -2441,7 +2455,9 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       if (isRuntimeStopError(err)) {
         console.log('[CONTROL] Pause requested; paused current work and returned to dashboard idle.')
         dashboardRuntime?.markRunStopped?.('paused')
-        pauseParked = await parkAtCartographyAccessForPause(bot, config, dashboardRuntime, 'operator-pause-after-work')
+        pauseParked = false
+        lastPauseParkAttemptAt = 0
+        await tryPausePark('operator-pause-after-work')
         await delay(1000)
         continue
       }
@@ -7101,11 +7117,13 @@ async function runPlatformResetPreflight(bot, config, reason = 'reset-current-nb
 
 async function parkAtCartographyAccessForPause(bot, config, dashboardRuntime = null, reason = 'operator-pause') {
   if (!bot?.pathfinder?.goto) return false
-  const cartographyConfig = config.machine?.cartographyTable?.enabled ? config.machine.cartographyTable : null
+  const cartographyNode = config.machine?.cartographyTable || null
+  const cartographyConfig = cartographyNode?.position ? cartographyNode : null
   if (!cartographyConfig?.position) {
     console.log('[CONTROL-WARN] Pause parking skipped: cartography table is not configured.')
     return false
   }
+  const accessPosition = cartographyConfig.accessPosition || cartographyConfig.openPos || cartographyConfig.openPosition || null
   const accessRange = Math.max(0.35, toNumber(
     config.advanced?.pauseCartographyAccessRange,
     toNumber(config.advanced?.postPrintCartographyAccessRange, 0.85)
@@ -7121,11 +7139,11 @@ async function parkAtCartographyAccessForPause(bot, config, dashboardRuntime = n
       gotoConfiguredAccess(
         bot,
         cartographyConfig.position,
-        cartographyConfig.accessPosition,
+        accessPosition,
         accessRange,
         config,
         `${reason}-cartography-access`,
-        { strict: Boolean(cartographyConfig.accessPosition) }
+        { strict: Boolean(accessPosition) }
       ),
       delay(timeoutMs).then(() => {
         throw new Error(`pause cartography parking timed out after ${timeoutMs}ms`)
@@ -7133,7 +7151,7 @@ async function parkAtCartographyAccessForPause(bot, config, dashboardRuntime = n
     ])
     stopBotMovement(bot)
     dashboardRuntime?.setPhase?.('paused', 'paused')
-    const standPos = cartographyConfig.accessPosition || cartographyConfig.position
+    const standPos = accessPosition || cartographyConfig.position
     console.log(`[CONTROL] Paused at cartography access x=${Math.round(standPos.x)} y=${Math.round(standPos.y)} z=${Math.round(standPos.z)}.`)
     return true
   } catch (err) {
@@ -17387,6 +17405,7 @@ function runSingleSession(config, sessionNumber) {
     let lastPlatformCacheLogKey = ''
     let lastPlatformCacheLogAt = 0
     let verificationCode = ''
+    let pathfinderMovementsConfigured = false
 
     const clonePos = (pos) => ({ x: Number(pos.x), y: Number(pos.y), z: Number(pos.z) })
     const recordPlatformPosition = (pos, source) => {
@@ -17464,6 +17483,25 @@ function runSingleSession(config, sessionNumber) {
       try { bot.quit(reason || 'token-verification-required') } catch { }
     }
 
+    const ensurePathfinderMovementsConfigured = () => {
+      if (pathfinderMovementsConfigured) return
+      configurePathfinderMovements(bot, config)
+      pathfinderMovementsConfigured = true
+    }
+
+    const enterPausedManagedLoop = async (stage) => {
+      if (!isOperatorPaused(config)) return false
+      console.log(`[CONTROL] Operator pause active during ${stage}; holding connected instead of reconnecting.`)
+      printerStarted = true
+      successfulStartup = true
+      bot.__nervPlatformWatchdogActive = true
+      dashboardRuntime?.setReconnectState('idle')
+      dashboardRuntime?.setPhase('paused', 'paused')
+      ensurePathfinderMovementsConfigured()
+      await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, false)
+      return true
+    }
+
     const startAfterSpawn = async (trigger = 'threshold') => {
       if (printerStarted || startupPending) return
       startupPending = true
@@ -17486,6 +17524,7 @@ function runSingleSession(config, sessionNumber) {
 
       if (!await waitForOfflineChatLogin(bot, config, 'spawn-startup')) {
         lastErrorText = `offline chat login not confirmed within ${Math.round(toNumber(bot.__nervChatLogin?.waitTimeoutMs, 30000) / 1000)}s`
+        if (await enterPausedManagedLoop('chat-login-timeout')) return
         console.log(`[CHAT-LOGIN-RECONNECT] ${lastErrorText}; reconnecting before portal/startup flow.`)
         try { bot.quit('chat-login-timeout') } catch { }
         settle('chat-login-timeout')
@@ -17542,6 +17581,7 @@ function runSingleSession(config, sessionNumber) {
 
         if (missingReconnectAttempts > 0 && missingPositionAttempts >= missingReconnectAttempts) {
           lastErrorText = `spawn position missing for ${Math.round(missingPositionAttempts / 2)}s`
+          if (await enterPausedManagedLoop('spawn-position-missing')) return
           console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of waiting idle.`)
           try { bot.quit('spawn-position-missing') } catch { }
           settle('spawn-position-missing')
@@ -17550,6 +17590,7 @@ function runSingleSession(config, sessionNumber) {
 
         if (transferWaitAttempts >= transferReconnectAttempts) {
           lastErrorText = `transfer zone wait exceeded ${Math.round(transferWaitAttempts / 2)}s`
+          if (await enterPausedManagedLoop('transfer-zone-timeout')) return
           console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of fallback startup.`)
           try { bot.quit('transfer-zone-timeout') } catch { }
           settle('transfer-zone-timeout')
@@ -17599,6 +17640,7 @@ function runSingleSession(config, sessionNumber) {
 
       const finalRuntime = classifyRuntimePosition(bot, config, 'spawn-final')
       if (!isPositionUsable(bot?.entity?.position) || (finalRuntime.classification?.platform !== true && !isPositionInsidePlatformBounds(bot.entity.position, config))) {
+        if (await enterPausedManagedLoop('spawn-platform-hold')) return
         console.log(`[SPAWN-HOLD] Position was not ready/on-platform after ${Math.round(maxAttempts / 2)}s. Holding instead of quitting.`)
         await waitForPlatformReady(bot, config, 'spawn')
       }
@@ -17613,7 +17655,7 @@ function runSingleSession(config, sessionNumber) {
 
       console.log(`[SPAWN] Connected. session=${sessionNumber}`)
 
-      configurePathfinderMovements(bot, config)
+      ensurePathfinderMovementsConfigured()
 
       bot.on('physicsTick', () => {
         const sprintMode = getPrinterSprintMode(config)
@@ -17714,17 +17756,25 @@ function runSingleSession(config, sessionNumber) {
         if (!spawnFallbackTimer) {
           const fallbackMs = getTransferWaitReconnectMs(config)
           spawnFallbackTimer = setTimeout(() => {
+            void (async () => {
             lastErrorText = `spawn gate stalled at ${spawnedCount}/${reqSpawn} for ${Math.round(fallbackMs / 1000)}s`
             if (autoTrigger?.hold) {
               lastErrorText = `transfer zone wait exceeded ${Math.round(fallbackMs / 1000)}s before spawn gate`
+              if (await enterPausedManagedLoop('spawn-gate-transfer-timeout')) return
               console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of fallback startup.`)
               try { bot.quit('transfer-zone-timeout') } catch { }
               settle('transfer-zone-timeout')
               return
             }
+            if (await enterPausedManagedLoop('spawn-gate-timeout')) return
             console.log(`[SPAWN-RECONNECT] ${lastErrorText}; reconnecting instead of fallback startup.`)
             try { bot.quit('spawn-gate-timeout') } catch { }
             settle('spawn-gate-timeout')
+            })().catch((err) => {
+              console.log(`[SPAWN-RECONNECT-WARN] Pause-aware spawn fallback failed: ${err?.message || err}`)
+              try { bot.quit('spawn-gate-timeout') } catch { }
+              settle('spawn-gate-timeout')
+            })
           }, fallbackMs)
           spawnFallbackTimer.unref?.()
         }
