@@ -833,6 +833,7 @@ function renderFleetJump() {
 }
 
 function renderSummary() {
+  const reconnects = state.bots.reduce((sum, item) => sum + Math.max(0, Number(item.reconnectCount || 0)), 0)
   const summarySignature = JSON.stringify({
     botCount: state.bots.length,
     nodeCount: state.nodes.length,
@@ -840,7 +841,8 @@ function renderSummary() {
     printing: state.bots.filter((item) => isBotPrinting(item)).length,
     paused: state.bots.filter((item) => isBotPaused(item)).length,
     stale: state.bots.filter((item) => item.activeState === 'stale').length,
-    idle: state.bots.filter((item) => item.idle && !isBotPaused(item)).length
+    idle: state.bots.filter((item) => item.idle && !isBotPaused(item)).length,
+    reconnects
   })
   if (state.renderCache.summary === summarySignature) return
   state.renderCache.summary = summarySignature
@@ -858,6 +860,7 @@ function renderSummary() {
     ['Online', online],
     ['Printing', printing],
     ['Paused', paused],
+    ['Reconnects', reconnects],
     ['Idle', idle],
     ['Stale', stale]
   ].map(([label, value]) => `

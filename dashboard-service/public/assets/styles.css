@@ -845,6 +845,13 @@ button:disabled {
   scrollbar-width: thin;
 }
 
+#uploadHistoryList {
+  max-height: min(430px, 45vh);
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}
+
 .file-item,
 .log-row,
 .empty-card {
