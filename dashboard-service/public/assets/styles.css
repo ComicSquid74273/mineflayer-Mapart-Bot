@@ -852,6 +852,12 @@ button:disabled {
   scrollbar-width: thin;
 }
 
+.upload-history-more,
+.upload-assignments-more {
+  align-self: center;
+  margin-top: 2px;
+}
+
 .log-download-list {
   gap: 14px;
 }

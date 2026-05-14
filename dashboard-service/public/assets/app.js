@@ -6,7 +6,15 @@ const state = {
   configs: [],
   dataFiles: [],
   uploadAssignments: [],
+  uploadAssignmentsLimit: 10,
+  uploadAssignmentsTotal: 0,
+  uploadAssignmentsHasMore: false,
+  uploadAssignmentsLoading: false,
   uploadHistory: [],
+  uploadHistoryLimit: 10,
+  uploadHistoryTotal: 0,
+  uploadHistoryHasMore: false,
+  uploadHistoryLoading: false,
   queueSummary: {
     combinedRemaining: 0,
     combinedCompleted: 0,
@@ -25,6 +33,9 @@ const state = {
   },
   alerts: [],
   nbtSearch: '',
+  nodeInventoryLoaded: false,
+  nodeInventoryLoading: false,
+  pendingNodeInventoryRefresh: false,
   localReprintCommands: [],
   configEditor: { name: null, content: '', dirty: false },
   refreshTimer: null,
@@ -86,6 +97,7 @@ const elements = {
   lastRefresh: document.getElementById('lastRefresh'),
   logsList: document.getElementById('logsList'),
   nbtSearchInput: document.getElementById('nbtSearchInput'),
+  nodeNbtDetails: document.getElementById('nodeNbtDetails'),
   nodesGrid: document.getElementById('nodesGrid'),
   operatorForm: document.getElementById('operatorForm'),
   loginButton: document.getElementById('loginButton'),
@@ -1243,7 +1255,11 @@ function renderUploadAssignments() {
   if (!elements.uploadAssignmentsList) return
   const sig = JSON.stringify({
     canOperate: hasPermission('canOperate'),
-    assignments: state.uploadAssignments
+    assignments: state.uploadAssignments,
+    limit: state.uploadAssignmentsLimit,
+    total: state.uploadAssignmentsTotal,
+    hasMore: state.uploadAssignmentsHasMore,
+    loading: state.uploadAssignmentsLoading
   })
   if (state.renderCache.uploadAssignments === sig) return
   state.renderCache.uploadAssignments = sig
@@ -1266,7 +1282,7 @@ function renderUploadAssignments() {
     return
   }
 
-  elements.uploadAssignmentsList.innerHTML = state.uploadAssignments.slice(0, 30).map((item) => {
+  const rows = state.uploadAssignments.slice(0, state.uploadAssignmentsLimit).map((item) => {
     const target = item.targetBotName
       ? `Bot: ${item.targetBotName}`
       : (item.targetHostLabel ? `Node: ${item.targetHostLabel}` : 'Unassigned')
@@ -1292,13 +1308,46 @@ function renderUploadAssignments() {
         </div>
       </article>`
   }).join('')
+  const shown = Math.min(state.uploadAssignments.length, state.uploadAssignmentsLimit)
+  const total = Math.max(Number(state.uploadAssignmentsTotal || 0), state.uploadAssignments.length)
+  const showMore = state.uploadAssignmentsHasMore ? `
+    <button class="ghost-button small-button upload-assignments-more" type="button" data-action="upload-assignments-more" data-permission-needed="canOperate" ${state.uploadAssignmentsLoading ? 'disabled' : ''}>
+      ${state.uploadAssignmentsLoading ? 'Loading...' : `Show More (${escapeHtml(shown)}/${escapeHtml(total)})`}
+    </button>
+  ` : ''
+  elements.uploadAssignmentsList.innerHTML = `${rows}${showMore}`
+}
+
+async function loadMoreUploadAssignments() {
+  if (state.uploadAssignmentsLoading) return
+  state.uploadAssignmentsLoading = true
+  state.renderCache.uploadAssignments = ''
+  renderUploadAssignments()
+  try {
+    const nextLimit = Math.min(200, Math.max(20, Number(state.uploadAssignmentsLimit || 10) + 50))
+    const result = await requestJson(`/api/dashboard/upload-assignments?limit=${encodeURIComponent(nextLimit)}`, { requireAuth: true })
+    state.uploadAssignments = Array.isArray(result.items) ? result.items : []
+    state.uploadAssignmentsLimit = Math.max(10, Number(result.limit || nextLimit))
+    state.uploadAssignmentsTotal = Math.max(Number(result.total || 0), state.uploadAssignments.length)
+    state.uploadAssignmentsHasMore = result.hasMore === true
+    state.renderCache.failedQueue = ''
+    renderFailedQueueRetries()
+  } finally {
+    state.uploadAssignmentsLoading = false
+    state.renderCache.uploadAssignments = ''
+    renderUploadAssignments()
+  }
 }
 
 function renderUploadHistory() {
   if (!elements.uploadHistoryList) return
   const sig = JSON.stringify({
     canOperate: hasPermission('canOperate'),
-    history: state.uploadHistory
+    history: state.uploadHistory,
+    limit: state.uploadHistoryLimit,
+    total: state.uploadHistoryTotal,
+    hasMore: state.uploadHistoryHasMore,
+    loading: state.uploadHistoryLoading
   })
   if (state.renderCache.uploadHistory === sig) return
   state.renderCache.uploadHistory = sig
@@ -1321,7 +1370,7 @@ function renderUploadHistory() {
     return
   }
 
-  elements.uploadHistoryList.innerHTML = state.uploadHistory.slice(0, 1000).map((item) => {
+  const rows = state.uploadHistory.slice(0, state.uploadHistoryLimit).map((item) => {
     const kind = String(item.kind || 'nbt').toUpperCase()
     const target = item.targetBotName
       ? `Bot: ${item.targetBotName}`
@@ -1339,7 +1388,8 @@ function renderUploadHistory() {
     if (item.uploadedBy) detailParts.push(`by ${item.uploadedBy}`)
     if (kind === 'ZIP') detailParts.splice(2, 0, `${extracted} extracted`)
     const previewNames = extractedNames.slice(0, 4).join(', ')
-    const moreNames = extractedNames.length > 4 ? ` +${extractedNames.length - 4} more` : ''
+    const totalExtractedNames = Math.max(extractedNames.length, extracted)
+    const moreNames = totalExtractedNames > 4 ? ` +${totalExtractedNames - 4} more` : ''
     const errorText = errors.length ? errors.map((error) => error.error || String(error)).join('; ') : ''
     return `
       <article class="file-item compact-file-item">
@@ -1356,6 +1406,33 @@ function renderUploadHistory() {
         </div>
       </article>`
   }).join('')
+  const shown = Math.min(state.uploadHistory.length, state.uploadHistoryLimit)
+  const total = Math.max(Number(state.uploadHistoryTotal || 0), state.uploadHistory.length)
+  const showMore = state.uploadHistoryHasMore ? `
+    <button class="ghost-button small-button upload-history-more" type="button" data-action="upload-history-more" data-permission-needed="canOperate" ${state.uploadHistoryLoading ? 'disabled' : ''}>
+      ${state.uploadHistoryLoading ? 'Loading...' : `Show More (${escapeHtml(shown)}/${escapeHtml(total)})`}
+    </button>
+  ` : ''
+  elements.uploadHistoryList.innerHTML = `${rows}${showMore}`
+}
+
+async function loadMoreUploadHistory() {
+  if (state.uploadHistoryLoading) return
+  state.uploadHistoryLoading = true
+  state.renderCache.uploadHistory = ''
+  renderUploadHistory()
+  try {
+    const nextLimit = Math.min(200, Math.max(20, Number(state.uploadHistoryLimit || 10) + 50))
+    const result = await requestJson(`/api/dashboard/upload-history?limit=${encodeURIComponent(nextLimit)}`, { requireAuth: true })
+    state.uploadHistory = Array.isArray(result.items) ? result.items : []
+    state.uploadHistoryLimit = Math.max(10, Number(result.limit || nextLimit))
+    state.uploadHistoryTotal = Math.max(Number(result.total || 0), state.uploadHistory.length)
+    state.uploadHistoryHasMore = result.hasMore === true
+  } finally {
+    state.uploadHistoryLoading = false
+    state.renderCache.uploadHistory = ''
+    renderUploadHistory()
+  }
 }
 
 function isFailedQueueAssignment(item) {
@@ -1366,16 +1443,18 @@ function isFailedQueueAssignment(item) {
 function renderFailedQueueRetries() {
   if (!elements.failedQueueList) return
   const failedItems = state.uploadAssignments.filter(isFailedQueueAssignment)
+  const totalFailed = Math.max(Number(state.queueSummary?.retrying || 0), failedItems.length)
   const sig = JSON.stringify({
     canOperate: hasPermission('canOperate'),
-    failedItems
+    failedItems,
+    totalFailed
   })
   if (state.renderCache.failedQueue === sig) return
   state.renderCache.failedQueue = sig
 
   if (elements.retryAllFailedButton) {
-    elements.retryAllFailedButton.textContent = `Retry All Failed (${failedItems.length})`
-    elements.retryAllFailedButton.disabled = !hasPermission('canOperate') || failedItems.length === 0
+    elements.retryAllFailedButton.textContent = `Retry All Failed (${totalFailed})`
+    elements.retryAllFailedButton.disabled = !hasPermission('canOperate') || totalFailed === 0
   }
 
   if (!hasPermission('canOperate')) {
@@ -1391,7 +1470,7 @@ function renderFailedQueueRetries() {
     elements.failedQueueList.innerHTML = `
       <article class="empty-card">
         <h3>No failed queue files</h3>
-        <p>Failed and failed-final NBTs will appear here.</p>
+        <p>${totalFailed > 0 ? 'Failed NBTs may be outside the loaded rows. Use Show More below to load more queue files.' : 'Failed and failed-final NBTs will appear here.'}</p>
       </article>`
     return
   }
@@ -1462,9 +1541,19 @@ function renderQueueSummary() {
 }
 
 function renderNodes() {
-  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch, role: state.auth.role, isAdmin: isAdmin() })
+  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch, role: state.auth.role, isAdmin: isAdmin(), loaded: state.nodeInventoryLoaded, loading: state.nodeInventoryLoading })
   if (state.renderCache.nodes === nodesSignature) return
   state.renderCache.nodes = nodesSignature
+
+  if (!state.nodeInventoryLoaded) {
+    elements.nodesGrid.innerHTML = `
+      <article class="empty-card">
+        <h3>${state.nodeInventoryLoading ? 'Loading node NBT files' : 'Node NBT files not loaded'}</h3>
+        <p>${state.nodeInventoryLoading ? 'Fetching node NBT and finished-map file lists.' : 'Open this section or search an NBT name to fetch the file lists.'}</p>
+      </article>
+    `
+    return
+  }
 
   const totalFinishedMaps = state.nodes.reduce((total, node) => {
     return total + (Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles.length : 0)
@@ -2049,13 +2138,19 @@ async function onVerifyBot(botName, action) {
 }
 
 async function refreshData(options = {}) {
-  if (state.busy) return
+  if (state.busy) {
+    if (options.includeNodeInventory === true) state.pendingNodeInventoryRefresh = true
+    return
+  }
   if (options.background === true && (state.uploadBusy || activeElementInsideForm() || hasRecentUserInteraction())) return
   if (options.background === true && state.bots.some((bot) => bot.tokenWaiting)) return
 
   state.busy = true
   try {
-    const snapshot = await requestJson('/api/dashboard/snapshot', { requireAuth: state.auth.verified })
+    const includeNodeInventory = options.includeNodeInventory === true || elements.nodeNbtDetails?.open === true || String(state.nbtSearch || '').trim().length > 0
+    if (includeNodeInventory) state.nodeInventoryLoading = true
+    const snapshotUrl = `/api/dashboard/snapshot${includeNodeInventory ? '?includeNodeInventory=true' : ''}`
+    const snapshot = await requestJson(snapshotUrl, { requireAuth: state.auth.verified })
     const logs = state.auth.verified && hasPermission('canViewLogs')
       ? await requestJson('/api/dashboard/logs', { requireAuth: true })
       : { items: [] }
@@ -2067,12 +2162,19 @@ async function refreshData(options = {}) {
       : { files: [] }
     state.bots = Array.isArray(snapshot.bots) ? snapshot.bots : []
     state.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : []
+    state.nodeInventoryLoaded = snapshot.nodeInventoryIncluded === true
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = []
     state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
     state.uploadAssignments = Array.isArray(snapshot.uploadAssignments) ? snapshot.uploadAssignments : []
+    state.uploadAssignmentsLimit = Math.max(10, Number(snapshot.uploadAssignmentsLimit || state.uploadAssignments.length || 10))
+    state.uploadAssignmentsTotal = Math.max(Number(snapshot.uploadAssignmentsTotal || 0), state.uploadAssignments.length)
+    state.uploadAssignmentsHasMore = snapshot.uploadAssignmentsHasMore === true
     state.uploadHistory = Array.isArray(snapshot.uploadHistory) ? snapshot.uploadHistory : []
+    state.uploadHistoryLimit = Math.max(10, Number(snapshot.uploadHistoryLimit || state.uploadHistory.length || 10))
+    state.uploadHistoryTotal = Math.max(Number(snapshot.uploadHistoryTotal || 0), state.uploadHistory.length)
+    state.uploadHistoryHasMore = snapshot.uploadHistoryHasMore === true
     state.queueSummary = snapshot.queueSummary && typeof snapshot.queueSummary === 'object' ? snapshot.queueSummary : state.queueSummary
     state.events = Array.isArray(snapshot.events) ? snapshot.events : []
     state.alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : []
@@ -2108,7 +2210,12 @@ async function refreshData(options = {}) {
     if (elements.queueRemainingMeta) elements.queueRemainingMeta.textContent = 'Service offline'
     pushEvent('error', error.message)
   } finally {
+    state.nodeInventoryLoading = false
     state.busy = false
+    if (state.pendingNodeInventoryRefresh) {
+      state.pendingNodeInventoryRefresh = false
+      void refreshData({ includeNodeInventory: true })
+    }
   }
 }
 
@@ -2603,6 +2710,10 @@ document.addEventListener('click', async (event) => {
       await onQueueRetry(button.dataset.fileId || '')
     } else if (button.dataset.action === 'queue-retry-all') {
       await onQueueRetryAll()
+    } else if (button.dataset.action === 'upload-assignments-more') {
+      await loadMoreUploadAssignments()
+    } else if (button.dataset.action === 'upload-history-more') {
+      await loadMoreUploadHistory()
     } else if (button.dataset.action === 'download-node-log') {
       await downloadNodeLogFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
       pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
@@ -2778,7 +2889,19 @@ if (elements.nbtSearchInput) {
   elements.nbtSearchInput.addEventListener('input', () => {
     state.nbtSearch = elements.nbtSearchInput.value
     state.renderCache.nodes = ''
+    if (String(state.nbtSearch || '').trim() && !state.nodeInventoryLoaded) {
+      void refreshData({ includeNodeInventory: true }).catch((error) => pushEvent('error', error.message))
+      return
+    }
     renderNodes()
+  })
+}
+
+if (elements.nodeNbtDetails) {
+  elements.nodeNbtDetails.addEventListener('toggle', () => {
+    if (elements.nodeNbtDetails.open && !state.nodeInventoryLoaded) {
+      void refreshData({ includeNodeInventory: true }).catch((error) => pushEvent('error', error.message))
+    }
   })
 }
 

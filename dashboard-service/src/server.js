@@ -313,7 +313,12 @@ function reqIsLogDeletePath(pathname, method) {
 }
 
 function reqIsDashboardFileReadPath(pathname, method) {
-  return method === 'GET' && (pathname === '/api/dashboard/files' || pathname === '/api/dashboard/queue')
+  return method === 'GET' && (
+    pathname === '/api/dashboard/files'
+    || pathname === '/api/dashboard/queue'
+    || pathname === '/api/dashboard/upload-history'
+    || pathname === '/api/dashboard/upload-assignments'
+  )
 }
 
 function reqIsOperatorManagementPath(pathname) {
@@ -779,7 +784,8 @@ function summarizeBot(bot, pauseState = null) {
   }
 }
 
-function summarizeNode(node) {
+function summarizeNode(node, options = {}) {
+  const includeInventory = options.includeInventory === true
   return {
     hostLabel: node.hostLabel,
     botCount: node.botCount,
@@ -787,10 +793,11 @@ function summarizeNode(node) {
     botNames: node.botNames,
     configFiles: Array.isArray(node.configFiles) ? node.configFiles : [],
     lastStatusAt: node.lastStatusAt,
-    nodeFiles: Array.isArray(node.nodeFiles) ? node.nodeFiles : [],
+    nodeFiles: includeInventory && Array.isArray(node.nodeFiles) ? node.nodeFiles : [],
     nodeLogs: Array.isArray(node.nodeLogs) ? node.nodeLogs : [],
     finishedMapCount: Number.isFinite(Number(node.finishedMapCount)) ? Number(node.finishedMapCount) : 0,
-    finishedMapFiles: Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : [],
+    finishedMapFiles: includeInventory && Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : [],
+    nodeInventoryIncluded: includeInventory,
     reprintCommands: listNodeReprintCommands(node.hostLabel),
     assignmentStats: node.assignmentStats || null,
     operationalStats: node.operationalStats || null,
@@ -889,8 +896,22 @@ function listUploadAssignments(limit = 150) {
   return Number.isFinite(parsedLimit) && parsedLimit > 0 ? items.slice(0, parsedLimit) : items
 }
 
-function listUploadHistory(limit = 1000) {
-  return store.listUploadHistory(0).filter((item) => item?.kind === 'zip').slice(0, limit).map((item) => ({
+function listUploadAssignmentPage(limit = 10, sourceItems = null) {
+  const parsedLimit = Math.min(200, Math.max(1, Number(limit || 10)))
+  const items = Array.isArray(sourceItems) ? sourceItems : listUploadAssignments(0)
+  return {
+    items: items.slice(0, parsedLimit),
+    total: items.length,
+    hasMore: items.length > parsedLimit,
+    limit: parsedLimit
+  }
+}
+
+function listUploadHistory(limit = 10) {
+  const parsedLimit = Math.min(200, Math.max(1, Number(limit || 10)))
+  const items = store.listUploadHistory(0).filter((item) => item?.kind === 'zip')
+  return {
+    items: items.slice(0, parsedLimit).map((item) => ({
     id: item.uploadId,
     fileName: item.originalName || 'unknown',
     kind: item.kind || 'nbt',
@@ -904,7 +925,11 @@ function listUploadHistory(limit = 1000) {
     extractedCount: Number.isFinite(Number(item.extractedCount)) ? Number(item.extractedCount) : 0,
     extractedNames: Array.isArray(item.extractedNames) ? item.extractedNames.slice(0, 50) : [],
     errors: Array.isArray(item.errors) ? item.errors.slice(0, 10) : []
-  }))
+  })),
+    total: items.length,
+    hasMore: items.length > parsedLimit,
+    limit: parsedLimit
+  }
 }
 
 function getAssignmentDisplayStatus(item) {
@@ -1289,9 +1314,10 @@ function invalidateSnapshotCache() {
   snapshotCache = { expiresAt: 0, payload: null }
 }
 
-function buildDashboardSnapshot(actor = null) {
+function buildDashboardSnapshot(actor = null, options = {}) {
   const now = Date.now()
-  const cacheKey = actor?.permissions?.canOperate === true ? 'operate' : 'public'
+  const includeNodeInventory = options.includeNodeInventory === true && actor?.permissions?.canOperate === true
+  const cacheKey = `${actor?.permissions?.canOperate === true ? 'operate' : 'public'}:${includeNodeInventory ? 'node-inventory' : 'summary'}`
   if (snapshotCache.payload?.cacheKey === cacheKey && snapshotCache.expiresAt > now) {
     return snapshotCache.payload.body
   }
@@ -1304,11 +1330,13 @@ function buildDashboardSnapshot(actor = null) {
   }
   const fleet = timed('fleet', () => store.listFleet())
   const bots = timed('bots', () => fleet.bots.map((bot) => summarizeBot(bot, store.getBotPauseState(bot.botName))))
-  const nodes = timed('nodes', () => fleet.nodes.map(summarizeNode))
+  const nodes = timed('nodes', () => fleet.nodes.map((node) => summarizeNode(node, { includeInventory: includeNodeInventory })))
   const events = timed('events', () => store.listEvents(150))
   const allAssignments = timed('assignments', () => listUploadAssignments(0))
-  const assignments = actor?.permissions?.canOperate ? allAssignments.slice(0, 150) : []
-  const uploadHistory = actor?.permissions?.canOperate ? timed('uploadHistory', () => listUploadHistory(1000)) : []
+  const assignmentPage = actor?.permissions?.canOperate
+    ? timed('assignmentPage', () => listUploadAssignmentPage(10, allAssignments))
+    : { items: [], total: 0, hasMore: false, limit: 10 }
+  const uploadHistoryPage = actor?.permissions?.canOperate ? timed('uploadHistory', () => listUploadHistory(10)) : { items: [], total: 0, hasMore: false, limit: 10 }
   const queueSummary = timed('queueSummary', () => buildQueueSummary(allAssignments, nodes))
   const alerts = timed('alerts', () => buildDashboardAlerts(bots, nodes, allAssignments))
   const body = {
@@ -1319,8 +1347,15 @@ function buildDashboardSnapshot(actor = null) {
     events,
     alerts,
     queueSummary,
-    uploadAssignments: assignments,
-    uploadHistory
+    uploadAssignments: assignmentPage.items,
+    uploadAssignmentsTotal: assignmentPage.total,
+    uploadAssignmentsHasMore: assignmentPage.hasMore,
+    uploadAssignmentsLimit: assignmentPage.limit,
+    uploadHistory: uploadHistoryPage.items,
+    uploadHistoryTotal: uploadHistoryPage.total,
+    uploadHistoryHasMore: uploadHistoryPage.hasMore,
+    uploadHistoryLimit: uploadHistoryPage.limit,
+    nodeInventoryIncluded: includeNodeInventory
   }
   const totalMs = Date.now() - now
   if (SNAPSHOT_SLOW_STEP_MS > 0 && totalMs >= SNAPSHOT_SLOW_STEP_MS) {
@@ -1372,7 +1407,8 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/snapshot') {
-    return sendJson(res, 200, buildDashboardSnapshot(actor))
+    const includeNodeInventory = parseUrl(req).searchParams.get('includeNodeInventory') === 'true'
+    return sendJson(res, 200, buildDashboardSnapshot(actor, { includeNodeInventory }))
   }
 
   if (req.method === 'POST' && pathname === '/api/dashboard/auth/login') {
@@ -2045,6 +2081,16 @@ async function route(req, res) {
 
   if (req.method === 'GET' && pathname === '/api/dashboard/events') {
     return sendJson(res, 200, { items: store.listEvents(150) })
+  }
+
+  if (req.method === 'GET' && pathname === '/api/dashboard/upload-history') {
+    const limit = Math.min(200, Math.max(10, Number(parseUrl(req).searchParams.get('limit') || 10)))
+    return sendJson(res, 200, listUploadHistory(limit))
+  }
+
+  if (req.method === 'GET' && pathname === '/api/dashboard/upload-assignments') {
+    const limit = Math.min(200, Math.max(10, Number(parseUrl(req).searchParams.get('limit') || 10)))
+    return sendJson(res, 200, listUploadAssignmentPage(limit))
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/nodes') {
