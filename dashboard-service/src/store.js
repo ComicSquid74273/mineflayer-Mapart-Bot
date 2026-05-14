@@ -44,6 +44,7 @@ function createStore(baseDir) {
   const filesDir = path.join(dataDir, 'files')
   const botsFile = path.join(dataDir, 'bots.json')
   const commandsFile = path.join(dataDir, 'commands.json')
+  const controlFile = path.join(dataDir, 'control.json')
   const uploadsFile = path.join(dataDir, 'files.json')
   const eventsFile = path.join(dataDir, 'events.json')
   const operatorsFile = path.join(dataDir, 'operators.json')
@@ -117,6 +118,7 @@ function createStore(baseDir) {
   ensureDir(nodeLogDownloadsDir)
   if (!fs.existsSync(botsFile)) writeJson(botsFile, {})
   if (!fs.existsSync(commandsFile)) writeJson(commandsFile, [])
+  if (!fs.existsSync(controlFile)) writeJson(controlFile, { pausedBots: {} })
   if (!fs.existsSync(uploadsFile)) writeJson(uploadsFile, [])
   if (!fs.existsSync(eventsFile)) writeJson(eventsFile, [])
   if (!fs.existsSync(operatorsFile)) writeJson(operatorsFile, defaultOperators())
@@ -131,6 +133,21 @@ function createStore(baseDir) {
   function readBotMap() {
     const bots = readJson(botsFile, {})
     return bots && typeof bots === 'object' && !Array.isArray(bots) ? bots : {}
+  }
+
+  function readControlState() {
+    const state = readJson(controlFile, { pausedBots: {} })
+    return state && typeof state === 'object' && !Array.isArray(state) ? {
+      ...state,
+      pausedBots: state.pausedBots && typeof state.pausedBots === 'object' && !Array.isArray(state.pausedBots) ? state.pausedBots : {}
+    } : { pausedBots: {} }
+  }
+
+  function saveControlState(state) {
+    writeJson(controlFile, {
+      ...(state && typeof state === 'object' && !Array.isArray(state) ? state : {}),
+      pausedBots: state?.pausedBots && typeof state.pausedBots === 'object' && !Array.isArray(state.pausedBots) ? state.pausedBots : {}
+    })
   }
 
   function readNodeInventoryMap() {
@@ -986,6 +1003,54 @@ function createStore(baseDir) {
     return botNames.map((botName) => createCommand({ ...extra, targetBotName: botName, commandType }))
   }
 
+  function setBotPauseDesired(botName, paused, reason = null) {
+    const name = String(botName || '').trim()
+    if (!name) return null
+    const state = readControlState()
+    if (paused === true) {
+      state.pausedBots[name] = {
+        paused: true,
+        reason: reason || null,
+        updatedAt: nowIso()
+      }
+    } else {
+      delete state.pausedBots[name]
+    }
+    saveControlState(state)
+    return state.pausedBots[name] || null
+  }
+
+  function setBotsPauseDesired(botNames, paused, reason = null) {
+    return (Array.isArray(botNames) ? botNames : []).map((botName) => setBotPauseDesired(botName, paused, reason))
+  }
+
+  function isBotPauseDesired(botName) {
+    const name = String(botName || '').trim()
+    if (!name) return false
+    return readControlState().pausedBots[name]?.paused === true
+  }
+
+  function isBotReportingPaused(bot) {
+    const phase = String(bot?.phase || '').trim().toLowerCase()
+    const detail = String(bot?.statusDetail || '').trim().toLowerCase()
+    const active = String(bot?.activeState || '').trim().toLowerCase()
+    return phase === 'paused' || detail === 'paused' || active === 'paused'
+  }
+
+  function ensureDesiredPauseCommand(botName) {
+    const name = String(botName || '').trim()
+    if (!name || !isBotPauseDesired(name)) return null
+    const bot = getBot(name)
+    if (isBotReportingPaused(bot)) return null
+    const existing = listCommands((item) => item.targetBotName === name && item.commandType === 'stop' && (item.status === 'pending' || item.status === 'claimed'))[0]
+    if (existing) return existing
+    return createCommand({
+      targetBotName: name,
+      commandType: 'stop',
+      reason: 'dashboard-pause-policy'
+    })
+  }
+
   function claimCommand(botName, commandId) {
     const items = listCommands()
     const index = items.findIndex((item) => item.commandId === commandId && item.targetBotName === botName)
@@ -1013,6 +1078,7 @@ function createStore(baseDir) {
   }
 
   function listPendingCommands(botName) {
+    ensureDesiredPauseCommand(botName)
     return listCommands((item) => item.targetBotName === botName && (item.status === 'pending' || item.status === 'claimed'))
       .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)))
   }
@@ -1717,6 +1783,9 @@ function createStore(baseDir) {
     getCommand,
     createCommand,
     createCommandsForBots,
+    setBotPauseDesired,
+    setBotsPauseDesired,
+    isBotPauseDesired,
     claimCommand,
     completeCommand,
     listPendingCommands,

@@ -2041,6 +2041,7 @@ async function route(req, res) {
 
   if (req.method === 'POST' && pathname === '/api/dashboard/commands/start-all') {
     const botNames = store.listBots().map((item) => item.botName)
+    store.setBotsPauseDesired(botNames, false, 'dashboard-ui start all')
     const items = store.createCommandsForBots(botNames, 'start')
     auditOperatorAction(actor, 'start-all', `Queued print start for ${botNames.length} bot(s).`, { botNames })
     return sendJson(res, 201, { items })
@@ -2049,6 +2050,7 @@ async function route(req, res) {
   if (req.method === 'POST' && pathname === '/api/dashboard/commands/stop-all') {
     const body = await readBody(req)
     const botNames = store.listBots().map((item) => item.botName)
+    store.setBotsPauseDesired(botNames, true, body?.reason || 'dashboard-ui pause all')
     const items = store.createCommandsForBots(botNames, 'stop', { reason: body?.reason || null })
     auditOperatorAction(actor, 'pause-all', `Queued print pause for ${botNames.length} bot(s).`, { botNames, reason: body?.reason || null }, 'warn')
     return sendJson(res, 201, { items })
@@ -2060,6 +2062,7 @@ async function route(req, res) {
     const bots = store.listBotsForHost(params.hostLabel)
     if (!bots.length) return notFound(res)
     const botNames = bots.map((item) => item.botName)
+    store.setBotsPauseDesired(botNames, false, 'dashboard-ui node start')
     const items = store.createCommandsForBots(botNames, 'start', { requestedBy: actor.username })
     auditOperatorAction(actor, 'start-node', `Queued print start for node ${params.hostLabel}.`, { hostLabel: params.hostLabel, botNames })
     return sendJson(res, 201, { items })
@@ -2072,6 +2075,7 @@ async function route(req, res) {
     const bots = store.listBotsForHost(params.hostLabel)
     if (!bots.length) return notFound(res)
     const botNames = bots.map((item) => item.botName)
+    store.setBotsPauseDesired(botNames, true, body?.reason || 'dashboard-ui node pause')
     const items = store.createCommandsForBots(botNames, 'stop', {
       requestedBy: actor.username,
       reason: body?.reason || null
@@ -2102,6 +2106,7 @@ async function route(req, res) {
   params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/start')
   if (params) {
     if (req.method !== 'POST') return methodNotAllowed(res)
+    store.setBotPauseDesired(params.botName, false, 'dashboard-ui bot start')
     const command = store.createCommand({ targetBotName: params.botName, commandType: 'start', requestedBy: actor.username })
     auditOperatorAction(actor, 'start-bot', `Queued print start for ${params.botName}.`, { botName: params.botName })
     return sendJson(res, 201, { command })
@@ -2111,6 +2116,7 @@ async function route(req, res) {
   if (params) {
     if (req.method !== 'POST') return methodNotAllowed(res)
     const body = await readBody(req)
+    store.setBotPauseDesired(params.botName, true, body?.reason || 'dashboard-ui bot pause')
     const command = store.createCommand({
       targetBotName: params.botName,
       commandType: 'stop',
