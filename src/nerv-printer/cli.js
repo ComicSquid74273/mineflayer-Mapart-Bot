@@ -10,7 +10,7 @@ process.on('unhandledRejection', (reason) => {
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
 // Persists across session reconnects within one process run.
-// Set true by any 'start' command; false by any 'stop' or dashboard-disconnect.
+// Set true by any 'start' command; false by any pause/stop or dashboard-disconnect.
 let printingIntentActive = false
 const fs = require('fs')
 const http = require('http')
@@ -307,8 +307,8 @@ function observeBackgroundTask(promise) {
 }
 
 class RuntimeStopRequestedError extends Error {
-  constructor(detail = 'stopping-after-current-step') {
-    super('runtime stop requested; returning to idle')
+  constructor(detail = 'pausing-after-current-step') {
+    super('runtime pause requested; returning to idle')
     this.name = 'RuntimeStopRequestedError'
     this.code = 'RUNTIME_STOP_REQUESTED'
     this.detail = detail
@@ -329,7 +329,7 @@ function isGoalChangedError(err) {
     String(err?.message || err || '').toLowerCase().includes('goalchanged')
 }
 
-function assertRuntimeContinue(bot, config, detail = 'stopping-after-current-step') {
+function assertRuntimeContinue(bot, config, detail = 'pausing-after-current-step') {
   if (!isRuntimeStopRequested(config)) return
   const dashboardRuntime = config?.__dashboardRuntime
   dashboardRuntime?.setStatusDetail?.(detail)
@@ -655,7 +655,7 @@ function isWaitForCommandEnabled() {
   return envValue === '1' || envValue === 'true' || envValue === 'yes'
 }
 
-function createRuntimeControl() {
+function createRuntimeControl(config = null) {
   const state = {
     lastSource: '',
     runActive: false,
@@ -668,7 +668,7 @@ function createRuntimeControl() {
     setRuntimeCommandStatus({
       controlState: state.runActive
         ? 'running'
-        : (state.stopRequested ? 'stopped' : (state.startRequested ? 'start-requested' : 'idle-ready')),
+        : (state.stopRequested ? 'paused' : (state.startRequested ? 'start-requested' : 'idle-ready')),
       controlSource: state.lastSource || '',
       controlUpdatedAt: state.updatedAt
     })
@@ -685,6 +685,7 @@ function createRuntimeControl() {
       }
     },
     requestStart(source = 'terminal') {
+      if (config) setOperatorPaused(config, false, source)
       state.startRequested = true
       state.stopRequested = false
       state.lastSource = source
@@ -693,12 +694,13 @@ function createRuntimeControl() {
       return `start requested via ${source}`
     },
     requestStop(source = 'terminal') {
+      if (config) setOperatorPaused(config, true, source)
       state.startRequested = false
       state.stopRequested = true
       state.lastSource = source
       state.updatedAt = Date.now()
       syncStatus()
-      return 'stop requested; bot will remain connected and go idle after the current run'
+      return 'pause requested; bot will remain connected and go idle after the current run'
     },
     consumeStartRequest() {
       if (!state.startRequested) return false
@@ -1167,9 +1169,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   function buildStatusPayload(onlineOverride = null) {
     const now = Date.now()
     const progress = currentProgress()
+    const operatorPaused = isOperatorPaused(config)
     const rawPhase = state.phase || progress?.phase || 'idle'
     const progressPhase = normalizeDashboardPhase(progress?.phase)
-    let phase = normalizeDashboardPhase(rawPhase)
+    let phase = operatorPaused ? 'paused' : normalizeDashboardPhase(rawPhase)
     const runActive = runtimeControl?.isRunActive?.() === true
     const hasActiveNbtRun = runActive && state.currentNbtStartedAt && currentSourceName()
     if (phase === 'waiting-spawn' && hasActiveNbtRun) {
@@ -1179,11 +1182,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     }
     const health = Number.isFinite(Number(bot?.health)) ? Number(bot.health) : 20
     const hunger = Number.isFinite(Number(bot?.food)) ? Number(bot.food) : 20
-    const idle = phase === 'idle' || (now - state.lastActivityAt >= dashboard.idleWindowMs && !['printing', 'repair', 'rescan', 'post-print', 'cleanup', 'starting', 'waiting-spawn'].includes(phase))
+    const idle = operatorPaused || phase === 'idle' || (now - state.lastActivityAt >= dashboard.idleWindowMs && !['printing', 'repair', 'rescan', 'post-print', 'cleanup', 'starting', 'waiting-spawn'].includes(phase))
     const progressUpdatedAt = new Date(progress?.updatedAt || 0).getTime()
     const recentProgressAt = Number.isFinite(progressUpdatedAt) && progressBlocksQueue(progress) ? progressUpdatedAt : 0
     const lastWorkActivityAt = Math.max(state.lastActivityAt, recentProgressAt)
-    const activeState = !idle && now - lastWorkActivityAt >= dashboard.staleMs ? 'stale' : 'active'
+    const activeState = operatorPaused ? 'paused' : (!idle && now - lastWorkActivityAt >= dashboard.staleMs ? 'stale' : 'active')
     const role = currentRole()
     const assignedInterval = currentAssignment()?.interval ? {
       start: toNumber(currentAssignment().interval.start, 0),
@@ -1197,7 +1200,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     clearDeathMessageIfOnPlatform(runtimeLocation)
     const location = mapDashboardLocation(runtimeLocation)
     const locationDetail = mapDashboardLocationDetail(runtimeLocation)
-    let statusDetail = state.statusDetail || (phase === 'idle' ? 'idle' : phase)
+    let statusDetail = operatorPaused ? 'paused' : (state.statusDetail || (phase === 'idle' ? 'idle' : phase))
     if (hasActiveNbtRun && phase !== 'waiting-spawn' && /^spawn-\d+$/i.test(String(statusDetail || '').trim())) {
       statusDetail = phase
     }
@@ -1813,6 +1816,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       }
       case 'fresh-start-clean-node': {
         try {
+          setOperatorPaused(config, false, command.reason || 'dashboard-reset-everything')
           if (runtimeControl?.isRunActive?.() === true) {
             printingIntentActive = false
             state.platformCleanupRequested = true
@@ -1853,6 +1857,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           invalidateNodeInventoryCache()
           state.currentNbt = path.basename(targetPath)
           printingIntentActive = true
+          setOperatorPaused(config, false, command.reason || 'dashboard-reprint')
           runtimeControl?.requestStart('dashboard-reprint')
           state.startRequested = true
           state.stopRequested = false
@@ -1944,6 +1949,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   }
 
   async function handleQueueFileAssignment() {
+    if (isOperatorPaused(config)) return false
     await flushQueueResultOutbox()
     if (hasPendingQueueResults()) return false
     if (hasNonDashboardLocalNbtWork()) return false
@@ -1967,7 +1973,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       if (result?.downloaded) downloadedCount += 1
     }
 
-    const canStartBufferedQueue = runtimeControl?.isRunActive?.() !== true && !state.currentNbt && !progressBlocksQueue(currentProgress())
+    const canStartBufferedQueue = !isOperatorPaused(config) && runtimeControl?.isRunActive?.() !== true && !state.currentNbt && !progressBlocksQueue(currentProgress())
     if (canStartBufferedQueue && countLocalQueueFiles() > 0) {
       printingIntentActive = true
       runtimeControl?.requestStart('dashboard-queue')
@@ -2011,6 +2017,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     switch (claimed.commandType) {
       case 'start': {
         printingIntentActive = true
+        setOperatorPaused(config, false, claimed.reason || 'dashboard-start')
         runtimeControl?.requestStart('dashboard')
         state.startRequested = true
         state.stopRequested = false
@@ -2020,12 +2027,13 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       }
       case 'stop': {
         printingIntentActive = false
+        setOperatorPaused(config, true, claimed.reason || 'dashboard-pause')
         runtimeControl?.requestStop('dashboard')
         state.stopRequested = true
         state.startRequested = false
-        state.statusDetail = 'stopping-after-current-step'
+        state.statusDetail = 'pausing-after-current-step'
         noteActivity()
-        await reportCommandResult(claimed.commandId, 'succeeded', claimed.reason || 'stop requested; bot will remain connected idle')
+        await reportCommandResult(claimed.commandId, 'succeeded', claimed.reason || 'pause requested; bot will remain connected idle')
         break
       }
       case 'assign-nbt': {
@@ -2077,10 +2085,12 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         break
       }
       case 'reset-current-nbt': {
+        setOperatorPaused(config, false, claimed.reason || 'dashboard-reset-current-nbt')
         await requestCurrentNbtReset('dashboard', claimed.commandId)
         break
       }
       case 'platform-cleanup': {
+        setOperatorPaused(config, false, claimed.reason || 'dashboard-platform-cleanup')
         await requestPlatformCleanup('dashboard', claimed.commandId)
         break
       }
@@ -2328,7 +2338,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
     }
 
     if (runtimeControl?.isStopRequested()) {
-      dashboardRuntime?.markRunStopped?.('stopped')
+      dashboardRuntime?.markRunStopped?.(isOperatorPaused(config) ? 'paused' : 'stopped')
       await delay(1000)
       continue
     }
@@ -2349,6 +2359,11 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
     }
 
     if (!shouldStart) {
+      if (isOperatorPaused(config)) {
+        dashboardRuntime?.setPhase('idle', 'paused')
+        await delay(1000)
+        continue
+      }
       const localQueuedNbt = activeQueuePath || getNextNbtFile(config)
       if (localQueuedNbt) {
         console.log(`[DASHBOARD] Auto-starting queued local NBT: ${path.basename(localQueuedNbt)}`)
@@ -2415,8 +2430,8 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       }
     } catch (err) {
       if (isRuntimeStopError(err)) {
-        console.log('[CONTROL] Stop requested; paused current work and returned to dashboard idle.')
-        dashboardRuntime?.markRunStopped?.('stopped')
+        console.log('[CONTROL] Pause requested; paused current work and returned to dashboard idle.')
+        dashboardRuntime?.markRunStopped?.('paused')
         await delay(1000)
         continue
       }
@@ -3114,6 +3129,35 @@ function getProgressFilePath(config) {
   return path.resolve(process.cwd(), config.files?.progressFile || './logs/nerv-printer-progress.json')
 }
 
+function getOperatorPauseFilePath(config) {
+  const progressFile = getProgressFilePath(config)
+  const parsed = path.parse(progressFile)
+  return path.join(parsed.dir, `${parsed.name}-control.json`)
+}
+
+function readOperatorPauseState(config) {
+  const state = readOptionalJson(getOperatorPauseFilePath(config))
+  return state && typeof state === 'object' ? state : {}
+}
+
+function isOperatorPaused(config) {
+  return readOperatorPauseState(config).operatorPaused === true
+}
+
+function setOperatorPaused(config, paused, reason = 'operator-command') {
+  const filePath = getOperatorPauseFilePath(config)
+  const previous = readOperatorPauseState(config)
+  const next = {
+    ...previous,
+    operatorPaused: paused === true,
+    reason: String(reason || 'operator-command'),
+    updatedAt: new Date().toISOString()
+  }
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  writeJson(filePath, next)
+  return next
+}
+
 function unlinkFileIfExists(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return false
   const stats = fs.statSync(filePath)
@@ -3166,6 +3210,7 @@ function cleanLocalFreshStartFiles(config, reason = 'reset-everything') {
 
   const stateFiles = [
     getProgressFilePath(config),
+    getOperatorPauseFilePath(config),
     path.join(nbtFolder, '.dashboard-queue.json'),
     path.join(nbtFolder, '.dashboard-queue-results.json')
   ]
@@ -3265,6 +3310,8 @@ function markProgressInterrupted(config, reason, sessionNumber) {
 }
 
 function hasUnfinishedProgressIntent(config) {
+  if (isOperatorPaused(config)) return false
+
   const files = config.files || {}
   if (files.resumeProgress === false) return false
 
@@ -7485,10 +7532,10 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   const checkPostPrintStop = (step) => {
     if (!isRuntimeStopRequested(config)) return
     if (typeof context.setStatusDetail === 'function') {
-      context.setStatusDetail('stopping-after-current-step')
+      context.setStatusDetail('pausing-after-current-step')
     }
     savePostPrintStep(step, 'dashboard-stop')
-    assertRuntimeContinue(bot, config, 'stopping-after-current-step')
+    assertRuntimeContinue(bot, config, 'pausing-after-current-step')
   }
 
   if (resumeStep !== 'withdraw') {
@@ -11485,7 +11532,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     runtimeStopAction = action
     runtimeStopMeta = meta && typeof meta === 'object' ? meta : {}
   }
-  const checkRuntimeStop = (detail = 'stopping-after-current-step') => {
+  const checkRuntimeStop = (detail = 'pausing-after-current-step') => {
     assertRuntimeContinue(bot, config, detail)
   }
 
@@ -11920,7 +11967,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       }
     }
   }
-  config.__runtimeStopHandler = (detail = 'stopping-after-current-step') => {
+  config.__runtimeStopHandler = (detail = 'pausing-after-current-step') => {
     saveProgress(runtimeStopPhase, {
       state: 'dashboard_stop_requested',
       action: runtimeStopAction,
@@ -14935,7 +14982,7 @@ function ensureStdinCommandInterface() {
     }
 
     if (value === 'help' || value === '?') {
-      console.log('[COMMAND] Commands: status, start, stop, reset, verified, refresh, clear')
+      console.log('[COMMAND] Commands: status, start, pause, stop, reset, verified, refresh, clear')
       return
     }
 
@@ -17230,7 +17277,7 @@ function runSingleSession(config, sessionNumber) {
     const bot = createBot(config)
     bot.__nervSessionActive = true
     const managedControlEnabled = isDashboardEnabled(config) || config?.printer?.startOnSpawn === false
-    const runtimeControl = managedControlEnabled ? createRuntimeControl() : null
+    const runtimeControl = managedControlEnabled ? createRuntimeControl(config) : null
     runtimeControl?.attach()
     const dashboardRuntime = createDashboardRuntime(bot, config, sessionNumber, runtimeControl)
     bot.loadPlugin(pathfinder)
@@ -17519,7 +17566,7 @@ function runSingleSession(config, sessionNumber) {
 
       try {
         if (dashboardRuntime) {
-          await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, true)
+          await runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, !isOperatorPaused(config))
         } else {
           while (true) {
             let runInfo = null

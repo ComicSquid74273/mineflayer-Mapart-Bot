@@ -7,7 +7,7 @@ Use this setup when:
 - the dashboard UI runs on a desktop or workstation
 - bots run on the same desktop or another allowed private host
 - you want bots to connect first and wait idle
-- you want the dashboard or terminal to control start and stop of printing work
+- you want the dashboard or terminal to control start and pause of printing work
 
 This guide does not cover EC2 or systemd deployment. For server deployment, see `docs/EC2-DEPLOY.md`.
 
@@ -25,7 +25,8 @@ Important limits:
 
 - The dashboard does not cold-start a stopped Node.js process.
 - `Start Print` means start the print loop on a bot process that is already running.
-- `Stop Print` means stop work and return to idle. It does not kill the process.
+- `Pause Print` means pause work and return to idle. It does not kill the process.
+- Paused bots keep their saved progress and do not auto-resume from queued NBTs or unfinished progress until `Start Print` / `Start Printing All` is pressed.
 - Existing reconnect logic is still handled by the bot runtime.
 
 ## Prerequisites
@@ -183,18 +184,18 @@ The UI currently supports:
 - reconnect and recovery state
 - current NBT name
 - `Start Print` for one bot
-- `Stop Print` for one bot
+- `Pause Print` for one bot
 - `Start Printing All`
-- `Stop Printing All`
+- `Pause Printing All`
 - NBT upload
 - NBT assignment to a bot
 
 What the buttons mean:
 
 - `Start Print`: begin the print loop on a running idle bot
-- `Stop Print`: stop work and return the bot to idle
+- `Pause Print`: pause work and return the bot to idle
 - `Start Printing All`: queue print start for all known bots
-- `Stop Printing All`: queue print stop for all known bots
+- `Pause Printing All`: queue print pause for all known bots
 
 ## Terminal Commands For Running Bots
 
@@ -229,7 +230,7 @@ Current behavior:
 Operational meaning:
 
 - if a bot is kicked or loses connection, the runtime reconnect loop handles recovery
-- if you press `Stop Print`, the process does not disconnect; it stays online and idle
+- if you press `Pause Print`, the process does not disconnect; it stays online and idle
 
 ## NBT Workflow On Desktop
 
@@ -314,11 +315,11 @@ Check:
 3. dashboard command polling is enabled through dashboard integration
 4. bot is idle and not already busy with another print run
 
-### Stop Print Does Not Exit The Process
+### Pause Print Does Not Exit The Process
 
 That is expected.
 
-`Stop Print` is a work-control action, not a process-kill action.
+`Pause Print` is a work-control action, not a process-kill action.
 
 ## Files Related To Desktop Setup
 

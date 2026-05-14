@@ -10,7 +10,7 @@ The dashboard is viewable without authentication. Operator accounts are stored i
 
 Version 1 is intentionally narrow:
 
-- start and stop print-work commands for already running bots
+- start and pause print-work commands for already running bots
 - compact per-bot status
 - NBT upload with individual bot assignment or node/shared-folder assignment
 - bot command polling and result reporting
@@ -18,7 +18,7 @@ Version 1 is intentionally narrow:
 
 This service does not include raw Mineflayer inspection or arbitrary file system access.
 
-Important: this service does not cold-start a stopped Node.js process by itself. Start the bot process first, ideally in wait mode, then use the dashboard to start or stop printing.
+Important: this service does not cold-start a stopped Node.js process by itself. Start the bot process first, ideally in wait mode, then use the dashboard to start or pause printing. Pause keeps saved progress and blocks automatic queue/progress resume until start is pressed again.
 
 ## Storage
 
@@ -132,9 +132,9 @@ Example record:
 - dashboard log deletion, data-file deletion, data clear, config edits, and operator management require `canManageOperators`
 - destructive node-file deletes require `canDeleteNodeFiles`
 - operator management requires `canManageOperators`
-- live bot cards with start-print and stop-print controls
-- start-all and stop-all print controls for known bots
-- start-node and stop-node controls inside each grouped fleet section
+- live bot cards with start-print and pause-print controls
+- start-all and pause-all print controls for known bots
+- start-node and pause-node controls inside each grouped fleet section
 - admin-only operator panel for creating, updating, and deleting accounts
 - NBT upload form
 - node/shared-folder and bot-based NBT assignment form

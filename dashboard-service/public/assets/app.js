@@ -991,7 +991,7 @@ function renderBotCard(bot) {
       ${warningsHtml}
       <div class="bot-actions">
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
-        <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Stop Print</button>
+        <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Pause Print</button>
         ${resettableCurrentNbt ? `<button class="danger-button small-button" type="button" data-action="reset-current-nbt" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-current-nbt="${escapeHtml(bot.currentNbt || '')}" title="Reset platform and restart this NBT from target 0">Reset NBT</button>` : ''}
         <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect from server (no auto-reconnect)">Disconnect</button>
         <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Reconnect to server">Reconnect</button>
@@ -1061,7 +1061,7 @@ function renderBots() {
             <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
             <button class="ghost-button small-button" type="button" data-action="edit-node-config" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" data-config-name="${escapeHtml(editConfigName)}" title="${escapeHtml(editConfigName ? `Edit ${editConfigName}` : 'View config files')}">Edit Config</button>
             <button class="accent-button small-button" type="button" data-action="start-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Start Node</button>
-            <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Stop Node</button>
+            <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Pause Node</button>
             ${nodeHasActiveNbt ? `<button class="danger-button small-button" type="button" data-action="reset-node-current-nbt" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Reset Node NBT</button>` : ''}
           </div>
         </div>
@@ -2333,20 +2333,20 @@ async function onFleetAction(action, botName = null) {
     await submitJson('/api/dashboard/commands/start-all', {})
     pushEvent('info', 'Queued print start for all known bots')
   } else if (action === 'stop-all') {
-    await submitJson('/api/dashboard/commands/stop-all', { reason: 'dashboard-ui stop all' })
-    pushEvent('warn', 'Queued print stop for all known bots')
+    await submitJson('/api/dashboard/commands/stop-all', { reason: 'dashboard-ui pause all' })
+    pushEvent('warn', 'Queued print pause for all known bots')
   } else if (action === 'start' && botName) {
     await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/start`, {})
     pushEvent('info', `Queued print start for ${botName}`)
   } else if (action === 'stop' && botName) {
-    await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/stop`, { reason: 'dashboard-ui stop' })
-    pushEvent('warn', `Queued print stop for ${botName}`)
+    await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/stop`, { reason: 'dashboard-ui pause' })
+    pushEvent('warn', `Queued print pause for ${botName}`)
   } else if (action === 'start-node' && botName) {
     await submitJson(`/api/dashboard/nodes/${encodeURIComponent(botName)}/commands/start`, {})
     pushEvent('info', `Queued print start for node ${botName}`)
   } else if (action === 'stop-node' && botName) {
-    await submitJson(`/api/dashboard/nodes/${encodeURIComponent(botName)}/commands/stop`, { reason: 'dashboard-ui node stop' })
-    pushEvent('warn', `Queued print stop for node ${botName}`)
+    await submitJson(`/api/dashboard/nodes/${encodeURIComponent(botName)}/commands/stop`, { reason: 'dashboard-ui node pause' })
+    pushEvent('warn', `Queued print pause for node ${botName}`)
   } else if (action === 'reset-node-current-nbt' && botName) {
     const confirmed = confirm(`Reset current NBT for all active bots on node ${botName}? This resets saved progress to target 0, reconnects each bot, resets the platform, then restarts the same NBT.`)
     if (!confirmed) return

@@ -2050,7 +2050,7 @@ async function route(req, res) {
     const body = await readBody(req)
     const botNames = store.listBots().map((item) => item.botName)
     const items = store.createCommandsForBots(botNames, 'stop', { reason: body?.reason || null })
-    auditOperatorAction(actor, 'stop-all', `Queued print stop for ${botNames.length} bot(s).`, { botNames, reason: body?.reason || null }, 'warn')
+    auditOperatorAction(actor, 'pause-all', `Queued print pause for ${botNames.length} bot(s).`, { botNames, reason: body?.reason || null }, 'warn')
     return sendJson(res, 201, { items })
   }
 
@@ -2076,7 +2076,7 @@ async function route(req, res) {
       requestedBy: actor.username,
       reason: body?.reason || null
     })
-    auditOperatorAction(actor, 'stop-node', `Queued print stop for node ${params.hostLabel}.`, { hostLabel: params.hostLabel, botNames, reason: body?.reason || null }, 'warn')
+    auditOperatorAction(actor, 'pause-node', `Queued print pause for node ${params.hostLabel}.`, { hostLabel: params.hostLabel, botNames, reason: body?.reason || null }, 'warn')
     return sendJson(res, 201, { items })
   }
 
@@ -2117,7 +2117,7 @@ async function route(req, res) {
       reason: body?.reason || null,
       requestedBy: actor.username
     })
-    auditOperatorAction(actor, 'stop-bot', `Queued print stop for ${params.botName}.`, { botName: params.botName, reason: body?.reason || null }, 'warn')
+    auditOperatorAction(actor, 'pause-bot', `Queued print pause for ${params.botName}.`, { botName: params.botName, reason: body?.reason || null }, 'warn')
     return sendJson(res, 201, {
       command
     })

@@ -577,11 +577,11 @@ When `dashboard-service` is running, open `http://127.0.0.1:4080/` for the brows
 Current behavior:
 
 1. The bot posts compact status snapshots to the dashboard service.
-2. The bot polls the dashboard service for `start`, `stop`, and `assign-nbt` commands.
+2. The bot polls the dashboard service for `start`, `stop`/pause, and `assign-nbt` commands.
 3. Assigned NBT files are downloaded into `files.nbtFolder`.
-4. In direct mode, start and stop control the print loop for an already running bot process.
+4. In direct mode, start and pause control the print loop for an already running bot process. Pause keeps saved progress and blocks automatic queue/progress resume until start is pressed again.
 5. Starting a fully stopped process still requires an external supervisor or later host-agent layer.
-6. Use `npm run start:nerv:wait` or `npm run start:nerv:6b6t:wait` to launch the process, connect, and wait idle for dashboard or terminal `start` and `stop` commands.
+6. Use `npm run start:nerv:wait` or `npm run start:nerv:6b6t:wait` to launch the process, connect, and wait idle for dashboard or terminal `start` and `pause`/`stop` commands.
 
 | Key | Current | Options / Meaning | Tuning hint |
 |---|---:|---|---|
