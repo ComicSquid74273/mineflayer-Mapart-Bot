@@ -7112,6 +7112,7 @@ async function parkAtCartographyAccessForPause(bot, config, dashboardRuntime = n
     dashboardRuntime?.setPhase?.('paused', 'parking-at-cartography')
     closeCurrentWindowIfOpen(bot, reason)
     await waitForPlatformReady(bot, config, `${reason}-platform-ready`)
+    bot.__nervPauseParkingInProgress = true
     await Promise.race([
       gotoConfiguredAccess(
         bot,
@@ -7136,6 +7137,8 @@ async function parkAtCartographyAccessForPause(bot, config, dashboardRuntime = n
     dashboardRuntime?.setPhase?.('paused', 'paused')
     console.log(`[CONTROL-WARN] Pause parking at cartography access failed: ${err?.message || err}`)
     return false
+  } finally {
+    bot.__nervPauseParkingInProgress = false
   }
 }
 
@@ -17233,7 +17236,7 @@ function installPlatformSafety(bot, config) {
   if (bot.pathfinder?.goto && !bot.pathfinder.__nervPlatformGotoWrapped) {
     const originalGoto = bot.pathfinder.goto.bind(bot.pathfinder)
     bot.pathfinder.goto = async (goal) => {
-      if (isRuntimeStopRequested(config)) {
+      if (isRuntimeStopRequested(config) && bot.__nervPauseParkingInProgress !== true) {
         stopBotMovement(bot)
         throw new RuntimeStopRequestedError('stopping-during-navigation')
       }
@@ -17244,7 +17247,7 @@ function installPlatformSafety(bot, config) {
         try {
           return await originalGoto(goal)
         } catch (err) {
-          if (isRuntimeStopRequested(config)) {
+          if (isRuntimeStopRequested(config) && bot.__nervPauseParkingInProgress !== true) {
             stopBotMovement(bot)
             throw new RuntimeStopRequestedError('stopping-during-navigation')
           }
