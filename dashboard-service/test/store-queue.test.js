@@ -226,6 +226,50 @@ test('bot reconnect count does not reset when a restarted process reports zero',
   assert.equal(node.operationalStats.reconnectCount, 4)
 })
 
+test('bot reconnect count increments when a known node process restarts', () => {
+  const { store } = makeStore()
+
+  store.upsertBotStatus({
+    botName: 'restart-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'idle',
+    runtimeInstanceId: 'process-a',
+    runtimeStartedAt: '2026-05-14T00:00:00.000Z',
+    reconnectCount: 0,
+    reconnectState: 'idle'
+  })
+
+  const restarted = store.upsertBotStatus({
+    botName: 'restart-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'idle',
+    runtimeInstanceId: 'process-b',
+    runtimeStartedAt: '2026-05-14T01:00:00.000Z',
+    reconnectCount: 0,
+    reconnectState: 'idle'
+  })
+
+  assert.equal(restarted.reconnectCount, 1)
+  assert.equal(restarted.nodeRestartCount, 1)
+  const repeated = store.upsertBotStatus({
+    botName: 'restart-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'idle',
+    runtimeInstanceId: 'process-b',
+    runtimeStartedAt: '2026-05-14T01:00:00.000Z',
+    reconnectCount: 0,
+    reconnectState: 'idle'
+  })
+  assert.equal(repeated.reconnectCount, 1)
+  assert.equal(repeated.nodeRestartCount, 1)
+
+  const node = store.listNodes().find((item) => item.hostLabel === 'node-a')
+  assert.equal(node.operationalStats.reconnectCount, 1)
+})
+
 test('reset everything preserves total printed map count', () => {
   const { dir, store } = makeStore()
   const now = new Date().toISOString()

@@ -902,11 +902,17 @@ function createStore(baseDir) {
     const receivedAt = nowIso()
     const previousReconnectCount = Math.max(0, toNumber(previous.reconnectCount, 0))
     const reportedReconnectCount = Math.max(0, toNumber(status.reconnectCount, 0))
-    const reconnectCount = Math.max(previousReconnectCount, reportedReconnectCount)
+    const previousRuntimeInstanceId = String(previous.runtimeInstanceId || '').trim()
+    const reportedRuntimeInstanceId = String(status.runtimeInstanceId || '').trim()
+    const runtimeRestartDetected = Boolean(previous.botName && previousRuntimeInstanceId && reportedRuntimeInstanceId && previousRuntimeInstanceId !== reportedRuntimeInstanceId)
+    const reconnectCount = runtimeRestartDetected
+      ? Math.max(previousReconnectCount + 1, reportedReconnectCount)
+      : Math.max(previousReconnectCount, reportedReconnectCount)
     const next = {
       ...previous,
       ...status,
       reconnectCount,
+      nodeRestartCount: Math.max(0, toNumber(previous.nodeRestartCount, 0)) + (runtimeRestartDetected ? 1 : 0),
       reportedLastStatusAt: status.lastStatusAt || null,
       reportedHeartbeatAt: status.heartbeatAt || null,
       serverStatusAt: receivedAt,

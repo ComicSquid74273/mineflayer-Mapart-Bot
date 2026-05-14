@@ -733,6 +733,8 @@ function summarizeBot(bot, pauseState = null) {
   return {
     botName: bot.botName,
     runtime: bot.runtime,
+    runtimeInstanceId: bot.runtimeInstanceId || null,
+    runtimeStartedAt: bot.runtimeStartedAt || null,
     hostLabel: bot.hostLabel,
     configFileName: bot.configFileName || null,
     online,
@@ -754,6 +756,7 @@ function summarizeBot(bot, pauseState = null) {
     reconnectState: bot.reconnectState,
     reconnectCount: Number.isFinite(Number(bot.reconnectCount)) ? Number(bot.reconnectCount) : 0,
     reconnectStreak: Number.isFinite(Number(bot.reconnectStreak)) ? Number(bot.reconnectStreak) : 0,
+    nodeRestartCount: Number.isFinite(Number(bot.nodeRestartCount)) ? Number(bot.nodeRestartCount) : 0,
     currentNbt,
     lastStatusAt: bot.serverStatusAt || bot.lastStatusAt,
     reportedLastStatusAt: bot.reportedLastStatusAt || bot.lastStatusAt || null,

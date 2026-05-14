@@ -9,6 +9,8 @@ process.on('unhandledRejection', (reason) => {
 
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
+const PROCESS_STARTED_AT = new Date().toISOString()
+const PROCESS_INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 // Persists across session reconnects within one process run.
 // Set true by any 'start' command; false by any pause/stop or dashboard-disconnect.
 let printingIntentActive = false
@@ -1268,6 +1270,8 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const payload = {
       botName,
       runtime: 'nerv-printer',
+      runtimeInstanceId: PROCESS_INSTANCE_ID,
+      runtimeStartedAt: PROCESS_STARTED_AT,
       hostLabel: dashboard.hostLabel,
       configFileName: path.basename(getUserConfigPath()),
       online: isOnline,
