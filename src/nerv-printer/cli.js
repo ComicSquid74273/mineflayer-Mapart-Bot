@@ -2319,6 +2319,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
 async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, initialStartRequested = false) {
   let pendingStart = initialStartRequested
+  let pauseParked = false
   while (isBotSessionLive(bot) && bot.__nervSessionActive !== false) {
     if (dashboardRuntime?.consumePlatformCleanupRequest?.() === true) {
       printingIntentActive = false
@@ -2339,12 +2340,16 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
 
     if (runtimeControl?.isStopRequested()) {
       dashboardRuntime?.markRunStopped?.(isOperatorPaused(config) ? 'paused' : 'stopped')
+      if (isOperatorPaused(config) && !pauseParked) {
+        pauseParked = await parkAtCartographyAccessForPause(bot, config, dashboardRuntime, 'operator-pause-idle')
+      }
       await delay(1000)
       continue
     }
 
     const shouldStart = pendingStart || runtimeControl?.consumeStartRequest() === true || dashboardRuntime?.consumeStartRequest() === true
     pendingStart = false
+    if (shouldStart) pauseParked = false
 
     const activeQueueFile = dashboardRuntime?.getActiveQueueFile?.()
     const activeQueuePath = dashboardRuntime?.getActiveQueueNbtPath?.()
@@ -2360,7 +2365,11 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
 
     if (!shouldStart) {
       if (isOperatorPaused(config)) {
-        dashboardRuntime?.setPhase('idle', 'paused')
+        if (!pauseParked) {
+          pauseParked = await parkAtCartographyAccessForPause(bot, config, dashboardRuntime, 'operator-pause-idle')
+        } else {
+          dashboardRuntime?.setPhase('paused', 'paused')
+        }
         await delay(1000)
         continue
       }
@@ -2432,6 +2441,7 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
       if (isRuntimeStopError(err)) {
         console.log('[CONTROL] Pause requested; paused current work and returned to dashboard idle.')
         dashboardRuntime?.markRunStopped?.('paused')
+        pauseParked = await parkAtCartographyAccessForPause(bot, config, dashboardRuntime, 'operator-pause-after-work')
         await delay(1000)
         continue
       }
@@ -7085,6 +7095,50 @@ async function runPlatformResetPreflight(bot, config, reason = 'reset-current-nb
   console.log('[RESET-PREFLIGHT] Platform reset preflight complete; restarting current NBT from target 0.')
 }
 
+async function parkAtCartographyAccessForPause(bot, config, dashboardRuntime = null, reason = 'operator-pause') {
+  if (!bot?.pathfinder?.goto) return false
+  const cartographyConfig = config.machine?.cartographyTable?.enabled ? config.machine.cartographyTable : null
+  if (!cartographyConfig?.position) {
+    console.log('[CONTROL-WARN] Pause parking skipped: cartography table is not configured.')
+    return false
+  }
+  const accessRange = Math.max(0.35, toNumber(
+    config.advanced?.pauseCartographyAccessRange,
+    toNumber(config.advanced?.postPrintCartographyAccessRange, 0.85)
+  ))
+  const timeoutMs = Math.max(5000, toNumber(config.advanced?.pauseParkTimeoutMs, 60000))
+
+  try {
+    dashboardRuntime?.setPhase?.('paused', 'parking-at-cartography')
+    closeCurrentWindowIfOpen(bot, reason)
+    await waitForPlatformReady(bot, config, `${reason}-platform-ready`)
+    await Promise.race([
+      gotoConfiguredAccess(
+        bot,
+        cartographyConfig.position,
+        cartographyConfig.accessPosition,
+        accessRange,
+        config,
+        `${reason}-cartography-access`,
+        { strict: Boolean(cartographyConfig.accessPosition) }
+      ),
+      delay(timeoutMs).then(() => {
+        throw new Error(`pause cartography parking timed out after ${timeoutMs}ms`)
+      })
+    ])
+    stopBotMovement(bot)
+    dashboardRuntime?.setPhase?.('paused', 'paused')
+    const standPos = cartographyConfig.accessPosition || cartographyConfig.position
+    console.log(`[CONTROL] Paused at cartography access x=${Math.round(standPos.x)} y=${Math.round(standPos.y)} z=${Math.round(standPos.z)}.`)
+    return true
+  } catch (err) {
+    stopBotMovement(bot)
+    dashboardRuntime?.setPhase?.('paused', 'paused')
+    console.log(`[CONTROL-WARN] Pause parking at cartography access failed: ${err?.message || err}`)
+    return false
+  }
+}
+
 function getItemId(bot, itemName) {
   return bot.registry.itemsByName[itemName]?.id || null
 }
@@ -7531,6 +7585,13 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
   }
   const checkPostPrintStop = (step) => {
     if (!isRuntimeStopRequested(config)) return
+    if (step === 'reset') {
+      if (typeof context.setStatusDetail === 'function') {
+        context.setStatusDetail('pausing-after-reset')
+      }
+      savePostPrintStep(step, 'dashboard-stop-after-reset')
+      return
+    }
     if (typeof context.setStatusDetail === 'function') {
       context.setStatusDetail('pausing-after-current-step')
     }
@@ -7980,6 +8041,10 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       return failPostPrint('reset', `Reset step failed: ${err?.message || err}`)
     }
     savePostPrintStep('center', 'reset-complete')
+    if (isRuntimeStopRequested(config)) {
+      savePostPrintStep('center', 'dashboard-stop-after-reset')
+      assertRuntimeContinue(bot, config, 'pausing-after-reset')
+    }
   } else if (shouldRunStep('reset') && advanced.postPrintSkipResetInteraction === true && resetConfig?.position) {
     console.log('[POSTPRINT] Reset interaction skipped by config. Walking to center step directly.')
     savePostPrintStep('center', 'reset-skipped-by-config')
@@ -8006,6 +8071,11 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     savePostPrintStep('done', 'center-complete')
   } else if (shouldRunStep('center')) {
     savePostPrintStep('done', 'center-skipped')
+  }
+
+  if (isRuntimeStopRequested(config)) {
+    savePostPrintStep('done', 'dashboard-stop-after-reset')
+    assertRuntimeContinue(bot, config, 'pausing-after-reset')
   }
 
   return { completed: true, finalStep: 'done' }
