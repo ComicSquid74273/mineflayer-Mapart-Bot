@@ -1154,6 +1154,69 @@ function createStore(baseDir) {
     return entry
   }
 
+  function backfillUploadHistoryFromFiles() {
+    const existingHistory = readJson(uploadHistoryFile, [])
+    if (Array.isArray(existingHistory) && existingHistory.length) return { created: 0, skipped: true }
+
+    const files = readJson(uploadsFile, [])
+    if (!Array.isArray(files) || !files.length) return { created: 0, skipped: false }
+
+    const records = []
+    const zipGroups = new Map()
+
+    for (const item of files) {
+      const source = String(item?.source || '').trim()
+      const uploadedAt = item?.uploadedAt || nowIso()
+      const base = {
+        uploadId: crypto.randomUUID(),
+        uploadedAt,
+        originalName: item?.originalName || item?.storedName || item?.fileId || 'unknown.nbt',
+        kind: 'nbt',
+        sizeBytes: Math.max(0, toNumber(item?.sizeBytes, 0)),
+        sha256: item?.sha256 || null,
+        uploadedBy: item?.uploadedBy || null,
+        targetBotName: String(item?.targetBotName || item?.assignedBotName || '').trim() || null,
+        targetHostLabel: String(item?.targetHostLabel || item?.assignedHostLabel || '').trim() || null,
+        batchId: String(item?.batchId || '').trim() || null,
+        queuedCount: 1,
+        extractedCount: 0,
+        queuedFileIds: item?.fileId ? [String(item.fileId)] : [],
+        extractedNames: [],
+        errors: []
+      }
+
+      if (source.toLowerCase().startsWith('zip:')) {
+        const archiveName = source.slice(4).trim() || 'unknown.zip'
+        const key = `${base.batchId || ''}|${archiveName}|${base.uploadedBy || ''}|${base.targetHostLabel || ''}|${base.targetBotName || ''}`
+        if (!zipGroups.has(key)) {
+          zipGroups.set(key, {
+            ...base,
+            originalName: archiveName,
+            kind: 'zip',
+            sizeBytes: 0,
+            sha256: null,
+            uploadedAt,
+            queuedCount: 0,
+            extractedCount: 0,
+            queuedFileIds: [],
+            extractedNames: []
+          })
+        }
+        const group = zipGroups.get(key)
+        group.uploadedAt = String(uploadedAt).localeCompare(String(group.uploadedAt)) < 0 ? uploadedAt : group.uploadedAt
+        group.queuedCount += 1
+        group.extractedCount += 1
+        if (item?.fileId) group.queuedFileIds.push(String(item.fileId))
+        group.extractedNames.push(item?.originalName || item?.storedName || item?.fileId || 'unknown.nbt')
+      }
+    }
+
+    records.push(...zipGroups.values())
+    records.sort((left, right) => String(left.uploadedAt).localeCompare(String(right.uploadedAt)))
+    writeJson(uploadHistoryFile, records.slice(-1000))
+    return { created: records.length, skipped: false }
+  }
+
   function getFile(fileId) {
     return listFiles().find((item) => item.fileId === fileId) || null
   }
@@ -1883,6 +1946,7 @@ function createStore(baseDir) {
   const existingCommands = readJson(commandsFile, [])
   const compactedCommands = compactCommandList(existingCommands)
   if (compactedCommands.changed) writeJson(commandsFile, compactedCommands.items)
+  backfillUploadHistoryFromFiles()
 
   reconcileAllNodeTiming(readBotMap())
 

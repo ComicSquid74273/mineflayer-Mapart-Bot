@@ -1306,7 +1306,7 @@ function renderUploadHistory() {
     elements.uploadHistoryList.innerHTML = `
       <article class="empty-card">
         <h3>Upload history hidden</h3>
-        <p>Login as an operator to view uploaded NBT and ZIP files.</p>
+        <p>Login as an operator to view uploaded NBT ZIP files.</p>
       </article>`
     return
   }
@@ -1314,8 +1314,8 @@ function renderUploadHistory() {
   if (!state.uploadHistory.length) {
     elements.uploadHistoryList.innerHTML = `
       <article class="empty-card">
-        <h3>No uploaded files yet</h3>
-        <p>NBT files and ZIP archives uploaded through this dashboard will appear here.</p>
+        <h3>No uploaded ZIP files yet</h3>
+        <p>NBT ZIP archives uploaded through this dashboard will appear here.</p>
       </article>`
     return
   }

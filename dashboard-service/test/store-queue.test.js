@@ -371,6 +371,42 @@ test('reset everything preserves upload history list', () => {
   assert.deepEqual(remainingHistory[0].extractedNames, ['queued-before-reset.nbt'])
 })
 
+test('existing queued ZIP uploads backfill upload history on store startup', () => {
+  const { dir, store } = makeStore()
+  createQueueFile(store, 'direct-before-migration.nbt')
+  const zipEntryA = store.createFileUpload({
+    originalName: 'zip-a.nbt',
+    contentBuffer: Buffer.from('zip-a'),
+    queueMode: true,
+    batchId: 'legacy-batch',
+    source: 'zip:legacy-pack.zip',
+    uploadedBy: 'test'
+  })
+  const zipEntryB = store.createFileUpload({
+    originalName: 'zip-b.nbt',
+    contentBuffer: Buffer.from('zip-b'),
+    queueMode: true,
+    batchId: 'legacy-batch',
+    source: 'zip:legacy-pack.zip',
+    uploadedBy: 'test'
+  })
+  fs.writeFileSync(path.join(dir, 'upload-history.json'), '[]', 'utf8')
+  store.invalidateDataFileCache(path.join(dir, 'upload-history.json'))
+
+  const restartedStore = createStore(dir)
+  const history = restartedStore.listUploadHistory(0)
+  const directHistory = history.find((item) => item.originalName === 'direct-before-migration.nbt')
+  const zipHistory = history.find((item) => item.originalName === 'legacy-pack.zip')
+
+  assert.equal(directHistory, undefined)
+  assert.equal(history.length, 1)
+  assert.equal(zipHistory?.kind, 'zip')
+  assert.equal(zipHistory?.queuedCount, 2)
+  assert.equal(zipHistory?.extractedCount, 2)
+  assert.deepEqual(zipHistory?.queuedFileIds.sort(), [zipEntryA.fileId, zipEntryB.fileId].sort())
+  assert.deepEqual(zipHistory?.extractedNames.sort(), ['zip-a.nbt', 'zip-b.nbt'])
+})
+
 test('pause desired keeps original pause start time across repeated pause commands', () => {
   const { store } = makeStore()
 

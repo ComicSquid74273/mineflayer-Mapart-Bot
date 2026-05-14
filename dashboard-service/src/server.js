@@ -889,7 +889,7 @@ function listUploadAssignments(limit = 150) {
 }
 
 function listUploadHistory(limit = 1000) {
-  return store.listUploadHistory(limit).map((item) => ({
+  return store.listUploadHistory(0).filter((item) => item?.kind === 'zip').slice(0, limit).map((item) => ({
     id: item.uploadId,
     fileName: item.originalName || 'unknown',
     kind: item.kind || 'nbt',
@@ -1686,17 +1686,6 @@ async function route(req, res) {
     auditOperatorAction(actor, 'upload-nbt', `Queued direct node upload for ${fileName} to ${nbtUploadParams.hostLabel}.`, {
       hostLabel: nbtUploadParams.hostLabel, targetBotName: targetBotName || null, fileName, sizeBytes: buffer.length, commandId: command.commandId
     })
-    store.appendUploadHistory({
-      originalName: fileName,
-      kind: 'nbt',
-      sizeBytes: buffer.length,
-      sha256: crypto.createHash('sha256').update(buffer).digest('hex'),
-      uploadedBy: actor.username,
-      targetHostLabel: nbtUploadParams.hostLabel,
-      targetBotName: targetBotName || null,
-      queuedCount: 1,
-      queuedFileIds: [command.commandId]
-    })
     invalidateSnapshotCache()
     const { contentBase64: _contentBase64, ...commandSummary } = command
     return sendJson(res, 201, { ok: true, queued: true, command: commandSummary, fileName, sizeBytes: buffer.length })
@@ -1728,34 +1717,38 @@ async function route(req, res) {
     for (const file of files) {
       const fileName = path.basename(String(file.filename || '').trim())
       const lower = fileName.toLowerCase()
-      const uploadRecord = {
-        originalName: fileName || 'unknown',
-        kind: lower.endsWith('.zip') ? 'zip' : 'nbt',
-        sizeBytes: Buffer.isBuffer(file.data) ? file.data.length : 0,
-        sha256: Buffer.isBuffer(file.data) ? crypto.createHash('sha256').update(file.data).digest('hex') : null,
-        uploadedBy: actor.username,
-        targetHostLabel: targetHostLabel || null,
-        targetBotName: targetBotName || null,
-        batchId,
-        queuedCount: 0,
-        extractedCount: 0,
-        queuedFileIds: [],
-        extractedNames: [],
-        errors: []
-      }
-      uploadRecords.push(uploadRecord)
+      const uploadRecord = lower.endsWith('.zip')
+        ? {
+            originalName: fileName || 'unknown.zip',
+            kind: 'zip',
+            sizeBytes: Buffer.isBuffer(file.data) ? file.data.length : 0,
+            sha256: Buffer.isBuffer(file.data) ? crypto.createHash('sha256').update(file.data).digest('hex') : null,
+            uploadedBy: actor.username,
+            targetHostLabel: targetHostLabel || null,
+            targetBotName: targetBotName || null,
+            batchId,
+            queuedCount: 0,
+            extractedCount: 0,
+            queuedFileIds: [],
+            extractedNames: [],
+            errors: []
+          }
+        : null
+      if (uploadRecord) uploadRecords.push(uploadRecord)
       try {
         if (lower.endsWith('.nbt')) {
-          queuedInputs.push({ fileName, data: file.data, source: 'upload', uploadRecord })
+          queuedInputs.push({ fileName, data: file.data, source: 'upload' })
         } else if (lower.endsWith('.zip')) {
           const extracted = extractNbtFilesFromZip(file.data, fileName)
           if (!extracted.length) {
             const error = { fileName, error: 'zip contained no .nbt files' }
             errors.push(error)
-            uploadRecord.errors.push(error)
+            if (uploadRecord) uploadRecord.errors.push(error)
           } else {
-            uploadRecord.extractedCount = extracted.length
-            uploadRecord.extractedNames = extracted.map((entry) => entry.fileName)
+            if (uploadRecord) {
+              uploadRecord.extractedCount = extracted.length
+              uploadRecord.extractedNames = extracted.map((entry) => entry.fileName)
+            }
             for (const entry of extracted) {
               queuedInputs.push({ fileName: entry.fileName, data: entry.data, source: `zip:${fileName}`, uploadRecord })
             }
@@ -1763,12 +1756,12 @@ async function route(req, res) {
         } else {
           const error = { fileName, error: 'only .nbt and .zip uploads are accepted' }
           errors.push(error)
-          uploadRecord.errors.push(error)
+          if (uploadRecord) uploadRecord.errors.push(error)
         }
       } catch (error) {
         const uploadError = { fileName, error: error?.message || String(error) }
         errors.push(uploadError)
-        uploadRecord.errors.push(uploadError)
+        if (uploadRecord) uploadRecord.errors.push(uploadError)
       }
     }
 
