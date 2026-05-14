@@ -30,7 +30,7 @@ const placementWorkload = createPlacementWorkload({
   GoalNear,
   estimateNeededFromLookahead,
   ensureMaterialsForTargets,
-  restockMaterial,
+  restockMaterial: waitForRequiredMaterialRestock,
   countInventoryItems,
   recoverMissingItemInventoryDesync,
   findNervScannerCandidate,
@@ -3737,6 +3737,10 @@ function createDefaultConfig() {
       restockFastSettleMs: 0,
       restockPostCloseInventorySyncMs: 2000,
       restockFailureCooldownMs: 8000,
+      waitForRequiredMaterialRestockEnabled: true,
+      waitForRequiredMaterialRetryMs: 5000,
+      waitForRequiredMaterialLogEveryMs: 30000,
+      waitForRequiredMaterialTimeoutMs: 0,
       predictiveRestock: true,
       dumpUnneededBeforeRefill: true,
       inventoryRefillRows: 2,
@@ -5064,7 +5068,7 @@ async function equipMaterial(bot, config, blockName, options = {}) {
     return false
   }
 
-  return await restockMaterial(bot, config, blockName, 1, new Map([[blockName, stackSize]]))
+  return await waitForRequiredMaterialRestock(bot, config, blockName, 1, new Map([[blockName, stackSize]]), 'equip-material')
 }
 
 async function recoverMissingItemInventoryDesync(bot, config, blockName, label = 'inventory-desync') {
@@ -5241,7 +5245,7 @@ async function openContainerAt(bot, position, accessPosition, options = {}) {
   throw new Error(`Could not open container at ${position.x} ${position.y} ${position.z} from ${formatBotPosition(bot)}: ${lastError?.message || lastError}`)
 }
 
-async function restockMaterial(bot, config, blockName, requestedPulls = 1, neededByBlock = null) {
+async function restockMaterial(bot, config, blockName, requestedPulls = 1, neededByBlock = null, options = {}) {
   assertRuntimeContinue(bot, config, 'stopping-during-restock')
   const advanced = config.advanced || {}
   const restockSyncStrategy = normalizeRestockSyncStrategy(advanced.restockSyncStrategy)
@@ -5249,7 +5253,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   const failureCooldownMs = Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))
   const syncWaitMs = Math.max(200, toNumber(advanced.restockInventorySyncWaitMs, 2000))
   const lastFailedAt = restockFailureCache.get(blockName)
-  if (lastFailedAt && Date.now() - lastFailedAt < failureCooldownMs) {
+  if (options.ignoreFailureCooldown !== true && lastFailedAt && Date.now() - lastFailedAt < failureCooldownMs) {
     return false
   }
 
@@ -5704,8 +5708,82 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   }
 
   restockFailureCache.set(blockName, Date.now())
-  unavailableMaterialCache.add(blockName)
+  if (options.markUnavailableOnFailure !== false) unavailableMaterialCache.add(blockName)
   return false
+}
+
+function shouldWaitForRequiredMaterialRestock(config) {
+  return config?.advanced?.waitForRequiredMaterialRestockEnabled !== false
+}
+
+function getRequiredMaterialTargetCount(bot, blockName, requestedPulls = 1, neededByBlock = null) {
+  const have = countInventoryItems(bot, blockName)
+  if (neededByBlock instanceof Map && neededByBlock.has(blockName)) {
+    return Math.max(0, toNumber(neededByBlock.get(blockName), have))
+  }
+  const stackSize = Math.max(1, toNumber(bot?.registry?.itemsByName?.[blockName]?.stackSize, 64))
+  return have + (Math.max(1, toNumber(requestedPulls, 1)) * stackSize)
+}
+
+async function waitInterruptiblyForRequiredMaterial(bot, config, waitMs, detail = 'waiting-material-restock') {
+  const deadline = Date.now() + Math.max(0, toNumber(waitMs, 0))
+  while (Date.now() < deadline) {
+    assertRuntimeContinue(bot, config, detail)
+    await delay(Math.min(500, Math.max(1, deadline - Date.now())))
+  }
+}
+
+async function waitForRequiredMaterialRestock(bot, config, blockName, requestedPulls = 1, neededByBlock = null, reason = 'required-material') {
+  assertRuntimeContinue(bot, config, 'waiting-material-restock')
+  const advanced = config.advanced || {}
+  if (!shouldWaitForRequiredMaterialRestock(config)) {
+    return await restockMaterial(bot, config, blockName, requestedPulls, neededByBlock)
+  }
+
+  const spots = getMaterialChestGroupsForRefill(bot, config, blockName).flat()
+  if (!spots.length || !bot?.registry?.itemsByName?.[blockName]?.id) {
+    return await restockMaterial(bot, config, blockName, requestedPulls, neededByBlock)
+  }
+
+  const retryMs = Math.max(250, toNumber(advanced.waitForRequiredMaterialRetryMs, 5000))
+  const logEveryMs = Math.max(1000, toNumber(advanced.waitForRequiredMaterialLogEveryMs, 30000))
+  const timeoutMs = Math.max(0, toNumber(advanced.waitForRequiredMaterialTimeoutMs, 0))
+  const startedAt = Date.now()
+  const targetCount = getRequiredMaterialTargetCount(bot, blockName, requestedPulls, neededByBlock)
+  let attempt = 0
+
+  while (true) {
+    assertRuntimeContinue(bot, config, 'waiting-material-restock')
+    attempt += 1
+    const haveBefore = countInventoryItems(bot, blockName)
+    if (haveBefore >= targetCount) return true
+
+    config.__dashboardRuntime?.setStatusDetail?.('waiting-material-restock')
+    restockFailureCache.delete(blockName)
+    unavailableMaterialCache.delete(blockName)
+    const restocked = await restockMaterial(bot, config, blockName, requestedPulls, neededByBlock, {
+      ignoreFailureCooldown: true,
+      markUnavailableOnFailure: false
+    })
+    const haveAfter = countInventoryItems(bot, blockName)
+    if (restocked || haveAfter >= targetCount) {
+      restockFailureCache.delete(blockName)
+      unavailableMaterialCache.delete(blockName)
+      return true
+    }
+
+    if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
+      console.log(`[REQUIRED-MATERIAL-WAIT-WARN] ${blockName} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s; have=${haveAfter} target=${targetCount} reason=${reason}.`)
+      return false
+    }
+
+    logThrottled(
+      `required-material-wait-${blockName}`,
+      `[REQUIRED-MATERIAL-WAIT] ${blockName} unavailable after full chest scan attempt=${attempt}; have=${haveAfter} target=${targetCount}; retrying all ${spots.length} configured chest(s) in ${retryMs}ms. reason=${reason}`,
+      { intervalMs: logEveryMs }
+    )
+    await waitInterruptiblyForRequiredMaterial(bot, config, retryMs, 'waiting-material-restock')
+  }
 }
 
 function nearestPosition(bot, positions) {
@@ -9018,7 +9096,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
     let closestItem = null
 
     for (const item of restockList) {
-      if (restockFailureCache.has(item.blockName) && Date.now() - restockFailureCache.get(item.blockName) < Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))) {
+      if (!shouldWaitForRequiredMaterialRestock(config) && restockFailureCache.has(item.blockName) && Date.now() - restockFailureCache.get(item.blockName) < Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))) {
         continue
       }
 
@@ -9044,7 +9122,7 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
     console.log(`[NERV-RESTOCK] Closest material=${closestItem.blockName} dist=${Math.round(Math.sqrt(closestDist))} pullsRequested=${pullsNeeded} rawAmount=${closestItem.rawAmount}`)
 
     assertRuntimeContinue(bot, config, 'stopping-before-restock')
-    const restocked = await restockMaterial(bot, config, closestItem.blockName, pullsNeeded, neededByBlock)
+    const restocked = await waitForRequiredMaterialRestock(bot, config, closestItem.blockName, pullsNeeded, neededByBlock, 'inventory-window')
 
     if (!restocked) {
       const haveAfter = countInventoryItems(bot, closestItem.blockName)
@@ -9145,7 +9223,7 @@ async function ensureRepairMaterialsForTargets(bot, config, targets) {
     const failureCooldownMs = Math.max(0, toNumber(advanced.restockFailureCooldownMs, 8000))
 
     for (const item of plan.missing) {
-      if (restockFailureCache.has(item.blockName) && Date.now() - restockFailureCache.get(item.blockName) < failureCooldownMs) {
+      if (!shouldWaitForRequiredMaterialRestock(config) && restockFailureCache.has(item.blockName) && Date.now() - restockFailureCache.get(item.blockName) < failureCooldownMs) {
         continue
       }
 
@@ -9181,7 +9259,7 @@ async function ensureRepairMaterialsForTargets(bot, config, targets) {
 
     console.log(`[REPAIR-RESTOCK] material=${closestItem.blockName} have=${closestItem.have} need=${closestItem.needed} deficit=${closestItem.deficit} dist=${Math.round(Math.sqrt(closestDist))}`)
     assertRuntimeContinue(bot, config, 'stopping-before-repair-restock')
-    const restocked = await restockMaterial(bot, config, closestItem.blockName, closestItem.stacks, plan.neededByBlock)
+    const restocked = await waitForRequiredMaterialRestock(bot, config, closestItem.blockName, closestItem.stacks, plan.neededByBlock, 'repair-restock')
 
     if (!restocked) {
       const haveAfter = countInventoryItems(bot, closestItem.blockName)
@@ -10050,7 +10128,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
 
   if (allowEmergencyRestock && emergencyRestockBlock) {
     console.log(`[${label}-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; refilling and retrying unresolved repair targets once.`)
-    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, null)
+    const restocked = await waitForRequiredMaterialRestock(bot, config, emergencyRestockBlock, 1, null, emergencyRestockReason || 'repair-emergency-restock')
     const remainingTargets = scanPlacementErrors(bot, targets, {
       config,
       logPrefix: `${label}-RESTOCK-VERIFY`,
@@ -10372,7 +10450,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 
   if (emergencyRestockBlock) {
     console.log(`[${label}-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; refilling and retrying the remaining band once.`)
-    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
+    const restocked = await waitForRequiredMaterialRestock(bot, config, emergencyRestockBlock, 1, neededByBlock, 'placement-emergency-restock')
     if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
       const Vec3Retry = bot.entity.position.constructor
       const remainingTargets = batchTargets.filter((target) => {
@@ -10579,7 +10657,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
 
   if (allowEmergencyRestock && emergencyRestockBlock) {
     console.log(`[NERV-SCANNER-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; stopping movement, refilling, and retrying remaining targets once.`)
-    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, neededByBlock)
+    const restocked = await waitForRequiredMaterialRestock(bot, config, emergencyRestockBlock, 1, neededByBlock, 'scanner-emergency-restock')
     if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
       const Vec3Retry = bot.entity.position.constructor
       const remainingTargets = batchTargets.filter((target) => {
@@ -11514,7 +11592,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; stopping movement, refilling, and retrying remaining targets once.`)
     const unresolvedBeforeRestock = getUnresolvedTraversalTargets()
     const traversalNeededByBlock = estimateNeededFromLookahead(unresolvedBeforeRestock.length ? unresolvedBeforeRestock : batchTargets)
-    const restocked = await restockMaterial(bot, config, emergencyRestockBlock, 1, traversalNeededByBlock)
+    const restocked = await waitForRequiredMaterialRestock(bot, config, emergencyRestockBlock, 1, traversalNeededByBlock, emergencyRestockReason || 'workload-emergency-restock')
     const hasEmergencyMaterial = restocked || countInventoryItems(bot, emergencyRestockBlock) > 0
     if (hasEmergencyMaterial && unresolvedBeforeRestock.length > 0) {
       await ensureMaterialsForTargets(bot, config, unresolvedBeforeRestock, {

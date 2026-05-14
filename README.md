@@ -316,6 +316,10 @@ Advanced is grouped by behavior because this section has many tuning knobs.
 | `advanced.restockChestOpenTimeoutMs` | `2500` | Per-attempt timeout for Mineflayer chest open. | Raise if chest windows appear very late. |
 | `advanced.restockPostCloseInventorySyncMs` | `2000` | Max wait after closing a restock chest for local inventory/hotbar to show the moved stack. | Prevents printing from resuming from chest-window state before the bot can actually select the item. |
 | `advanced.restockFailureCooldownMs` | `250` | Cooldown after failed material restock. | Increase if bot loops too fast on empty chests. |
+| `advanced.waitForRequiredMaterialRestockEnabled` | `true` | Keep checking every configured chest for a required carpet color when it is empty. | Keep `true` for duper-fed chests so print targets are not skipped. |
+| `advanced.waitForRequiredMaterialRetryMs` | `5000` | Wait between full scans of all configured chests for the missing color. | Lower checks dupers more often; higher reduces chest traffic. |
+| `advanced.waitForRequiredMaterialLogEveryMs` | `30000` | Throttle for missing-material wait logs. | Keeps long waits readable. |
+| `advanced.waitForRequiredMaterialTimeoutMs` | `0` | Max wait for a required material; `0` means wait forever. | Use nonzero only if you prefer the run to eventually continue/fail. |
 | `advanced.predictiveRestock` | `true` | Plan inventory before placement window. | Keep `true`; prevents mid-row emergency refill. |
 | `advanced.dumpUnneededBeforeRefill` | `true` | Dump residue/unneeded carpets before refill. | Keep `true` for map changes and residue cleanup. |
 | `advanced.inventoryRefillRows` | `2` | Number of logical `linesPerRun` groups planned for inventory. | `2` means enough for roughly two print chunks. |
