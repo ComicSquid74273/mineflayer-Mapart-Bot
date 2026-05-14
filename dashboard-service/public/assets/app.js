@@ -792,7 +792,7 @@ function renderFleetJump() {
         const displayStatusText = paused > 0 && nodePauseStartedAt
           ? `${statusText} ${formatPauseDurationFrom(nodePauseStartedAt)}`
           : statusText
-        const onlineClass = onlineCount > 0 ? 'fleet-jump-online' : 'fleet-jump-offline'
+        const onlineClass = paused > 0 ? 'fleet-jump-paused' : (onlineCount > 0 ? 'fleet-jump-online' : 'fleet-jump-offline')
         return `
           <button class="fleet-jump-button ${onlineClass}" type="button" data-action="jump-node" data-node-target="${escapeHtml(nodeAnchorId(hostLabel, index))}" title="${escapeHtml(`${hostLabel}: ${onlineCount}/${botCount} online, ${displayStatusText}`)}" aria-label="${escapeHtml(`Jump to ${hostLabel}`)}">
             <strong>${escapeHtml(shortcutLabel)}</strong>

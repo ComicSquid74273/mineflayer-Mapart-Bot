@@ -207,8 +207,29 @@ h1 {
   white-space: nowrap;
 }
 
+.fleet-jump-button span[data-paused-started-at] {
+  display: inline;
+  max-width: none;
+  color: #ffb3a5;
+  font-weight: 800;
+}
+
 .fleet-jump-online {
   border-color: rgba(28, 143, 114, 0.32);
+}
+
+.fleet-jump-paused {
+  border-color: rgba(255, 115, 92, 0.62);
+  background: rgba(181, 73, 56, 0.24);
+  box-shadow: inset 0 0 0 1px rgba(255, 115, 92, 0.14);
+}
+
+.fleet-jump-paused strong {
+  color: #fff2ef;
+}
+
+.fleet-jump-paused > span {
+  color: #ffd0c7;
 }
 
 .fleet-jump-offline {
@@ -507,12 +528,15 @@ h1 {
 }
 
 .status-offline,
+.phase-paused,
+.phase-parking-at-cartography,
+.phase-waiting-platform-to-pause,
 .phase-stopped,
 .status-stale,
 .phase-crashed {
-  background: rgba(181, 73, 56, 0.16);
-  color: #ff9e8d;
-  border-color: rgba(181, 73, 56, 0.24);
+  background: rgba(181, 73, 56, 0.22);
+  color: #ffb3a5;
+  border-color: rgba(255, 115, 92, 0.36);
 }
 
 .status-neutral,
