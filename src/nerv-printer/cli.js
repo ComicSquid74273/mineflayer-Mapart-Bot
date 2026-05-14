@@ -3386,6 +3386,10 @@ function startPlatformStallReconnectWatchdog(bot, config) {
   const timer = setInterval(() => {
     if (reconnecting) return
     if (bot.__nervSessionActive === false || bot?._client?.state === 'disconnected') return
+    if (isOperatorPaused(config)) {
+      resetBaseline(bot?.entity?.position, lastProgressToken)
+      return
+    }
     if (!bot.__nervPlatformWatchdogActive) return
     if (bot.__nervAllowOffPlatformNavigation) {
       resetBaseline(bot?.entity?.position, lastProgressToken)
@@ -17029,6 +17033,10 @@ async function runLobbyPortalAutomation(bot, config) {
   bot.__nervPlatformWatchdogActive = false
 
   const stuckTimer = setTimeout(() => {
+    if (isOperatorPaused(config)) {
+      console.log(`[LOBBY-PORTAL] Operator pause active; not reconnecting after ${Math.round(overallTimeoutMs / 1000)}s portal automation timeout.`)
+      return
+    }
     console.log(`[LOBBY-PORTAL] Stuck in portal automation for ${Math.round(overallTimeoutMs / 1000)}s; disconnecting to reconnect.`)
     stopBotMovement(bot)
     try { bot.quit('lobby-portal-stuck') } catch {}
@@ -17122,6 +17130,7 @@ function maybeRequestPlatformRecoveryTpa(bot, config, reason, runtime) {
 async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
   if (config.advanced?.platformWatchdogEnabled === false || getPlatformBounds(config) == null) return
   if (bot.__nervAllowOffPlatformNavigation) return
+  if (isOperatorPaused(config) && bot.__nervPauseParkingInProgress !== true) return
   if (rescueBotPositionFromLatestPacket(bot, config, reason, { log: false })) return
   if (rescueBotPositionFromPlatformCache(bot, config, reason)) return
   const runtime = classifyRuntimePosition(bot, config, reason)
@@ -17156,6 +17165,10 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
       }
       activeStuckMs += elapsedSinceLastCheck
       if (activeStuckMs > stuckTimeoutMs) {
+        if (isOperatorPaused(config)) {
+          console.log(`[PLATFORM-HOLD] Operator pause active; not reconnecting after ${Math.round(stuckTimeoutMs / 1000)}s platform hold.`)
+          return
+        }
         console.log(`[PLATFORM-HOLD] Stuck in platform hold for ${Math.round(stuckTimeoutMs / 1000)}s; disconnecting to reconnect.`)
         try { bot.quit('platform-hold-stuck') } catch {}
         return
@@ -17215,6 +17228,7 @@ function installPlatformSafety(bot, config) {
   const pollMs = Math.max(250, toNumber(config.advanced?.platformWatchdogPollMs, 1000))
   const timer = setInterval(() => {
     if (!bot.__nervPlatformWatchdogActive) return
+    if (isOperatorPaused(config)) return
     if (bot.__nervAllowOffPlatformNavigation) return
     if (!getPlatformBounds(config)) return
     const runtime = classifyRuntimePosition(bot, config, 'runtime-watchdog')
@@ -19291,8 +19305,14 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
       }
       const retryable = shouldRetryReconnect(session, sessionConfig)
       const forceDashboardResetReconnect = shouldForceReconnectForDashboardReset(session)
+      const operatorPaused = isOperatorPaused(sessionConfig)
       const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig) || forceDashboardResetReconnect
       console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
+
+      if (operatorPaused && !forceDashboardResetReconnect) {
+        console.log(`[RECONNECT] Operator pause is active; not reconnecting after session end reason=${session.endReason}.`)
+        break
+      }
 
       if (!reconnectAllowed || !retryable || (attempt >= reconnect.maxAttempts && !forceDashboardResetReconnect)) {
         break
@@ -19530,9 +19550,15 @@ async function start() {
       })
       const retryable = shouldRetryReconnect(session, sessionConfig)
       const forceDashboardResetReconnect = shouldForceReconnectForDashboardReset(session)
+      const operatorPaused = isOperatorPaused(sessionConfig)
       const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig) || forceDashboardResetReconnect
       lastEndReason = session.endReason
       console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
+
+      if (operatorPaused && !forceDashboardResetReconnect) {
+        console.log(`[RECONNECT] Operator pause is active; not reconnecting after session end reason=${session.endReason}.`)
+        break
+      }
 
       if (!reconnectAllowed) {
         break
