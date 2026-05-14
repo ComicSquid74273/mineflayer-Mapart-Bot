@@ -963,6 +963,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     queueBatchLimited: false,
     heartbeatTimer: null,
     commandTimer: null,
+    pauseParkingTask: null,
     stopped: false
   }
 
@@ -1166,6 +1167,34 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     state.nodeInventoryCache.reportPending = true
   }
 
+  function requestPauseParking(reason = 'operator-pause') {
+    if (!isOperatorPaused(config)) return
+    if (state.pauseParkingTask) return
+    state.pauseParkingTask = (async () => {
+      const retryMs = Math.max(1000, toNumber(config.advanced?.pauseParkRetryMs, 10000))
+      const forceAfterMs = Math.max(0, toNumber(config.advanced?.pauseParkForceAfterMs, 10000))
+      const requestedAt = Date.now()
+      while (isBotSessionLive(bot) && bot.__nervSessionActive !== false && isOperatorPaused(config)) {
+        const runActive = runtimeControl?.isRunActive?.() === true
+        if (runActive && Date.now() - requestedAt < forceAfterMs) {
+          state.phase = 'paused'
+          state.statusDetail = 'parking-at-cartography'
+          noteActivity()
+          await delay(500)
+          continue
+        }
+        const parked = await parkAtCartographyAccessForPause(bot, config, dashboardRuntimeApi, reason)
+        if (parked || !isOperatorPaused(config)) return
+        await delay(retryMs)
+      }
+    })().catch((err) => {
+      console.log(`[CONTROL-WARN] Pause parking task failed: ${err?.message || err}`)
+    }).finally(() => {
+      state.pauseParkingTask = null
+    })
+    observeBackgroundTask(state.pauseParkingTask)
+  }
+
   function buildStatusPayload(onlineOverride = null) {
     const now = Date.now()
     const progress = currentProgress()
@@ -1200,7 +1229,10 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     clearDeathMessageIfOnPlatform(runtimeLocation)
     const location = mapDashboardLocation(runtimeLocation)
     const locationDetail = mapDashboardLocationDetail(runtimeLocation)
-    let statusDetail = operatorPaused ? 'paused' : (state.statusDetail || (phase === 'idle' ? 'idle' : phase))
+    const rawStatusDetail = state.statusDetail || (phase === 'idle' ? 'idle' : phase)
+    let statusDetail = operatorPaused
+      ? (String(rawStatusDetail || '').includes('parking-at-cartography') ? 'parking-at-cartography' : 'paused')
+      : rawStatusDetail
     if (hasActiveNbtRun && phase !== 'waiting-spawn' && /^spawn-\d+$/i.test(String(statusDetail || '').trim())) {
       statusDetail = phase
     }
@@ -2032,6 +2064,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         state.stopRequested = true
         state.startRequested = false
         state.statusDetail = 'pausing-after-current-step'
+        requestPauseParking('dashboard-pause-command')
         noteActivity()
         await reportCommandResult(claimed.commandId, 'succeeded', claimed.reason || 'pause requested; bot will remain connected idle')
         break
@@ -2132,7 +2165,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     }
   }
 
-  return {
+  const dashboardRuntimeApi = {
     start() {
       stdinCommandState.resetCurrentNbt = async (source = 'terminal') => requestCurrentNbtReset(source)
       void postStatus(false)
@@ -2261,6 +2294,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       noteActivity()
       void postStatus()
     },
+    requestPauseParking,
     async completeActiveQueueFile(status = 'placed', reason = null) {
       const active = state.activeQueueFile
       if (!active?.fileId) return false
@@ -2315,6 +2349,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       noteActivity()
     }
   }
+  return dashboardRuntimeApi
 }
 
 async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboardRuntime, initialStartRequested = false) {
@@ -3170,6 +3205,13 @@ function isOperatorPaused(config) {
   return readOperatorPauseState(config).operatorPaused === true
 }
 
+function isOperatorPauseHoldActive(config) {
+  if (isOperatorPaused(config)) return true
+  if (config?.__runtimeControl?.isStopRequested?.() === true) return true
+  if (config?.__dashboardRuntime?.isStopRequested?.() === true) return true
+  return false
+}
+
 function setOperatorPaused(config, paused, reason = 'operator-command') {
   const filePath = getOperatorPauseFilePath(config)
   const previous = readOperatorPauseState(config)
@@ -3402,7 +3444,7 @@ function startPlatformStallReconnectWatchdog(bot, config) {
   const timer = setInterval(() => {
     if (reconnecting) return
     if (bot.__nervSessionActive === false || bot?._client?.state === 'disconnected') return
-    if (isOperatorPaused(config)) {
+    if (isOperatorPauseHoldActive(config)) {
       resetBaseline(bot?.entity?.position, lastProgressToken)
       return
     }
@@ -7129,26 +7171,47 @@ async function parkAtCartographyAccessForPause(bot, config, dashboardRuntime = n
     toNumber(config.advanced?.postPrintCartographyAccessRange, 0.85)
   ))
   const timeoutMs = Math.max(5000, toNumber(config.advanced?.pauseParkTimeoutMs, 60000))
+  const pollMs = Math.max(100, toNumber(config.advanced?.pauseParkPollMs, 250))
+  const xzDistance = (point) => {
+    const pos = bot?.entity?.position
+    if (!pos || !point) return Number.POSITIVE_INFINITY
+    if (!Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.z))) return Number.POSITIVE_INFINITY
+    if (!Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.z))) return Number.POSITIVE_INFINITY
+    const dx = Number(pos.x) - Number(point.x)
+    const dz = Number(pos.z) - Number(point.z)
+    return Math.sqrt((dx * dx) + (dz * dz))
+  }
 
   try {
     dashboardRuntime?.setPhase?.('paused', 'parking-at-cartography')
     closeCurrentWindowIfOpen(bot, reason)
     await waitForPlatformReady(bot, config, `${reason}-platform-ready`)
     bot.__nervPauseParkingInProgress = true
-    await Promise.race([
-      gotoConfiguredAccess(
-        bot,
-        cartographyConfig.position,
-        accessPosition,
-        accessRange,
-        config,
-        `${reason}-cartography-access`,
-        { strict: Boolean(accessPosition) }
-      ),
-      delay(timeoutMs).then(() => {
-        throw new Error(`pause cartography parking timed out after ${timeoutMs}ms`)
-      })
-    ])
+    const goalPos = accessPosition || cartographyConfig.position
+    const readyDistance = Math.max(0.35, accessRange)
+    assertLivePlatformReady(bot, config, `${reason}-cartography-access:pre-goal`)
+    configurePathfinderMovements(bot, config)
+    console.log(`[CONTROL] Parking paused bot at cartography access target=${formatCoordTriplet(goalPos)} range=${accessRange}.`)
+    if (xzDistance(goalPos) > readyDistance) {
+      const currentY = Number.isFinite(Number(bot?.entity?.position?.y)) ? Number(bot.entity.position.y) : Number(goalPos.y)
+      bot.pathfinder.setGoal(new GoalNear(goalPos.x, currentY, goalPos.z, accessRange))
+      const deadline = Date.now() + timeoutMs
+      let lastLogAt = 0
+      while (Date.now() <= deadline) {
+        if (!isBotSessionLive(bot)) throw new Error('bot session ended while parking at cartography access')
+        const distance = xzDistance(goalPos)
+        if (distance <= readyDistance) break
+        if (Date.now() - lastLogAt >= 5000) {
+          console.log(`[CONTROL] Parking paused bot at cartography access; xzDistance=${distance.toFixed(2)} target=${formatCoordTriplet(goalPos)} current=${formatBotPosition(bot)}.`)
+          lastLogAt = Date.now()
+        }
+        await delay(pollMs)
+      }
+      const finalDistance = xzDistance(goalPos)
+      if (finalDistance > readyDistance) {
+        throw new Error(`pause cartography parking timed out after ${timeoutMs}ms; xzDistance=${finalDistance.toFixed(2)} target=${formatCoordTriplet(goalPos)} current=${formatBotPosition(bot)}`)
+      }
+    }
     stopBotMovement(bot)
     dashboardRuntime?.setPhase?.('paused', 'paused')
     const standPos = accessPosition || cartographyConfig.position
@@ -17051,7 +17114,7 @@ async function runLobbyPortalAutomation(bot, config) {
   bot.__nervPlatformWatchdogActive = false
 
   const stuckTimer = setTimeout(() => {
-    if (isOperatorPaused(config)) {
+    if (isOperatorPauseHoldActive(config)) {
       console.log(`[LOBBY-PORTAL] Operator pause active; not reconnecting after ${Math.round(overallTimeoutMs / 1000)}s portal automation timeout.`)
       return
     }
@@ -17148,7 +17211,7 @@ function maybeRequestPlatformRecoveryTpa(bot, config, reason, runtime) {
 async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
   if (config.advanced?.platformWatchdogEnabled === false || getPlatformBounds(config) == null) return
   if (bot.__nervAllowOffPlatformNavigation) return
-  if (isOperatorPaused(config) && bot.__nervPauseParkingInProgress !== true) return
+  if (isOperatorPauseHoldActive(config) && bot.__nervPauseParkingInProgress !== true) return
   if (rescueBotPositionFromLatestPacket(bot, config, reason, { log: false })) return
   if (rescueBotPositionFromPlatformCache(bot, config, reason)) return
   const runtime = classifyRuntimePosition(bot, config, reason)
@@ -17183,7 +17246,7 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold') {
       }
       activeStuckMs += elapsedSinceLastCheck
       if (activeStuckMs > stuckTimeoutMs) {
-        if (isOperatorPaused(config)) {
+        if (isOperatorPauseHoldActive(config)) {
           console.log(`[PLATFORM-HOLD] Operator pause active; not reconnecting after ${Math.round(stuckTimeoutMs / 1000)}s platform hold.`)
           return
         }
@@ -17246,7 +17309,7 @@ function installPlatformSafety(bot, config) {
   const pollMs = Math.max(250, toNumber(config.advanced?.platformWatchdogPollMs, 1000))
   const timer = setInterval(() => {
     if (!bot.__nervPlatformWatchdogActive) return
-    if (isOperatorPaused(config)) return
+    if (isOperatorPauseHoldActive(config)) return
     if (bot.__nervAllowOffPlatformNavigation) return
     if (!getPlatformBounds(config)) return
     const runtime = classifyRuntimePosition(bot, config, 'runtime-watchdog')
@@ -19355,7 +19418,7 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
       }
       const retryable = shouldRetryReconnect(session, sessionConfig)
       const forceDashboardResetReconnect = shouldForceReconnectForDashboardReset(session)
-      const operatorPaused = isOperatorPaused(sessionConfig)
+      const operatorPaused = isOperatorPauseHoldActive(sessionConfig)
       const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig) || forceDashboardResetReconnect
       console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
 
@@ -19600,7 +19663,7 @@ async function start() {
       })
       const retryable = shouldRetryReconnect(session, sessionConfig)
       const forceDashboardResetReconnect = shouldForceReconnectForDashboardReset(session)
-      const operatorPaused = isOperatorPaused(sessionConfig)
+      const operatorPaused = isOperatorPauseHoldActive(sessionConfig)
       const reconnectAllowed = reconnect.enabled || shouldForceReconnectForPlatformStall(session, sessionConfig) || forceDashboardResetReconnect
       lastEndReason = session.endReason
       console.log(`[SESSION] attempt=${attempt} host=${activeHost || sessionConfig.bot?.host || 'default'} end=${session.endReason} retryable=${retryable} successfulStartup=${session.successfulStartup === true}`)
