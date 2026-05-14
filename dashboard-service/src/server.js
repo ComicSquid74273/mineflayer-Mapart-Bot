@@ -714,7 +714,7 @@ function hasRecentBotError(bot, now = Date.now()) {
   return isRecentTimestamp(bot?.lastErrorAt, ALERT_ERROR_TTL_MS, now)
 }
 
-function summarizeBot(bot) {
+function summarizeBot(bot, pauseState = null) {
   const lastStatusAt = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
   const ageMs = Number.isFinite(lastStatusAt) ? Math.max(0, Date.now() - lastStatusAt) : Number.POSITIVE_INFINITY
   const fresh = ageMs <= BOT_FRESH_MS
@@ -740,6 +740,10 @@ function summarizeBot(bot) {
     health: bot.health,
     hunger: bot.hunger,
     activeState,
+    pauseDesired: pauseState?.paused === true,
+    pauseStartedAt: pauseState?.pausedAt || null,
+    pauseUpdatedAt: pauseState?.updatedAt || null,
+    pauseReason: pauseState?.reason || null,
     location: bot.location,
     locationDetail: bot.locationDetail || bot.location || null,
     idle: bot.idle,
@@ -1276,7 +1280,7 @@ function buildDashboardSnapshot(actor = null) {
     return value
   }
   const fleet = timed('fleet', () => store.listFleet())
-  const bots = timed('bots', () => fleet.bots.map(summarizeBot))
+  const bots = timed('bots', () => fleet.bots.map((bot) => summarizeBot(bot, store.getBotPauseState(bot.botName))))
   const nodes = timed('nodes', () => fleet.nodes.map(summarizeNode))
   const events = timed('events', () => store.listEvents(150))
   const allAssignments = timed('assignments', () => listUploadAssignments(0))
@@ -1749,7 +1753,7 @@ async function route(req, res) {
     const rawIp = req.socket?.remoteAddress || req.connection?.remoteAddress || null
     const botIp = rawIp ? rawIp.replace(/^::ffff:/, '') : null
     const bot = store.upsertBotStatus({ ...body, botIp })
-    return sendJson(res, 200, { ok: true, nextPollMs: 3000, bot: summarizeBot(bot) })
+    return sendJson(res, 200, { ok: true, nextPollMs: 3000, bot: summarizeBot(bot, store.getBotPauseState(bot.botName)) })
   }
 
   params = matchPath(pathname, '/api/bots/:botName/commands')

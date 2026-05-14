@@ -27,6 +27,7 @@ const state = {
   localReprintCommands: [],
   configEditor: { name: null, content: '', dirty: false },
   refreshTimer: null,
+  pauseDurationTimer: null,
   refreshIntervalMs: 300000,
   busy: false,
   uploadBusy: false,
@@ -298,7 +299,26 @@ function isBotPaused(bot) {
   const phase = String(bot?.phase || '').trim().toLowerCase()
   const detail = String(bot?.statusDetail || '').trim().toLowerCase()
   const active = String(bot?.activeState || '').trim().toLowerCase()
-  return bot?.online && (phase === 'paused' || detail === 'paused' || detail === 'parking-at-cartography' || detail === 'waiting-platform-to-pause' || active === 'paused')
+  return bot?.pauseDesired === true || (bot?.online && (phase === 'paused' || detail === 'paused' || detail === 'parking-at-cartography' || detail === 'waiting-platform-to-pause' || active === 'paused'))
+}
+
+function getPauseStartedAt(bot) {
+  const value = String(bot?.pauseStartedAt || '').trim()
+  const ms = new Date(value || 0).getTime()
+  return Number.isFinite(ms) && ms > 0 ? value : ''
+}
+
+function formatPauseDurationFrom(value) {
+  const ms = new Date(value || 0).getTime()
+  if (!Number.isFinite(ms) || ms <= 0) return 'n/a'
+  return formatDuration(Date.now() - ms)
+}
+
+function updatePauseDurationText(root = document) {
+  root.querySelectorAll('[data-paused-started-at]').forEach((element) => {
+    const startedAt = element.getAttribute('data-paused-started-at') || ''
+    element.textContent = formatPauseDurationFrom(startedAt)
+  })
 }
 
 function formatBotProgress(bot) {
@@ -727,7 +747,9 @@ function renderFleetJump() {
       bot.currentNbt,
       bot.currentNbtStartedAt,
       bot.idle,
-      bot.activeState
+      bot.activeState,
+      bot.pauseDesired,
+      bot.pauseStartedAt
     ])
   })
   if (state.renderCache.fleetJump === signature) return
@@ -752,19 +774,29 @@ function renderFleetJump() {
         const nodeBots = state.bots.filter((bot) => String(bot.hostLabel || '').trim() === hostLabel)
         const printing = nodeBots.filter((bot) => isBotPrinting(bot)).length
         const paused = nodeBots.filter((bot) => isBotPaused(bot)).length
+        const pauseStartedTimes = nodeBots
+          .filter((bot) => isBotPaused(bot))
+          .map((bot) => getPauseStartedAt(bot))
+          .filter(Boolean)
+          .map((value) => new Date(value).getTime())
+          .filter((value) => Number.isFinite(value) && value > 0)
+        const nodePauseStartedAt = pauseStartedTimes.length ? new Date(Math.min(...pauseStartedTimes)).toISOString() : ''
         const stale = nodeBots.filter((bot) => bot.online && bot.activeState === 'stale').length
         const idle = nodeBots.filter((bot) => bot.online && bot.idle && !isBotPaused(bot)).length
         const shortcutLabel = nodeShortcutLabel(hostLabel, index)
-        const statusText = onlineCount <= 0 ? 'Offline'
-          : (printing > 0 ? `${printing} printing`
-            : (paused > 0 ? `${paused} paused`
+        const statusText = paused > 0 ? `${paused} paused`
+          : (onlineCount <= 0 ? 'Offline'
+            : (printing > 0 ? `${printing} printing`
               : (stale > 0 ? `${stale} stale`
                 : (idle > 0 ? `${idle} idle` : 'Online'))))
+        const displayStatusText = paused > 0 && nodePauseStartedAt
+          ? `${statusText} ${formatPauseDurationFrom(nodePauseStartedAt)}`
+          : statusText
         const onlineClass = onlineCount > 0 ? 'fleet-jump-online' : 'fleet-jump-offline'
         return `
-          <button class="fleet-jump-button ${onlineClass}" type="button" data-action="jump-node" data-node-target="${escapeHtml(nodeAnchorId(hostLabel, index))}" title="${escapeHtml(`${hostLabel}: ${onlineCount}/${botCount} online, ${statusText}`)}" aria-label="${escapeHtml(`Jump to ${hostLabel}`)}">
+          <button class="fleet-jump-button ${onlineClass}" type="button" data-action="jump-node" data-node-target="${escapeHtml(nodeAnchorId(hostLabel, index))}" title="${escapeHtml(`${hostLabel}: ${onlineCount}/${botCount} online, ${displayStatusText}`)}" aria-label="${escapeHtml(`Jump to ${hostLabel}`)}">
             <strong>${escapeHtml(shortcutLabel)}</strong>
-            <span>${escapeHtml(statusText)}</span>
+            <span>${escapeHtml(statusText)}${nodePauseStartedAt ? ` <span data-paused-started-at="${escapeHtml(nodePauseStartedAt)}">${escapeHtml(formatPauseDurationFrom(nodePauseStartedAt))}</span>` : ''}</span>
           </button>
         `
       }).join('')}
@@ -964,6 +996,9 @@ function renderBotCard(bot) {
   ` : ''
   const healthClass = botHealthClass(bot)
   const pingText = typeof bot.latencyMs === 'number' ? `${bot.latencyMs}ms` : 'n/a'
+  const pauseStartedAt = getPauseStartedAt(bot)
+  const pausedForText = pauseStartedAt ? formatPauseDurationFrom(pauseStartedAt) : 'n/a'
+  const pauseReason = String(bot.pauseReason || '').trim()
   const canOperate = hasPermission('canOperate')
   const warningList = Array.isArray(bot.warnings) ? bot.warnings.slice(-3) : []
   const warningsHtml = warningList.length
@@ -996,6 +1031,7 @@ function renderBotCard(bot) {
         <div class="metric">Activity<strong>${escapeHtml(bot.activeState || 'n/a')}</strong></div>
         <div class="metric">Progress<strong>${escapeHtml(progress)}</strong></div>
         <div class="metric">MC Ping<strong>${escapeHtml(pingText)}</strong></div>
+        ${isBotPaused(bot) ? `<div class="metric">Paused For<strong data-paused-started-at="${escapeHtml(pauseStartedAt)}">${escapeHtml(pausedForText)}</strong></div>` : ''}
       </div>
       <div class="bot-metrics">
         <div class="metric">NBT<strong>${escapeHtml(bot.currentNbt || 'none')}</strong></div>
@@ -1004,6 +1040,7 @@ function renderBotCard(bot) {
         <div class="metric">Reconnect<strong>${escapeHtml(bot.reconnectCount ? `${bot.reconnectState || 'idle'} (${bot.reconnectCount})` : (bot.reconnectState || 'idle'))}</strong></div>
       </div>
       ${bot.lastError ? `<p class="hint">Last error: ${escapeHtml(bot.lastError)}</p>` : ''}
+      ${isBotPaused(bot) && pauseReason ? `<p class="hint">Pause reason: ${escapeHtml(pauseReason)}</p>` : ''}
       ${warningsHtml}
       <div class="bot-actions">
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
@@ -2673,6 +2710,7 @@ loadStoredRefreshInterval()
 setManagedOperatorDefaults(elements.managedRole.value)
 renderAuthState()
 applyRefreshInterval()
+state.pauseDurationTimer = window.setInterval(() => updatePauseDurationText(), 1000)
 void verifyOperatorAuth()
 void refreshData()
 

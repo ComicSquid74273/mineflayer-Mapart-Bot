@@ -259,7 +259,7 @@
     "fastTraversalCheckpointEveryRows": 10,
     "fastTraversalCatchupPasses": 2,
     "fastTraversalCatchupStallMs": 750,
-    "maxPlacementsPerTick": 10
+    "maxPlacementsPerTick": 5
   },
   "advanced": {
     "antiHunger": {
@@ -320,8 +320,8 @@
     "supportStockChestStableMs": 800,
     "supportStockChestOpenAttempts": 5,
     "supportStockChestPollMs": 100,
-    "latencySafeModeEnterMs": 50,
-    "latencySafeModeResumeMs": 45,
+    "latencySafeModeEnterMs": 90,
+    "latencySafeModeResumeMs": 85,
     "latencySafePlacementSettleMs": 50,
     "latencySafePlacementMoveTimeoutMs": 12000,
     "sneakOnDispenserOnly": true,
@@ -364,7 +364,7 @@
     "nervWorkloadTestLineGroups": 2,
     "nervWorkloadTestWaitAfterMs": 5000,
     "scannerPlaceDelayMs": 0,
-    "scannerMaxCatchupPlacements": 15,
+    "scannerMaxCatchupPlacements": 5,
     "scannerWorkloadPollMs": 10,
     "scannerWorkloadLogEveryMs": 1000,
     "scannerLineEndSettleMs": 6000,

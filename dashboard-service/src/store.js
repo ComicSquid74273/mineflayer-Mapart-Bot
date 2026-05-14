@@ -1017,9 +1017,12 @@ function createStore(baseDir) {
     if (!name) return null
     const state = readControlState()
     if (paused === true) {
+      const previous = state.pausedBots[name] && typeof state.pausedBots[name] === 'object' ? state.pausedBots[name] : {}
+      const pausedAt = String(previous.pausedAt || previous.updatedAt || '').trim() || nowIso()
       state.pausedBots[name] = {
         paused: true,
         reason: reason || null,
+        pausedAt,
         updatedAt: nowIso()
       }
     } else {
@@ -1037,6 +1040,19 @@ function createStore(baseDir) {
     const name = String(botName || '').trim()
     if (!name) return false
     return readControlState().pausedBots[name]?.paused === true
+  }
+
+  function getBotPauseState(botName) {
+    const name = String(botName || '').trim()
+    if (!name) return null
+    const item = readControlState().pausedBots[name]
+    if (!item || item.paused !== true) return null
+    return {
+      paused: true,
+      reason: item.reason || null,
+      pausedAt: item.pausedAt || item.updatedAt || null,
+      updatedAt: item.updatedAt || null
+    }
   }
 
   function isBotReportingPaused(bot) {
@@ -1847,6 +1863,7 @@ function createStore(baseDir) {
     setBotPauseDesired,
     setBotsPauseDesired,
     isBotPauseDesired,
+    getBotPauseState,
     claimCommand,
     completeCommand,
     listPendingCommands,

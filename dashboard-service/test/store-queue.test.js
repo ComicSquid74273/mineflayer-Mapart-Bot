@@ -265,3 +265,15 @@ test('reset everything preserves total printed map count', () => {
   assert.equal(node.totalCompletedMapCount, 7)
   assert.equal(node.timing.totalCompletedMaps, 7)
 })
+
+test('pause desired keeps original pause start time across repeated pause commands', () => {
+  const { store } = makeStore()
+
+  const first = store.setBotPauseDesired('pause-bot', true, 'first pause')
+  const second = store.setBotPauseDesired('pause-bot', true, 'second pause')
+  const current = store.getBotPauseState('pause-bot')
+
+  assert.equal(second.pausedAt, first.pausedAt)
+  assert.equal(current.pausedAt, first.pausedAt)
+  assert.equal(current.reason, 'second pause')
+})
