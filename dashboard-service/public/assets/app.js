@@ -6,6 +6,7 @@ const state = {
   configs: [],
   dataFiles: [],
   uploadAssignments: [],
+  uploadHistory: [],
   queueSummary: {
     combinedRemaining: 0,
     combinedCompleted: 0,
@@ -42,6 +43,7 @@ const state = {
     operators: '',
     configs: '',
     dataFiles: '',
+    uploadHistory: '',
     uploadAssignments: '',
     failedQueue: '',
     fleetJump: '',
@@ -122,6 +124,7 @@ const elements = {
   uploadProgressFill: document.getElementById('uploadProgressFill'),
   uploadProgressText: document.getElementById('uploadProgressText'),
   uploadStatus: document.getElementById('uploadStatus'),
+  uploadHistoryList: document.getElementById('uploadHistoryList'),
   uploadAssignmentsList: document.getElementById('uploadAssignmentsList'),
   failedQueueList: document.getElementById('failedQueueList'),
   retryAllFailedButton: document.getElementById('retryAllFailedButton'),
@@ -312,6 +315,31 @@ function formatPauseDurationFrom(value) {
   const ms = new Date(value || 0).getTime()
   if (!Number.isFinite(ms) || ms <= 0) return 'n/a'
   return formatDuration(Date.now() - ms)
+}
+
+function currentNbtBaseName(value) {
+  return String(value || '').trim().split(/[\\/]/).pop()
+}
+
+function getNodeActiveRunForBot(bot) {
+  const hostLabel = String(bot?.hostLabel || '').trim()
+  const currentNbt = currentNbtBaseName(bot?.currentNbt).toLowerCase()
+  if (!hostLabel || !currentNbt || currentNbt === 'none') return null
+  const node = (Array.isArray(state.nodes) ? state.nodes : []).find((item) => String(item?.hostLabel || '').trim() === hostLabel)
+  const activeRun = node?.timing?.activeRun || node?.currentRun || null
+  const activeFileName = currentNbtBaseName(activeRun?.fileName).toLowerCase()
+  return activeFileName && activeFileName === currentNbt ? activeRun : null
+}
+
+function getCurrentRunElapsedMs(bot) {
+  const activeRun = getNodeActiveRunForBot(bot)
+  const activeElapsedMs = Number(activeRun?.elapsedMs)
+  if (Number.isFinite(activeElapsedMs) && activeElapsedMs >= 0) return activeElapsedMs
+
+  if (isBotPaused(bot)) return null
+  const startedAtMs = new Date(bot?.currentNbtStartedAt || 0).getTime()
+  if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) return null
+  return Math.max(0, Date.now() - startedAtMs)
 }
 
 function updatePauseDurationText(root = document) {
@@ -973,9 +1001,8 @@ function renderBotCard(bot) {
   const progress = formatBotProgress(bot)
   const activeNbtRun = isActiveNbtRun(bot)
   const resettableCurrentNbt = hasResettableCurrentNbt(bot)
-  const currentRunElapsed = bot.currentNbtStartedAt
-    ? formatDuration(Date.now() - new Date(bot.currentNbtStartedAt).getTime())
-    : 'n/a'
+  const currentRunElapsedMs = getCurrentRunElapsedMs(bot)
+  const currentRunElapsed = currentRunElapsedMs === null ? 'n/a' : formatDuration(currentRunElapsedMs)
   const showVerify = bot.tokenWaiting && !state.dismissedVerify.has(bot.botName)
   const verifyBanner = showVerify ? `
     <div class="verify-banner">
@@ -1260,6 +1287,70 @@ function renderUploadAssignments() {
           <div class="file-actions">
             <span class="tag ${statusClass}">${escapeHtml(status)}</span>
             ${canRetry ? `<button class="accent-button small-button" type="button" data-action="queue-retry" data-permission-needed="canOperate" data-file-id="${escapeHtml(item.id)}">Retry</button>` : ''}
+          </div>
+        </div>
+      </article>`
+  }).join('')
+}
+
+function renderUploadHistory() {
+  if (!elements.uploadHistoryList) return
+  const sig = JSON.stringify({
+    canOperate: hasPermission('canOperate'),
+    history: state.uploadHistory
+  })
+  if (state.renderCache.uploadHistory === sig) return
+  state.renderCache.uploadHistory = sig
+
+  if (!hasPermission('canOperate')) {
+    elements.uploadHistoryList.innerHTML = `
+      <article class="empty-card">
+        <h3>Upload history hidden</h3>
+        <p>Login as an operator to view uploaded NBT and ZIP files.</p>
+      </article>`
+    return
+  }
+
+  if (!state.uploadHistory.length) {
+    elements.uploadHistoryList.innerHTML = `
+      <article class="empty-card">
+        <h3>No uploaded files yet</h3>
+        <p>NBT files and ZIP archives uploaded through this dashboard will appear here.</p>
+      </article>`
+    return
+  }
+
+  elements.uploadHistoryList.innerHTML = state.uploadHistory.slice(0, 1000).map((item) => {
+    const kind = String(item.kind || 'nbt').toUpperCase()
+    const target = item.targetBotName
+      ? `Bot: ${item.targetBotName}`
+      : (item.targetHostLabel ? `Node: ${item.targetHostLabel}` : 'Central queue')
+    const queued = Number(item.queuedCount || 0)
+    const extracted = Number(item.extractedCount || 0)
+    const errors = Array.isArray(item.errors) ? item.errors : []
+    const extractedNames = Array.isArray(item.extractedNames) ? item.extractedNames : []
+    const detailParts = [
+      `${formatFileSize(item.sizeBytes || 0)}`,
+      target,
+      `${queued} queued`,
+      `uploaded ${formatTime(item.uploadedAt)}`
+    ]
+    if (item.uploadedBy) detailParts.push(`by ${item.uploadedBy}`)
+    if (kind === 'ZIP') detailParts.splice(2, 0, `${extracted} extracted`)
+    const previewNames = extractedNames.slice(0, 4).join(', ')
+    const moreNames = extractedNames.length > 4 ? ` +${extractedNames.length - 4} more` : ''
+    const errorText = errors.length ? errors.map((error) => error.error || String(error)).join('; ') : ''
+    return `
+      <article class="file-item compact-file-item">
+        <div class="file-row">
+          <div>
+            <strong>${escapeHtml(item.fileName || 'unknown')}</strong>
+            <p class="file-meta">${escapeHtml(detailParts.join(' | '))}</p>
+            ${previewNames ? `<p class="file-meta">${escapeHtml(previewNames + moreNames)}</p>` : ''}
+            ${errorText ? `<p class="file-meta">${escapeHtml(errorText)}</p>` : ''}
+          </div>
+          <div class="file-actions">
+            <span class="tag ${errors.length ? 'status-offline' : 'status-neutral'}">${escapeHtml(kind)}</span>
           </div>
         </div>
       </article>`
@@ -1983,6 +2074,7 @@ async function refreshData(options = {}) {
     state.configs = Array.isArray(configs.files) ? configs.files : []
     state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
     state.uploadAssignments = Array.isArray(snapshot.uploadAssignments) ? snapshot.uploadAssignments : []
+    state.uploadHistory = Array.isArray(snapshot.uploadHistory) ? snapshot.uploadHistory : []
     state.queueSummary = snapshot.queueSummary && typeof snapshot.queueSummary === 'object' ? snapshot.queueSummary : state.queueSummary
     state.events = Array.isArray(snapshot.events) ? snapshot.events : []
     state.alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : []
@@ -2000,6 +2092,7 @@ async function refreshData(options = {}) {
     renderFleetJump()
     renderBots()
     renderFiles()
+    renderUploadHistory()
     renderFailedQueueRetries()
     renderUploadAssignments()
     renderQueueSummary()

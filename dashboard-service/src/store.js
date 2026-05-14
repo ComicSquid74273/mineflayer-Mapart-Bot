@@ -46,6 +46,7 @@ function createStore(baseDir) {
   const commandsFile = path.join(dataDir, 'commands.json')
   const controlFile = path.join(dataDir, 'control.json')
   const uploadsFile = path.join(dataDir, 'files.json')
+  const uploadHistoryFile = path.join(dataDir, 'upload-history.json')
   const eventsFile = path.join(dataDir, 'events.json')
   const operatorsFile = path.join(dataDir, 'operators.json')
   const nodeStatsFile = path.join(dataDir, 'node-stats.json')
@@ -59,7 +60,7 @@ function createStore(baseDir) {
   const QUEUE_BATCH_HIGH_WATER = Math.max(1, Number(process.env.DASHBOARD_QUEUE_BATCH_HIGH_WATER || 10))
   const QUEUE_BATCH_MAX_CLAIM = Math.max(1, Number(process.env.DASHBOARD_QUEUE_BATCH_MAX_CLAIM || 10))
   const COUNTED_NODE_PHASES = new Set(['printing', 'repair', 'rescan', 'post-print', 'cleanup'])
-  const HOLD_NODE_PHASES = new Set([])
+  const HOLD_NODE_PHASES = new Set(['paused'])
   const nextNodeTimingReconcileAtByHost = new Map()
 
   function defaultOperators() {
@@ -120,6 +121,7 @@ function createStore(baseDir) {
   if (!fs.existsSync(commandsFile)) writeJson(commandsFile, [])
   if (!fs.existsSync(controlFile)) writeJson(controlFile, { pausedBots: {} })
   if (!fs.existsSync(uploadsFile)) writeJson(uploadsFile, [])
+  if (!fs.existsSync(uploadHistoryFile)) writeJson(uploadHistoryFile, [])
   if (!fs.existsSync(eventsFile)) writeJson(eventsFile, [])
   if (!fs.existsSync(operatorsFile)) writeJson(operatorsFile, defaultOperators())
   if (!fs.existsSync(nodeStatsFile)) writeJson(nodeStatsFile, {})
@@ -1118,6 +1120,40 @@ function createStore(baseDir) {
     return readJson(uploadsFile, []).sort((left, right) => String(right.uploadedAt).localeCompare(String(left.uploadedAt)))
   }
 
+  function listUploadHistory(limit = 200) {
+    const items = readJson(uploadHistoryFile, [])
+      .sort((left, right) => String(right.uploadedAt).localeCompare(String(left.uploadedAt)))
+    const parsedLimit = Number(limit)
+    return Number.isFinite(parsedLimit) && parsedLimit > 0 ? items.slice(0, parsedLimit) : items
+  }
+
+  function appendUploadHistory(input) {
+    const items = readJson(uploadHistoryFile, [])
+    const entry = {
+      uploadId: crypto.randomUUID(),
+      uploadedAt: nowIso(),
+      originalName: String(input?.originalName || 'unknown').trim() || 'unknown',
+      kind: input?.kind === 'zip' ? 'zip' : 'nbt',
+      sizeBytes: Math.max(0, toNumber(input?.sizeBytes, 0)),
+      sha256: String(input?.sha256 || '').trim() || null,
+      uploadedBy: input?.uploadedBy || null,
+      targetBotName: String(input?.targetBotName || '').trim() || null,
+      targetHostLabel: String(input?.targetHostLabel || '').trim() || null,
+      batchId: String(input?.batchId || '').trim() || null,
+      queuedCount: Math.max(0, toNumber(input?.queuedCount, 0)),
+      extractedCount: Math.max(0, toNumber(input?.extractedCount, 0)),
+      queuedFileIds: Array.isArray(input?.queuedFileIds) ? input.queuedFileIds.filter(Boolean).map(String).slice(0, 500) : [],
+      extractedNames: Array.isArray(input?.extractedNames) ? input.extractedNames.filter(Boolean).map(String).slice(0, 500) : [],
+      errors: Array.isArray(input?.errors) ? input.errors.slice(0, 20).map((item) => ({
+        fileName: item?.fileName ? String(item.fileName) : null,
+        error: item?.error ? String(item.error) : String(item || '')
+      })) : []
+    }
+    items.push(entry)
+    writeJson(uploadHistoryFile, items.slice(-1000))
+    return entry
+  }
+
   function getFile(fileId) {
     return listFiles().find((item) => item.fileId === fileId) || null
   }
@@ -1874,9 +1910,11 @@ function createStore(baseDir) {
     completeCommand,
     listPendingCommands,
     listFiles,
+    listUploadHistory,
     getFile,
     listEvents,
     addEvent,
+    appendUploadHistory,
     createFileUpload,
     assignFile,
     assignFileToNode,

@@ -270,6 +270,42 @@ test('bot reconnect count increments when a known node process restarts', () => 
   assert.equal(node.operationalStats.reconnectCount, 1)
 })
 
+test('paused current run stays held and stops adding active time', () => {
+  const { dir, store } = makeStore()
+
+  store.upsertBotStatus({
+    botName: 'pause-run-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'printing',
+    currentNbt: 'pause-run.nbt',
+    currentNbtStartedAt: new Date(Date.now() - 60 * 1000).toISOString(),
+    progress: { percent: 42 }
+  })
+
+  const activeBeforePause = store.listNodes().find((item) => item.hostLabel === 'node-a')?.timing?.activeRun
+  assert.equal(activeBeforePause?.fileName, 'pause-run.nbt')
+  assert.equal(activeBeforePause?.activeBotCount, 1)
+
+  const restartedStore = createStore(dir)
+  restartedStore.upsertBotStatus({
+    botName: 'pause-run-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'paused',
+    activeState: 'paused',
+    currentNbt: 'pause-run.nbt',
+    currentNbtStartedAt: new Date(Date.now() - 60 * 1000).toISOString(),
+    progress: { percent: 42 }
+  })
+
+  const activeWhilePaused = restartedStore.listNodes().find((item) => item.hostLabel === 'node-a')?.timing?.activeRun
+  assert.equal(activeWhilePaused?.fileName, 'pause-run.nbt')
+  assert.equal(activeWhilePaused?.activeBotCount, 0)
+  assert.equal(activeWhilePaused?.segmentStartedAt, null)
+  assert.ok(Number(activeWhilePaused?.elapsedMs || 0) >= 0)
+})
+
 test('reset everything preserves total printed map count', () => {
   const { dir, store } = makeStore()
   const now = new Date().toISOString()
@@ -308,6 +344,31 @@ test('reset everything preserves total printed map count', () => {
   assert.equal(node.finishedMapCount, 0)
   assert.equal(node.totalCompletedMapCount, 7)
   assert.equal(node.timing.totalCompletedMaps, 7)
+})
+
+test('reset everything preserves upload history list', () => {
+  const { store } = makeStore()
+  const file = createQueueFile(store, 'queued-before-reset.nbt')
+  const history = store.appendUploadHistory({
+    originalName: 'batch.zip',
+    kind: 'zip',
+    sizeBytes: 1234,
+    uploadedBy: 'test',
+    queuedCount: 1,
+    extractedCount: 1,
+    queuedFileIds: [file.fileId],
+    extractedNames: ['queued-before-reset.nbt']
+  })
+
+  const reset = store.resetDashboardForFreshStart()
+  assert.equal(reset.clearedQueueFiles, 1)
+  assert.equal(store.listFiles().length, 0)
+
+  const remainingHistory = store.listUploadHistory()
+  assert.equal(remainingHistory.length, 1)
+  assert.equal(remainingHistory[0].uploadId, history.uploadId)
+  assert.equal(remainingHistory[0].originalName, 'batch.zip')
+  assert.deepEqual(remainingHistory[0].extractedNames, ['queued-before-reset.nbt'])
 })
 
 test('pause desired keeps original pause start time across repeated pause commands', () => {

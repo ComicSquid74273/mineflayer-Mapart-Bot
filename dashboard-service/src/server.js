@@ -30,7 +30,7 @@ const MAX_UPLOAD_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_
 const MAX_ZIP_ENTRY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_ZIP_ENTRY_BYTES || 64 * 1024 * 1024))
 const MAX_ZIP_TOTAL_BYTES = Math.max(MAX_ZIP_ENTRY_BYTES, Number(process.env.DASHBOARD_MAX_ZIP_TOTAL_BYTES || MAX_UPLOAD_BYTES))
 const MAX_ZIP_ENTRIES = Math.max(1, Number(process.env.DASHBOARD_MAX_ZIP_ENTRIES || 1000))
-const PROTECTED_DATA_FILES = new Set(['operators.json'])
+const PROTECTED_DATA_FILES = new Set(['operators.json', 'upload-history.json'])
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
     canViewLogs: true,
@@ -888,6 +888,24 @@ function listUploadAssignments(limit = 150) {
   return Number.isFinite(parsedLimit) && parsedLimit > 0 ? items.slice(0, parsedLimit) : items
 }
 
+function listUploadHistory(limit = 1000) {
+  return store.listUploadHistory(limit).map((item) => ({
+    id: item.uploadId,
+    fileName: item.originalName || 'unknown',
+    kind: item.kind || 'nbt',
+    sizeBytes: Number.isFinite(Number(item.sizeBytes)) ? Number(item.sizeBytes) : 0,
+    uploadedBy: item.uploadedBy || null,
+    uploadedAt: item.uploadedAt || null,
+    targetBotName: item.targetBotName || null,
+    targetHostLabel: item.targetHostLabel || null,
+    batchId: item.batchId || null,
+    queuedCount: Number.isFinite(Number(item.queuedCount)) ? Number(item.queuedCount) : 0,
+    extractedCount: Number.isFinite(Number(item.extractedCount)) ? Number(item.extractedCount) : 0,
+    extractedNames: Array.isArray(item.extractedNames) ? item.extractedNames.slice(0, 50) : [],
+    errors: Array.isArray(item.errors) ? item.errors.slice(0, 10) : []
+  }))
+}
+
 function getAssignmentDisplayStatus(item) {
   return String(item.queueStatus || item.status || '').trim().toLowerCase()
 }
@@ -1289,6 +1307,7 @@ function buildDashboardSnapshot(actor = null) {
   const events = timed('events', () => store.listEvents(150))
   const allAssignments = timed('assignments', () => listUploadAssignments(0))
   const assignments = actor?.permissions?.canOperate ? allAssignments.slice(0, 150) : []
+  const uploadHistory = actor?.permissions?.canOperate ? timed('uploadHistory', () => listUploadHistory(1000)) : []
   const queueSummary = timed('queueSummary', () => buildQueueSummary(allAssignments, nodes))
   const alerts = timed('alerts', () => buildDashboardAlerts(bots, nodes, allAssignments))
   const body = {
@@ -1299,7 +1318,8 @@ function buildDashboardSnapshot(actor = null) {
     events,
     alerts,
     queueSummary,
-    uploadAssignments: assignments
+    uploadAssignments: assignments,
+    uploadHistory
   }
   const totalMs = Date.now() - now
   if (SNAPSHOT_SLOW_STEP_MS > 0 && totalMs >= SNAPSHOT_SLOW_STEP_MS) {
@@ -1567,6 +1587,7 @@ async function route(req, res) {
       botCommandCount: botCommands.length,
       reset
     }, 'critical')
+    invalidateSnapshotCache()
     return sendJson(res, 201, {
       ok: true,
       reset,
@@ -1665,6 +1686,18 @@ async function route(req, res) {
     auditOperatorAction(actor, 'upload-nbt', `Queued direct node upload for ${fileName} to ${nbtUploadParams.hostLabel}.`, {
       hostLabel: nbtUploadParams.hostLabel, targetBotName: targetBotName || null, fileName, sizeBytes: buffer.length, commandId: command.commandId
     })
+    store.appendUploadHistory({
+      originalName: fileName,
+      kind: 'nbt',
+      sizeBytes: buffer.length,
+      sha256: crypto.createHash('sha256').update(buffer).digest('hex'),
+      uploadedBy: actor.username,
+      targetHostLabel: nbtUploadParams.hostLabel,
+      targetBotName: targetBotName || null,
+      queuedCount: 1,
+      queuedFileIds: [command.commandId]
+    })
+    invalidateSnapshotCache()
     const { contentBase64: _contentBase64, ...commandSummary } = command
     return sendJson(res, 201, { ok: true, queued: true, command: commandSummary, fileName, sizeBytes: buffer.length })
   }
@@ -1691,26 +1724,51 @@ async function route(req, res) {
     const batchId = crypto.randomUUID()
     const errors = []
     const queuedInputs = []
+    const uploadRecords = []
     for (const file of files) {
       const fileName = path.basename(String(file.filename || '').trim())
       const lower = fileName.toLowerCase()
+      const uploadRecord = {
+        originalName: fileName || 'unknown',
+        kind: lower.endsWith('.zip') ? 'zip' : 'nbt',
+        sizeBytes: Buffer.isBuffer(file.data) ? file.data.length : 0,
+        sha256: Buffer.isBuffer(file.data) ? crypto.createHash('sha256').update(file.data).digest('hex') : null,
+        uploadedBy: actor.username,
+        targetHostLabel: targetHostLabel || null,
+        targetBotName: targetBotName || null,
+        batchId,
+        queuedCount: 0,
+        extractedCount: 0,
+        queuedFileIds: [],
+        extractedNames: [],
+        errors: []
+      }
+      uploadRecords.push(uploadRecord)
       try {
         if (lower.endsWith('.nbt')) {
-          queuedInputs.push({ fileName, data: file.data, source: 'upload' })
+          queuedInputs.push({ fileName, data: file.data, source: 'upload', uploadRecord })
         } else if (lower.endsWith('.zip')) {
           const extracted = extractNbtFilesFromZip(file.data, fileName)
           if (!extracted.length) {
-            errors.push({ fileName, error: 'zip contained no .nbt files' })
+            const error = { fileName, error: 'zip contained no .nbt files' }
+            errors.push(error)
+            uploadRecord.errors.push(error)
           } else {
+            uploadRecord.extractedCount = extracted.length
+            uploadRecord.extractedNames = extracted.map((entry) => entry.fileName)
             for (const entry of extracted) {
-              queuedInputs.push({ fileName: entry.fileName, data: entry.data, source: `zip:${fileName}` })
+              queuedInputs.push({ fileName: entry.fileName, data: entry.data, source: `zip:${fileName}`, uploadRecord })
             }
           }
         } else {
-          errors.push({ fileName, error: 'only .nbt and .zip uploads are accepted' })
+          const error = { fileName, error: 'only .nbt and .zip uploads are accepted' }
+          errors.push(error)
+          uploadRecord.errors.push(error)
         }
       } catch (error) {
-        errors.push({ fileName, error: error?.message || String(error) })
+        const uploadError = { fileName, error: error?.message || String(error) }
+        errors.push(uploadError)
+        uploadRecord.errors.push(uploadError)
       }
     }
 
@@ -1730,14 +1788,25 @@ async function route(req, res) {
           maxAttempts
         })
         items.push(item)
+        if (entry.uploadRecord) entry.uploadRecord.queuedFileIds.push(item.fileId)
       } catch (error) {
-        errors.push({ fileName: entry.fileName, error: error?.message || String(error) })
+        const uploadError = { fileName: entry.fileName, error: error?.message || String(error) }
+        errors.push(uploadError)
+        if (entry.uploadRecord) entry.uploadRecord.errors.push(uploadError)
       }
     }
 
     if (!items.length) {
+      for (const record of uploadRecords) store.appendUploadHistory(record)
+      invalidateSnapshotCache()
       return sendJson(res, 400, { ok: false, error: 'no files were queued', errors })
     }
+
+    for (const record of uploadRecords) {
+      record.queuedCount = record.queuedFileIds.length
+      store.appendUploadHistory(record)
+    }
+    invalidateSnapshotCache()
 
     auditOperatorAction(actor, 'upload-queue', `Queued ${items.length} NBT file(s) in dashboard queue.`, {
       batchId,

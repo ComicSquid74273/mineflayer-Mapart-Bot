@@ -5292,7 +5292,12 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
     ? Math.max(0, toNumber(neededByBlock.get(blockName), haveBeforeRestock + requestedStackCount * stackSize))
     : Math.max(stackSize, haveBeforeRestock + (requestedStackCount * stackSize))
   const initialRoundedDeficit = Math.max(0, exactDesiredItemCount - haveBeforeRestock)
-  const desiredItemCount = initialRoundedDeficit > 0
+  const capacityBeforeRestock = inventoryCapacityForItem(bot, blockName)
+  const canTopUpExistingStack = neededByBlock instanceof Map &&
+    initialRoundedDeficit > 0 &&
+    initialRoundedDeficit <= capacityBeforeRestock &&
+    capacityBeforeRestock < stackSize
+  const desiredItemCount = initialRoundedDeficit > 0 && !canTopUpExistingStack
     ? haveBeforeRestock + Math.max(stackSize, Math.ceil(initialRoundedDeficit / stackSize) * stackSize)
     : exactDesiredItemCount
   const keepPlan = neededByBlock instanceof Map ? neededByBlock : new Map([[blockName, desiredItemCount]])
@@ -5306,17 +5311,21 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
   }
 
   const needsStackPull = desiredItemCount > haveBeforeRestock
-  const hasStackPullRoom = inventoryCapacityForItem(bot, blockName) >= stackSize
+  const hasStackPullRoom = capacityBeforeRestock >= stackSize || canTopUpExistingStack
   if (!inventoryHasRoomForItem(bot, blockName) || (needsStackPull && !hasStackPullRoom)) {
     const dumped = await dumpUnneededCarpets(bot, config, keepPlan)
-    if (!dumped && (!inventoryHasRoomForItem(bot, blockName) || inventoryCapacityForItem(bot, blockName) < stackSize)) {
+    const capacityAfterDump = inventoryCapacityForItem(bot, blockName)
+    const canTopUpAfterDump = neededByBlock instanceof Map &&
+      Math.max(0, exactDesiredItemCount - countInventoryItems(bot, blockName)) <= capacityAfterDump &&
+      capacityAfterDump < stackSize
+    if (!dumped && (!inventoryHasRoomForItem(bot, blockName) || (capacityAfterDump < stackSize && !canTopUpAfterDump))) {
       restockFailureCache.set(blockName, Date.now())
       if (config.errorHandling?.logErrors !== false) {
         console.log(`[RESTOCK-WARN] No full-stack inventory space for ${blockName} and nothing dumpable.`)
       }
       return false
     }
-    if (needsStackPull && inventoryCapacityForItem(bot, blockName) < stackSize) {
+    if (needsStackPull && inventoryCapacityForItem(bot, blockName) < stackSize && !canTopUpAfterDump) {
       restockFailureCache.set(blockName, Date.now())
       if (config.errorHandling?.logErrors !== false) {
         console.log(`[RESTOCK-WARN] Could not free a full inventory slot for ${blockName}.`)
@@ -5415,6 +5424,36 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         const partialCapacity = inventoryCapacityForItem(bot, blockName) - emptySlotCapacity
         const capacityBeforePull = emptySlotCapacity + Math.max(0, partialCapacity)
         const fullStackCapacityBeforePull = Math.floor(capacityBeforePull / stackSize) * stackSize
+        const canPartialTopUp = desiredItemCount === exactDesiredItemCount &&
+          exactStillNeedTotal > 0 &&
+          exactStillNeedTotal <= capacityBeforePull &&
+          fullStackCapacityBeforePull < stackSize
+        if (canPartialTopUp) {
+          const moved = await topUpPartialInventoryStackFromChest(
+            bot,
+            container,
+            itemId,
+            blockName,
+            exactStillNeedTotal,
+            stackSize,
+            syncWaitMs,
+            sameChestRetryPollMs
+          )
+          const haveAfterTopUp = countInventoryItems(bot, blockName)
+          if (config.errorHandling?.logErrors !== false) {
+            console.log(`[RESTOCK-PARTIAL] ${blockName}: have=${haveAtStart} needExact=${exactDesiredItemCount} moved=${moved} capacity=${capacityBeforePull}`)
+          }
+          try { container.close() } catch { }
+          container = null
+          if (haveAfterTopUp >= exactDesiredItemCount) {
+            restockFailureCache.delete(blockName)
+            unavailableMaterialCache.delete(blockName)
+            const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
+            if (inventoryItem) { try { await bot.equip(inventoryItem, 'hand') } catch { } }
+            return true
+          }
+          break
+        }
         const fullStackChestTotal = chestSlots
           .filter((entry) => toNumber(entry.count, 0) >= stackSize)
           .reduce((sum, entry) => sum + stackSize, 0)
@@ -5737,7 +5776,7 @@ async function waitInterruptiblyForRequiredMaterial(bot, config, waitMs, detail 
   }
 }
 
-async function waitForRequiredMaterialRestock(bot, config, blockName, requestedPulls = 1, neededByBlock = null, reason = 'required-material') {
+async function waitForRequiredMaterialRestock(bot, config, blockName, requestedPulls = 1, neededByBlock = null, reason = 'required-material', options = {}) {
   assertRuntimeContinue(bot, config, 'waiting-material-restock')
   const advanced = config.advanced || {}
   if (!shouldWaitForRequiredMaterialRestock(config)) {
@@ -5754,6 +5793,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
   const timeoutMs = Math.max(0, toNumber(advanced.waitForRequiredMaterialTimeoutMs, 0))
   const startedAt = Date.now()
   const targetCount = getRequiredMaterialTargetCount(bot, blockName, requestedPulls, neededByBlock)
+  const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
   let attempt = 0
 
   while (true) {
@@ -5774,6 +5814,14 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
       restockFailureCache.delete(blockName)
       unavailableMaterialCache.delete(blockName)
       return true
+    }
+
+    const capacityAfter = inventoryCapacityForItem(bot, blockName)
+    if (capacityAfter < stackSize) {
+      if (options.logCapacityBlocked !== false) {
+        console.log(`[REQUIRED-MATERIAL-WAIT-CAPACITY] ${blockName} blocked by inventory capacity; have=${haveAfter} target=${targetCount} capacity=${capacityAfter}/${stackSize} reason=${reason}.`)
+      }
+      return false
     }
 
     if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
@@ -6900,6 +6948,20 @@ function findEmptyWindowInventorySlot(window) {
   return -1
 }
 
+function findPartialWindowInventorySlot(window, itemId, itemName, stackSize) {
+  const slots = Array.isArray(window?.slots) ? window.slots : []
+  const start = Number.isFinite(window?.inventoryStart) ? window.inventoryStart : 0
+  const end = Number.isFinite(window?.inventoryEnd) ? window.inventoryEnd : slots.length - 1
+  for (let i = start; i <= end && i < slots.length; i += 1) {
+    const stack = slots[i]
+    if (!stack || toNumber(stack.count, 0) <= 0) continue
+    if ((itemId && stack.type === itemId) || (itemName && stack.name === itemName)) {
+      if (toNumber(stack.count, 0) < stackSize) return i
+    }
+  }
+  return -1
+}
+
 async function takeWindowOutputToInventoryConfirmed(bot, window, outputSlot, itemName, beforeCount, timeoutMs = 3000, pollMs = 100, clickTicks = 4) {
   const targetSlot = findEmptyWindowInventorySlot(window)
   if (targetSlot < 0) throw new Error(`No empty inventory slot available for cartography output ${itemName}.`)
@@ -7068,6 +7130,34 @@ async function takeOneChestItemToInventory(bot, window, itemId, itemName, timeou
   ), adjustedTimeoutMs, pollMs)
   const invCount = await waitForWindowInventoryCount(window, itemId, itemName, beforeTarget + 1, adjustedTimeoutMs, pollMs)
   return Boolean(targetReady) || invCount > beforeTarget
+}
+
+async function topUpPartialInventoryStackFromChest(bot, window, itemId, itemName, amountNeeded, stackSize, timeoutMs = 3000, pollMs = 100) {
+  const targetSlot = findPartialWindowInventorySlot(window, itemId, itemName, stackSize)
+  if (targetSlot < 0) return 0
+
+  const targetStack = window.slots?.[targetSlot]
+  const targetRoom = Math.max(0, stackSize - toNumber(targetStack?.count, 0))
+  const transferTarget = Math.min(Math.max(1, toNumber(amountNeeded, 1)), targetRoom)
+  if (transferTarget <= 0) return 0
+
+  const source = getChestWindowSlots(window)
+    .filter((entry) => entry.stack?.type === itemId || entry.stack?.name === itemName)
+    .filter((entry) => toNumber(entry.stack?.count, 0) >= transferTarget)
+    .sort((a, b) => toNumber(a.stack?.count, 0) - toNumber(b.stack?.count, 0))[0]
+  if (!source) return 0
+
+  const adjustedTimeoutMs = getLatencyAdjustedTimeoutMs(bot, bot.__nervConfig, timeoutMs, timeoutMs)
+  const beforeTarget = countWindowInventoryItems(window, itemId, itemName)
+  await safeWindowClick(bot, window, source.slot, 0, 0, { precondition: 'any' })
+  await delay(pollMs)
+  await safeWindowClick(bot, window, targetSlot, 0, 0, { precondition: 'any' })
+  await delay(pollMs)
+  await safeWindowClick(bot, window, source.slot, 0, 0, { precondition: 'any' })
+
+  const expected = beforeTarget + transferTarget
+  const invCount = await waitForWindowInventoryCount(window, itemId, itemName, expected, adjustedTimeoutMs, pollMs)
+  return Math.max(0, invCount - beforeTarget)
 }
 
 async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stackSize, maxStacks = 8, options = {}) {
@@ -9012,27 +9102,32 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
 
   const maxIterations = Math.max(20, toNumber(advanced.nervInventoryMaxPlanIterations, 80))
   const stableRequired = getNervRequiredItems(bot, config, planningTargets)
-  const stableNeededByBlock = new Map(stableRequired.requiredItems)
-  const restockBuffer = Math.max(0, toNumber(advanced.restockBufferItems, 10))
-  if (restockBuffer > 0) {
-    for (const [blockName, count] of stableNeededByBlock.entries()) {
-      stableNeededByBlock.set(blockName, count + restockBuffer)
-    }
-  }
+  const stableBaseNeededByBlock = new Map(stableRequired.requiredItems)
+  const configuredRestockBuffer = Math.max(0, toNumber(advanced.restockBufferItems, 10))
 
   // Preserve materials from upcoming windows: mark them as required for however much we
   // currently have in inventory so getNervInventoryInformation won't flag those slots as
   // dump candidates. This prevents pre-traversal dumps from discarding items that are
   // needed in the very next column batch.
   const preserveMaterials = options.preserveMaterials
-  if (Array.isArray(preserveMaterials)) {
-    for (const mat of preserveMaterials) {
-      if (!stableNeededByBlock.has(mat)) {
-        const haveNow = countInventoryItems(bot, mat)
-        if (haveNow > 0) stableNeededByBlock.set(mat, haveNow)
+  let activeRestockBuffer = configuredRestockBuffer
+  const buildStableNeededByBlock = () => {
+    const needed = new Map(stableBaseNeededByBlock)
+    if (activeRestockBuffer > 0) {
+      for (const [blockName, count] of needed.entries()) {
+        needed.set(blockName, count + activeRestockBuffer)
       }
     }
+    if (Array.isArray(preserveMaterials)) {
+      for (const mat of preserveMaterials) {
+        if (needed.has(mat)) continue
+        const haveNow = countInventoryItems(bot, mat)
+        if (haveNow > 0) needed.set(mat, haveNow)
+      }
+    }
+    return needed
   }
+  let stableNeededByBlock = buildStableNeededByBlock()
 
   if (config.advanced?.debugPrints) {
     const windowLabel = planning.cols?.length
@@ -9134,6 +9229,21 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
       const remainingCapacity = inventoryCapacityForItem(bot, closestItem.blockName)
       const retryPlan = buildNervInventoryPlanFromRequired(bot, config, planningTargets, stableNeededByBlock, stableRequired)
 
+      if (activeRestockBuffer > 0 && remainingCapacity < Math.max(1, toNumber(bot.registry.itemsByName[closestItem.blockName]?.stackSize, 64))) {
+        const baseNeeded = Math.max(0, toNumber(stableBaseNeededByBlock.get(closestItem.blockName), 0))
+        const maxCountWithoutExtraSlot = haveAfter + remainingCapacity
+        const maxBufferWithoutExtraSlot = Math.max(0, maxCountWithoutExtraSlot - baseNeeded)
+        const nextBuffer = Math.max(0, Math.min(activeRestockBuffer - 1, maxBufferWithoutExtraSlot))
+        if (nextBuffer < activeRestockBuffer) {
+          console.log(`[NERV-RESTOCK-BUFFER] ${closestItem.blockName} capacity blocked; capping restockBufferItems ${activeRestockBuffer}->${nextBuffer} for this inventory window to avoid an extra slot. have=${haveAfter} baseNeed=${baseNeeded} bufferedNeed=${closestItem.needed} capacity=${remainingCapacity}`)
+          activeRestockBuffer = nextBuffer
+          stableNeededByBlock = buildStableNeededByBlock()
+          didRestockThisWindow = false
+          await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+          continue
+        }
+      }
+
       if (advanced.dumpUnneededBeforeRefill !== false && retryPlan.dumpSlots.length > 0 && stillNeed > 0) {
         restockFailureCache.delete(closestItem.blockName)
         unavailableMaterialCache.delete(closestItem.blockName)
@@ -9151,6 +9261,11 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
           return false
         }
         continue
+      }
+
+      if (stillNeed > 0 && remainingCapacity < Math.max(1, toNumber(bot.registry.itemsByName[closestItem.blockName]?.stackSize, 64))) {
+        console.log(`[NERV-RESTOCK-WARN] ${closestItem.blockName} still needs ${stillNeed}, but only partial-stack capacity ${remainingCapacity} is available and no buffer/dump recovery applied. Stopping refill cycle.`)
+        return false
       }
 
       if (stillNeed > remainingCapacity) {
