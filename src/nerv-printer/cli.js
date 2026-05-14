@@ -838,10 +838,11 @@ function mapPostPrintStatusDetail(step) {
   }
 }
 
-function createDashboardRequest(urlValue, method, body = null) {
+function createDashboardRequest(urlValue, method, body = null, options = {}) {
   const target = new URL(urlValue)
   const transport = target.protocol === 'https:' ? https : http
   const payload = body == null ? null : Buffer.from(JSON.stringify(body), 'utf8')
+  const timeoutMs = Math.max(1000, toNumber(options.timeoutMs, 10000))
   const headers = {
     accept: 'application/json'
   }
@@ -858,7 +859,7 @@ function createDashboardRequest(urlValue, method, body = null) {
       path: `${target.pathname}${target.search}`,
       method,
       headers,
-      timeout: 10000
+      timeout: timeoutMs
     }, (res) => {
       const chunks = []
       res.on('data', (chunk) => chunks.push(chunk))
@@ -1514,19 +1515,25 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   }
 
   async function reportNodeLogDownload(commandId, fileName, contentBase64) {
-    await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/logs/${encodeURIComponent(commandId)}/result`, 'POST', {
+    const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/logs/${encodeURIComponent(commandId)}/result`, 'POST', {
       botName,
       fileName,
       contentBase64
-    })
+    }, { timeoutMs: 120000 })
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(response.body?.error || response.text || `dashboard log upload failed with HTTP ${response.statusCode}`)
+    }
   }
 
   async function reportNodeConfigDownload(commandId, fileName, contentBase64) {
-    await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/config/${encodeURIComponent(commandId)}/result`, 'POST', {
+    const response = await createDashboardRequest(`${dashboard.serviceUrl}/api/nodes/${encodeURIComponent(dashboard.hostLabel)}/config/${encodeURIComponent(commandId)}/result`, 'POST', {
       botName,
       fileName,
       contentBase64
-    })
+    }, { timeoutMs: 120000 })
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(response.body?.error || response.text || `dashboard config upload failed with HTTP ${response.statusCode}`)
+    }
   }
 
   function resolveNodeNbtPath(fileName) {

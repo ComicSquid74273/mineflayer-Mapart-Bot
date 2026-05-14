@@ -306,6 +306,48 @@ test('paused current run stays held and stops adding active time', () => {
   assert.ok(Number(activeWhilePaused?.elapsedMs || 0) >= 0)
 })
 
+test('node current run survives process restart without counting restart gap', () => {
+  const { dir, store } = makeStore()
+  const startedAt = new Date(Date.now() - 180 * 1000).toISOString()
+  const firstSeenAt = new Date(Date.now() - 160 * 1000).toISOString()
+
+  store.upsertBotStatus({
+    botName: 'restart-run-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'printing',
+    currentNbt: 'restart-run.nbt',
+    currentNbtStartedAt: startedAt,
+    progress: { percent: 25 },
+    lastStatusAt: firstSeenAt
+  })
+
+  const statsPath = path.join(dir, 'node-stats.json')
+  const stats = JSON.parse(fs.readFileSync(statsPath, 'utf8'))
+  stats['node-a'].activeRun.segmentStartedAt = new Date(Date.now() - 180 * 1000).toISOString()
+  stats['node-a'].activeRun.segmentLastSeenAt = new Date(Date.now() - 150 * 1000).toISOString()
+  stats['node-a'].activeRun.accumulatedActiveMs = 30000
+  fs.writeFileSync(statsPath, JSON.stringify(stats), 'utf8')
+  store.invalidateDataFileCache([statsPath])
+
+  const restartedStore = createStore(dir)
+  restartedStore.upsertBotStatus({
+    botName: 'restart-run-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'printing',
+    runtimeInstanceId: 'process-b',
+    currentNbt: 'restart-run.nbt',
+    currentNbtStartedAt: new Date().toISOString(),
+    progress: { percent: 30 }
+  })
+
+  const activeRun = restartedStore.listNodes().find((item) => item.hostLabel === 'node-a')?.timing?.activeRun
+  assert.equal(activeRun?.fileName, 'restart-run.nbt')
+  assert.ok(Number(activeRun?.accumulatedActiveMs || 0) < 120000)
+  assert.ok(Number(activeRun?.elapsedMs || 0) < 120000)
+})
+
 test('reset everything preserves total printed map count', () => {
   const { dir, store } = makeStore()
   const now = new Date().toISOString()

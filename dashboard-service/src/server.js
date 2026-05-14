@@ -27,6 +27,7 @@ const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_
 const RUNTIME_DURATION_ALERT_MS = Math.max(60 * 1000, Number(process.env.DASHBOARD_RUNTIME_DURATION_ALERT_MS || 30 * 60 * 1000))
 const MAX_REQUEST_BODY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_REQUEST_BYTES || 64 * 1024 * 1024))
 const MAX_UPLOAD_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_UPLOAD_BYTES || 512 * 1024 * 1024))
+const MAX_NODE_LOG_RESULT_BYTES = Math.max(MAX_REQUEST_BODY_BYTES, Number(process.env.DASHBOARD_MAX_NODE_LOG_RESULT_BYTES || 256 * 1024 * 1024))
 const MAX_ZIP_ENTRY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_ZIP_ENTRY_BYTES || 64 * 1024 * 1024))
 const MAX_ZIP_TOTAL_BYTES = Math.max(MAX_ZIP_ENTRY_BYTES, Number(process.env.DASHBOARD_MAX_ZIP_TOTAL_BYTES || MAX_UPLOAD_BYTES))
 const MAX_ZIP_ENTRIES = Math.max(1, Number(process.env.DASHBOARD_MAX_ZIP_ENTRIES || 1000))
@@ -1337,6 +1338,14 @@ async function waitForNodeLogDownload(store, commandId, timeoutMs = 15000) {
   while (Date.now() - startedAt < timeoutMs) {
     const ready = store.getNodeLogDownload(commandId)
     if (ready) return ready
+    const command = store.getCommand(commandId)
+    const status = String(command?.status || '').trim().toLowerCase()
+    if (status === 'failed') {
+      return {
+        failed: true,
+        error: command?.resultMessage || 'node reported log download failure'
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   return null
@@ -1993,7 +2002,7 @@ async function route(req, res) {
   params = matchPath(pathname, '/api/nodes/:hostLabel/logs/:commandId/result')
   if (params) {
     if (req.method !== 'POST') return methodNotAllowed(res)
-    const body = await readBody(req)
+    const body = await readBody(req, { maxBytes: MAX_NODE_LOG_RESULT_BYTES })
     const fileName = path.basename(String(body?.fileName || '').trim())
     const contentBase64 = String(body?.contentBase64 || '')
     if (!fileName || !fileName.toLowerCase().endsWith('.log')) return badRequest(res, 'fileName must end in .log')
@@ -2064,6 +2073,9 @@ async function route(req, res) {
       requestedBy: actor?.username || 'unknown'
     })
     const downloaded = await waitForNodeLogDownload(store, command.commandId, NODE_DOWNLOAD_TIMEOUT_MS)
+    if (downloaded?.failed) {
+      return sendJson(res, 502, { error: downloaded.error || `Node failed to provide log ${fileName}` })
+    }
     if (!downloaded?.filePath || !fs.existsSync(downloaded.filePath)) {
       return sendJson(res, 504, { error: `Timed out waiting for node log ${fileName} from ${params.hostLabel}` })
     }
@@ -2090,6 +2102,9 @@ async function route(req, res) {
       requestedBy: actor?.username || 'unknown'
     })
     const downloaded = await waitForNodeLogDownload(store, command.commandId, NODE_DOWNLOAD_TIMEOUT_MS)
+    if (downloaded?.failed) {
+      return sendJson(res, 502, { error: downloaded.error || `Node failed to provide config ${fileName}` })
+    }
     if (!downloaded?.filePath || !fs.existsSync(downloaded.filePath)) {
       return sendJson(res, 504, { error: `Timed out waiting for node config ${fileName} from ${params.hostLabel}` })
     }

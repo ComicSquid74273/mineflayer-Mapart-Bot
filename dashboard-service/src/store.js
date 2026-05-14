@@ -427,6 +427,13 @@ function createStore(baseDir) {
     })
   }
 
+  function shouldSplitTimingSegment(run, nextCountedAt) {
+    const lastSeenMs = toTimestamp(run?.segmentLastSeenAt)
+    const nextMs = toTimestamp(nextCountedAt)
+    if (!lastSeenMs || !nextMs || nextMs <= lastSeenMs) return false
+    return (nextMs - lastSeenMs) > Math.max(BOT_FRESH_MS, NODE_TIMING_RECONCILE_MS * 2)
+  }
+
   function buildHostActivitySnapshot(hostLabel, botMap) {
     const normalizedHost = String(hostLabel || '').trim()
     const bots = Object.values(botMap || {}).filter((bot) => String(bot?.hostLabel || '').trim() === normalizedHost)
@@ -595,9 +602,13 @@ function createStore(baseDir) {
           maxProgressPercent: Math.max(nextRecord.activeRun.maxProgressPercent || 0, snapshotActiveRun.maxProgressPercent || 0)
         })
         if (snapshotActiveRun.activeBotCount > 0) {
+          const nextCountedAt = snapshotActiveRun.countedStartedAtCandidate || snapshotActiveRun.countedLastSeenAt || snapshot.lastHostStatusAt || nowIso()
+          if (activeRun.segmentStartedAt && shouldSplitTimingSegment(activeRun, nextCountedAt)) {
+            activeRun = closeTimingSegment(activeRun, activeRun.segmentLastSeenAt || nextRecord.activeRun.segmentLastSeenAt || nextRecord.activeRun.lastSeenAt || snapshot.lastHostStatusAt || nowIso())
+          }
           activeRun = sanitizeTimingRun({
             ...activeRun,
-            segmentStartedAt: activeRun.segmentStartedAt || snapshotActiveRun.countedStartedAtCandidate || snapshot.lastHostStatusAt || nowIso(),
+            segmentStartedAt: activeRun.segmentStartedAt || nextCountedAt,
             segmentLastSeenAt: snapshotActiveRun.countedLastSeenAt || activeRun.segmentLastSeenAt || snapshot.lastHostStatusAt || nowIso()
           })
         } else if (activeRun.segmentStartedAt) {
