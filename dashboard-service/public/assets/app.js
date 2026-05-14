@@ -1132,8 +1132,7 @@ function renderBots() {
     const nodeBots = (botsByNode.get(node.hostLabel) || []).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
     const nodeHasActiveNbt = nodeBots.some((bot) => hasResettableCurrentNbt(bot))
     const configFiles = Array.isArray(node.configFiles) ? node.configFiles : []
-    const configText = configFiles.length ? ` | Config ${configFiles.join(', ')}` : ''
-    const editConfigName = configFiles.length === 1 ? configFiles[0] : ''
+    const configText = ''
     return `
       <article id="${escapeHtml(nodeAnchorId(node.hostLabel, index))}" class="fleet-node-group">
         <div class="fleet-node-head">
@@ -1143,7 +1142,6 @@ function renderBots() {
           </div>
           <div class="fleet-node-controls">
             <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
-            <button class="ghost-button small-button" type="button" data-action="edit-node-config" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" data-config-name="${escapeHtml(editConfigName)}" title="${escapeHtml(editConfigName ? `Edit ${editConfigName}` : 'View config files')}">Edit Config</button>
             <button class="accent-button small-button" type="button" data-action="start-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Start Node</button>
             <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Pause Node</button>
             <button class="ghost-button small-button" type="button" data-action="home-platform-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}" title="Send /home platform to every bot on this node">Home Platform</button>
@@ -1639,21 +1637,21 @@ function renderLogs() {
 
   const hostLogsMarkup = state.logs.length
     ? `
-      <section>
-        <div class="file-row" style="margin-bottom:10px;">
+      <section class="log-download-group">
+        <div class="log-download-group-head">
           <div>
             <strong>Dashboard host</strong>
             <p class="file-meta">${escapeHtml(state.logs.length)} log file(s)</p>
           </div>
         </div>
         ${state.logs.map((item) => `
-          <article class="file-item">
+          <article class="file-item compact-log-item">
             <div class="file-row">
               <div>
                 <strong>${escapeHtml(item.fileName)}</strong>
                 <p class="file-meta">Node: Dashboard host | ${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}</p>
               </div>
-              <div style="display:flex;gap:8px;flex-shrink:0;">
+              <div class="file-actions">
                 <button class="ghost-button small-button" type="button" data-action="download-log" data-permission-needed="canViewLogs" data-file-name="${escapeHtml(item.fileName)}">Download</button>
                 <button class="danger-button small-button" type="button" data-action="delete-log" data-permission-needed="canManageOperators" data-file-name="${escapeHtml(item.fileName)}">Delete</button>
               </div>
@@ -1672,8 +1670,8 @@ function renderLogs() {
     `
 
   const nodeLogsMarkup = nodeLogGroups.map((group) => `
-    <section style="margin-top:14px;">
-      <div class="file-row" style="margin-bottom:10px;">
+    <section class="log-download-group">
+      <div class="log-download-group-head">
         <div>
           <strong>Node: ${escapeHtml(group.hostLabel)}</strong>
           <p class="file-meta">${escapeHtml(group.items.length)} log file(s)${group.botNames.length ? ` | Bots: ${escapeHtml(group.botNames.join(', '))}` : ''}</p>
@@ -1684,13 +1682,13 @@ function renderLogs() {
           ? ` | Reported by: ${item.reportedByBotNames.join(', ')}`
           : ''
         return `
-          <article class="file-item">
+          <article class="file-item compact-log-item">
             <div class="file-row">
               <div>
                 <strong>${escapeHtml(item.fileName)}</strong>
                 <p class="file-meta">Node: ${escapeHtml(group.hostLabel)} | ${escapeHtml(formatFileSize(item.sizeBytes))} | ${escapeHtml(formatTime(item.modifiedAt))}${escapeHtml(reporters)}</p>
               </div>
-              <div style="display:flex;gap:8px;flex-shrink:0;">
+              <div class="file-actions">
                 <button class="ghost-button small-button" type="button" data-action="download-node-log" data-permission-needed="canViewLogs" data-host-label="${escapeHtml(group.hostLabel)}" data-file-name="${escapeHtml(item.fileName)}">Download</button>
               </div>
             </div>
@@ -2064,9 +2062,6 @@ async function refreshData(options = {}) {
     const operators = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/operators', { requireAuth: true })
       : { items: [] }
-    const configs = state.auth.verified && hasPermission('canManageOperators')
-      ? await requestJson('/api/dashboard/config', { requireAuth: true })
-      : { files: [] }
     const dataFiles = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/data', { requireAuth: true })
       : { files: [] }
@@ -2074,7 +2069,7 @@ async function refreshData(options = {}) {
     state.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : []
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
-    state.configs = Array.isArray(configs.files) ? configs.files : []
+    state.configs = []
     state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
     state.uploadAssignments = Array.isArray(snapshot.uploadAssignments) ? snapshot.uploadAssignments : []
     state.uploadHistory = Array.isArray(snapshot.uploadHistory) ? snapshot.uploadHistory : []
@@ -2102,7 +2097,6 @@ async function refreshData(options = {}) {
     renderNodes()
     renderLogs()
     renderOperators()
-    renderConfigs()
     renderDataFiles()
     renderAuthState()
   } catch (error) {

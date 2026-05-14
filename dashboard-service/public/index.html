@@ -191,29 +191,11 @@
         <div class="panel-header">
           <div>
             <p class="panel-kicker">Admin</p>
-            <h2>Bot Config</h2>
+            <h2>Data Files</h2>
           </div>
           <button id="clearDataButton" class="danger-button small-button" type="button" data-permission-needed="canManageOperators" title="Delete all data JSON files (preserves operators.json)">Clear Data Folder</button>
         </div>
-        <div id="configFilesList" class="file-list"></div>
-        <div class="subsection-header">
-          <div>
-            <p class="panel-kicker">Admin</p>
-            <h3>Data Files</h3>
-          </div>
-        </div>
         <div id="dataFilesList" class="file-list"></div>
-        <div id="configEditorSection" class="hidden">
-          <div class="panel-header" style="margin-top:12px;">
-            <p class="panel-kicker" id="configEditorTitle">Editing</p>
-            <button id="configEditorClose" class="ghost-button small-button" type="button">✕ Close</button>
-          </div>
-          <textarea id="configEditorTextarea" class="config-editor-textarea" rows="24" spellcheck="false"></textarea>
-          <div style="display:flex;gap:10px;align-items:center;margin-top:8px;">
-            <button id="configEditorSave" class="accent-button small-button" type="button" data-permission-needed="canManageOperators">Save</button>
-            <span id="configEditorStatus" class="hint"></span>
-          </div>
-        </div>
       </section>
 
       <section class="panel panel-wide">
@@ -238,18 +220,21 @@
       </section>
 
       <section class="panel panel-wide">
-        <div class="panel-header">
-          <div>
-            <p class="panel-kicker">Diagnostics</p>
-            <h2>Log Downloads</h2>
+        <details class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Diagnostics</p>
+              <h2>Log Downloads</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div id="logsList" class="file-list log-download-list collapsible-content">
+            <article class="empty-card">
+              <h3>Login required</h3>
+              <p>Authenticate as a viewer, operator, or admin to list and download log files.</p>
+            </article>
           </div>
-        </div>
-        <div id="logsList" class="file-list">
-          <article class="empty-card">
-            <h3>Login required</h3>
-            <p>Authenticate as a viewer, operator, or admin to list and download log files.</p>
-          </article>
-        </div>
+        </details>
       </section>
 
       <section class="panel panel-wide">

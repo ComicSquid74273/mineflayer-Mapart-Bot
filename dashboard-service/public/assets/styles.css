@@ -852,6 +852,40 @@ button:disabled {
   scrollbar-width: thin;
 }
 
+.log-download-list {
+  gap: 14px;
+}
+
+.log-download-group {
+  display: grid;
+  gap: 8px;
+}
+
+.log-download-group + .log-download-group {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.log-download-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.compact-log-item {
+  padding: 10px 12px;
+}
+
+.compact-log-item .file-row {
+  align-items: center;
+}
+
+.compact-log-item .file-meta {
+  margin-top: 2px;
+}
+
 .file-item,
 .log-row,
 .empty-card {
