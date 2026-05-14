@@ -199,3 +199,69 @@ test('long runtime status does not queue reconnect commands', () => {
   const commands = store.listCommands((item) => item.targetBotName === 'runtime-bot' && item.commandType === 'reconnect')
   assert.equal(commands.length, 0)
 })
+
+test('bot reconnect count does not reset when a restarted process reports zero', () => {
+  const { store } = makeStore()
+
+  store.upsertBotStatus({
+    botName: 'reconnect-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'printing',
+    reconnectCount: 4,
+    reconnectState: 'idle'
+  })
+
+  const refreshed = store.upsertBotStatus({
+    botName: 'reconnect-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'idle',
+    reconnectCount: 0,
+    reconnectState: 'idle'
+  })
+
+  assert.equal(refreshed.reconnectCount, 4)
+  const node = store.listNodes().find((item) => item.hostLabel === 'node-a')
+  assert.equal(node.operationalStats.reconnectCount, 4)
+})
+
+test('reset everything preserves total printed map count', () => {
+  const { dir, store } = makeStore()
+  const now = new Date().toISOString()
+  const botsFile = path.join(dir, 'bots.json')
+  const inventoryFile = path.join(dir, 'node-inventory.json')
+
+  fs.writeFileSync(botsFile, JSON.stringify({
+    'legacy-bot': {
+      botName: 'legacy-bot',
+      hostLabel: 'node-a',
+      online: true,
+      phase: 'idle',
+      serverStatusAt: now,
+      finishedMapCount: 7,
+      finishedMapFiles: [{ fileName: 'old-map.nbt' }],
+      nodeInventoryAt: now
+    }
+  }), 'utf8')
+  fs.writeFileSync(inventoryFile, JSON.stringify({
+    'legacy-bot': {
+      botName: 'legacy-bot',
+      hostLabel: 'node-a',
+      finishedMapCount: 7,
+      finishedMapFiles: [{ fileName: 'old-map.nbt' }],
+      nodeInventoryAt: now
+    }
+  }), 'utf8')
+  store.invalidateDataFileCache([botsFile, inventoryFile])
+
+  assert.equal(store.listNodes()[0].finishedMapCount, 7)
+
+  const reset = store.resetDashboardForFreshStart()
+  assert.equal(reset.clearedNodeInventories, 1)
+  assert.equal(reset.clearedBotInventoryFields, 1)
+  const node = store.listNodes()[0]
+  assert.equal(node.finishedMapCount, 0)
+  assert.equal(node.totalCompletedMapCount, 7)
+  assert.equal(node.timing.totalCompletedMaps, 7)
+})

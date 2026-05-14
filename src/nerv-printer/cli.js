@@ -1175,6 +1175,22 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       const forceAfterMs = Math.max(0, toNumber(config.advanced?.pauseParkForceAfterMs, 10000))
       const requestedAt = Date.now()
       while (isBotSessionLive(bot) && bot.__nervSessionActive !== false && isOperatorPaused(config)) {
+        if (!isBotOnOrAroundPlatform(bot, config, 'pause-pending-platform')) {
+          state.phase = 'paused'
+          state.statusDetail = 'waiting-platform-to-pause'
+          noteActivity()
+          bot.__nervPauseParkingInProgress = true
+          try {
+            console.log(`[CONTROL] Pause requested; waiting for platform before parking. current=${formatBotPosition(bot)}`)
+            await waitForPlatformReady(bot, config, 'pause-wait-platform')
+          } finally {
+            bot.__nervPauseParkingInProgress = false
+          }
+          if (!isBotOnOrAroundPlatform(bot, config, 'pause-pending-platform-after-wait')) {
+            await delay(retryMs)
+            continue
+          }
+        }
         const runActive = runtimeControl?.isRunActive?.() === true
         if (runActive && Date.now() - requestedAt < forceAfterMs) {
           state.phase = 'paused'
@@ -1231,7 +1247,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     const locationDetail = mapDashboardLocationDetail(runtimeLocation)
     const rawStatusDetail = state.statusDetail || (phase === 'idle' ? 'idle' : phase)
     let statusDetail = operatorPaused
-      ? (String(rawStatusDetail || '').includes('parking-at-cartography') ? 'parking-at-cartography' : 'paused')
+      ? (['parking-at-cartography', 'waiting-platform-to-pause'].includes(String(rawStatusDetail || '').trim()) ? String(rawStatusDetail).trim() : 'paused')
       : rawStatusDetail
     if (hasActiveNbtRun && phase !== 'waiting-spawn' && /^spawn-\d+$/i.test(String(statusDetail || '').trim())) {
       statusDetail = phase
@@ -7185,8 +7201,8 @@ async function parkAtCartographyAccessForPause(bot, config, dashboardRuntime = n
   try {
     dashboardRuntime?.setPhase?.('paused', 'parking-at-cartography')
     closeCurrentWindowIfOpen(bot, reason)
-    await waitForPlatformReady(bot, config, `${reason}-platform-ready`)
     bot.__nervPauseParkingInProgress = true
+    await waitForPlatformReady(bot, config, `${reason}-platform-ready`)
     const goalPos = accessPosition || cartographyConfig.position
     const readyDistance = Math.max(0.35, accessRange)
     assertLivePlatformReady(bot, config, `${reason}-cartography-access:pre-goal`)
@@ -15557,6 +15573,14 @@ function isPositionInsidePlatformBounds(pos, config) {
   if (!bounds) return true
   if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.z)) return false
   return pos.x >= bounds.minX && pos.x <= bounds.maxX && pos.z >= bounds.minZ && pos.z <= bounds.maxZ
+}
+
+function isBotOnOrAroundPlatform(bot, config, reason = 'platform-ready-check') {
+  if (getPlatformBounds(config) == null) return true
+  const runtime = classifyRuntimePosition(bot, config, reason)
+  if (runtime?.classification?.platform === true) return true
+  const pos = bot?.entity?.position
+  return isPositionUsable(pos) && isPositionInsidePlatformBounds(pos, config)
 }
 
 function getPlatformSeedPosition(config) {

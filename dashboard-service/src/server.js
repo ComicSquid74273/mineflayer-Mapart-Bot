@@ -1059,7 +1059,13 @@ function buildQueueSummary(assignments, nodes = []) {
     }
   }
   summary.nodeFinishedMapCount = (Array.isArray(nodes) ? nodes : []).reduce((count, node) => {
-    return count + Math.max(0, Number(node.finishedMapCount || 0) || 0)
+    const currentFinished = Math.max(0, Number(node.finishedMapCount || 0) || 0)
+    const lifetimeCompleted = Math.max(
+      currentFinished,
+      Number(node.totalCompletedMapCount || 0) || 0,
+      Number(node?.timing?.totalCompletedMaps || 0) || 0
+    )
+    return count + lifetimeCompleted
   }, 0)
   summary.combinedRemaining = summary.remaining + summary.localNodeFiles
   summary.combinedCompleted = Math.max(summary.completed, summary.nodeFinishedMapCount)

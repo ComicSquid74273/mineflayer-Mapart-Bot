@@ -294,6 +294,13 @@ function isBotPrinting(bot) {
   return displayBotPhase(bot) === 'printing'
 }
 
+function isBotPaused(bot) {
+  const phase = String(bot?.phase || '').trim().toLowerCase()
+  const detail = String(bot?.statusDetail || '').trim().toLowerCase()
+  const active = String(bot?.activeState || '').trim().toLowerCase()
+  return bot?.online && (phase === 'paused' || detail === 'paused' || detail === 'parking-at-cartography' || detail === 'waiting-platform-to-pause' || active === 'paused')
+}
+
 function formatBotProgress(bot) {
   const progress = bot?.progress || null
   const percent = Number(progress?.percent)
@@ -744,13 +751,15 @@ function renderFleetJump() {
         const hostLabel = String(node.hostLabel || `Node-${index + 1}`).trim() || `Node-${index + 1}`
         const nodeBots = state.bots.filter((bot) => String(bot.hostLabel || '').trim() === hostLabel)
         const printing = nodeBots.filter((bot) => isBotPrinting(bot)).length
+        const paused = nodeBots.filter((bot) => isBotPaused(bot)).length
         const stale = nodeBots.filter((bot) => bot.online && bot.activeState === 'stale').length
-        const idle = nodeBots.filter((bot) => bot.online && bot.idle).length
+        const idle = nodeBots.filter((bot) => bot.online && bot.idle && !isBotPaused(bot)).length
         const shortcutLabel = nodeShortcutLabel(hostLabel, index)
         const statusText = onlineCount <= 0 ? 'Offline'
           : (printing > 0 ? `${printing} printing`
-            : (stale > 0 ? `${stale} stale`
-              : (idle > 0 ? `${idle} idle` : 'Online')))
+            : (paused > 0 ? `${paused} paused`
+              : (stale > 0 ? `${stale} stale`
+                : (idle > 0 ? `${idle} idle` : 'Online'))))
         const onlineClass = onlineCount > 0 ? 'fleet-jump-online' : 'fleet-jump-offline'
         return `
           <button class="fleet-jump-button ${onlineClass}" type="button" data-action="jump-node" data-node-target="${escapeHtml(nodeAnchorId(hostLabel, index))}" title="${escapeHtml(`${hostLabel}: ${onlineCount}/${botCount} online, ${statusText}`)}" aria-label="${escapeHtml(`Jump to ${hostLabel}`)}">
@@ -769,16 +778,18 @@ function renderSummary() {
     nodeCount: state.nodes.length,
     online: state.bots.filter((item) => item.online).length,
     printing: state.bots.filter((item) => isBotPrinting(item)).length,
+    paused: state.bots.filter((item) => isBotPaused(item)).length,
     stale: state.bots.filter((item) => item.activeState === 'stale').length,
-    idle: state.bots.filter((item) => item.idle).length
+    idle: state.bots.filter((item) => item.idle && !isBotPaused(item)).length
   })
   if (state.renderCache.summary === summarySignature) return
   state.renderCache.summary = summarySignature
 
   const online = state.bots.filter((item) => item.online).length
   const printing = state.bots.filter((item) => isBotPrinting(item)).length
+  const paused = state.bots.filter((item) => isBotPaused(item)).length
   const stale = state.bots.filter((item) => item.activeState === 'stale').length
-  const idle = state.bots.filter((item) => item.idle).length
+  const idle = state.bots.filter((item) => item.idle && !isBotPaused(item)).length
   const nodeCount = state.nodes.length
 
   elements.botSummary.innerHTML = [
@@ -786,6 +797,7 @@ function renderSummary() {
     ['Known Bots', state.bots.length],
     ['Online', online],
     ['Printing', printing],
+    ['Paused', paused],
     ['Idle', idle],
     ['Stale', stale]
   ].map(([label, value]) => `
@@ -867,7 +879,11 @@ function renderAlerts() {
 function renderNodeTimingMetrics(node) {
   const timing = node.timing || {}
   const activeRun = timing.activeRun || node.currentRun || null
-  const completed = Number(node.finishedMapCount || 0)
+  const completed = Math.max(
+    Number(node.finishedMapCount || 0),
+    Number(node.totalCompletedMapCount || 0),
+    Number(timing.totalCompletedMaps || 0)
+  )
   const averageSamples = Number(timing.totalCompletedMaps || 0)
   const averageDurationMs = Number(timing.averageDurationMs || 0)
   const average = averageSamples > 0 && averageDurationMs > 0 ? formatDuration(averageDurationMs) : 'n/a'

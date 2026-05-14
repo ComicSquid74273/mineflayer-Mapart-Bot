@@ -767,6 +767,7 @@ function createStore(baseDir) {
         nodeLogs: [],
         finishedMapCount: 0,
         finishedMapFiles: [],
+        totalCompletedMapCount: 0,
         _nodeFilesByName: new Map(),
         _nodeLogsByName: new Map(),
         _finishedMapFilesByName: new Map(),
@@ -814,6 +815,10 @@ function createStore(baseDir) {
       node.nodeFiles = finalizeNodeFileEntries(node._nodeFilesByName)
       node.nodeLogs = finalizeNodeFileEntries(node._nodeLogsByName)
       node.finishedMapFiles = finalizeNodeFileEntries(node._finishedMapFilesByName)
+      node.totalCompletedMapCount = Math.max(
+        Math.max(0, toNumber(node.finishedMapCount, 0)),
+        Math.max(0, toNumber(node.timing?.totalCompletedMaps, 0))
+      )
       delete node._nodeFilesByName
       delete node._nodeLogsByName
       delete node._finishedMapFilesByName
@@ -895,9 +900,13 @@ function createStore(baseDir) {
     const bots = readBotMap()
     const previous = bots[status.botName] || {}
     const receivedAt = nowIso()
+    const previousReconnectCount = Math.max(0, toNumber(previous.reconnectCount, 0))
+    const reportedReconnectCount = Math.max(0, toNumber(status.reconnectCount, 0))
+    const reconnectCount = Math.max(previousReconnectCount, reportedReconnectCount)
     const next = {
       ...previous,
       ...status,
+      reconnectCount,
       reportedLastStatusAt: status.lastStatusAt || null,
       reportedHeartbeatAt: status.heartbeatAt || null,
       serverStatusAt: receivedAt,
@@ -1662,10 +1671,50 @@ function createStore(baseDir) {
 
   function resetDashboardForFreshStart() {
     const previousFiles = listFiles()
-    const previousInventory = Object.keys(readNodeInventoryMap())
+    const previousInventoryMap = readNodeInventoryMap()
+    const previousInventory = Object.keys(previousInventoryMap)
     const previousCommands = listCommands()
+    const bots = readBotMap()
+    const nodeStats = readNodeStatsMap()
+    const completedByHost = new Map()
+    let clearedBotInventoryFields = 0
     const deletedUploadFiles = []
     const uploadErrors = []
+
+    function rememberCompletedCount(hostLabel, count) {
+      const normalizedHost = String(hostLabel || '').trim()
+      const completed = Math.max(0, toNumber(count, 0))
+      if (!normalizedHost || completed <= 0) return
+      completedByHost.set(normalizedHost, Math.max(completedByHost.get(normalizedHost) || 0, completed))
+    }
+
+    for (const item of Object.values(previousInventoryMap)) {
+      rememberCompletedCount(item?.hostLabel, Math.max(
+        toNumber(item?.finishedMapCount, 0),
+        Array.isArray(item?.finishedMapFiles) ? item.finishedMapFiles.length : 0
+      ))
+    }
+    for (const bot of Object.values(bots)) {
+      rememberCompletedCount(bot?.hostLabel, Math.max(
+        toNumber(bot?.finishedMapCount, 0),
+        Array.isArray(bot?.finishedMapFiles) ? bot.finishedMapFiles.length : 0
+      ))
+    }
+    for (const [hostLabel, completed] of completedByHost.entries()) {
+      const current = createNodeTimingRecord(nodeStats[hostLabel])
+      if (completed > current.totalCompletedMaps) {
+        const averageDurationMs = current.averageDurationMs > 0
+          ? current.averageDurationMs
+          : (current.totalCompletedMaps > 0 && current.totalDurationMs > 0 ? Math.round(current.totalDurationMs / current.totalCompletedMaps) : 0)
+        nodeStats[hostLabel] = {
+          ...current,
+          totalCompletedMaps: completed,
+          totalDurationMs: averageDurationMs > 0 ? averageDurationMs * completed : current.totalDurationMs,
+          averageDurationMs,
+          updatedAt: current.updatedAt || nowIso()
+        }
+      }
+    }
 
     if (fs.existsSync(filesDir)) {
       for (const entry of fs.readdirSync(filesDir, { withFileTypes: true })) {
@@ -1683,11 +1732,23 @@ function createStore(baseDir) {
     saveCommands([])
     saveFiles([])
     writeNodeInventoryMap({})
-    writeJson(nodeStatsFile, {})
+    saveNodeStatsMap(nodeStats)
+    for (const bot of Object.values(bots)) {
+      let changed = false
+      for (const field of ['nodeFiles', 'nodeLogs', 'finishedMapFiles', 'finishedMapCount', 'nodeInventoryAt']) {
+        if (Object.prototype.hasOwnProperty.call(bot, field)) {
+          delete bot[field]
+          changed = true
+        }
+      }
+      if (changed) clearedBotInventoryFields += 1
+    }
+    if (clearedBotInventoryFields) writeJson(botsFile, bots)
 
     return {
       clearedQueueFiles: previousFiles.length,
       clearedNodeInventories: previousInventory.length,
+      clearedBotInventoryFields,
       clearedCommands: previousCommands.length,
       deletedUploadFiles: deletedUploadFiles.length,
       uploadErrors
