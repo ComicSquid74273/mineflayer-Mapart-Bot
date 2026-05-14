@@ -3748,6 +3748,9 @@ function createDefaultConfig() {
       restockFastSettleMs: 0,
       restockPostCloseInventorySyncMs: 2000,
       restockFailureCooldownMs: 8000,
+      cleanAssignedMaterialChests: true,
+      cleanAssignedMaterialChestAction: 'dump',
+      cleanAssignedMaterialChestMaxStacksPerOpen: 8,
       waitForRequiredMaterialRestockEnabled: true,
       waitForRequiredMaterialRetryMs: 5000,
       waitForRequiredMaterialLogEveryMs: 30000,
@@ -5392,6 +5395,17 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           }
           await delay(toNumber(advanced.preRestockDelayMs, 200))
 
+          const cleanup = await cleanAssignedMaterialChest(bot, config, container, spot, blockName, itemId)
+          if (cleanup.reopen) {
+            try { container.close() } catch { }
+            container = null
+            await delay(Math.max(0, toNumber(advanced.assignedMaterialChestCleanupPostCloseSyncMs, toNumber(advanced.restockPostCloseInventorySyncMs, 2000))))
+            await dumpAssignedChestCleanupItems(bot, config, cleanup.removed, blockName)
+            retrySameChest = true
+            skipRetryCatchupWait = true
+            continue
+          }
+
         // Count ALL of the target item in this chest — including partial stacks.
         // BUG FIX: old code used Math.floor(total/64) which silently skipped chests
         // with partial stacks (e.g. 30 carpets -> 30/64=0 -> skipped entirely).
@@ -6719,6 +6733,128 @@ function getChestWindowSlots(window) {
     slots.push({ slot: i, stack })
   }
   return slots
+}
+
+function materialChestPositionKey(pos) {
+  const blockPos = toBlockPos(pos)
+  if (!blockPos) return null
+  return `${blockPos.x}:${blockPos.y}:${blockPos.z}`
+}
+
+function getAssignedMaterialChestAllowedNames(config, chestPos, fallbackName = null) {
+  const targetKey = materialChestPositionKey(chestPos)
+  const allowed = new Set()
+  const materialDict = config.machine?.materialDict || {}
+
+  if (targetKey) {
+    for (const [materialName, entries] of Object.entries(materialDict)) {
+      const normalizedName = String(materialName || '').replace(/^minecraft:/, '')
+      if (!normalizedName || !Array.isArray(entries)) continue
+      for (const entry of entries) {
+        if (materialChestPositionKey(entry) === targetKey) {
+          allowed.add(normalizedName)
+          break
+        }
+      }
+    }
+  }
+
+  const fallback = String(fallbackName || '').replace(/^minecraft:/, '')
+  if (!allowed.size && fallback) allowed.add(fallback)
+  return allowed
+}
+
+function summarizeStacks(stacks) {
+  const counts = new Map()
+  for (const stack of stacks) {
+    const name = stack?.name || stack?.displayName || String(stack?.type || 'unknown')
+    counts.set(name, (counts.get(name) || 0) + Math.max(0, toNumber(stack?.count, 0)))
+  }
+  return [...counts.entries()].map(([name, count]) => `${name}x${count}`).join(', ')
+}
+
+async function quickMoveChestSlotToInventory(bot, config, window, entry, timeoutMs = 3000, pollMs = 100) {
+  const stack = entry?.stack
+  const slot = entry?.slot
+  const itemName = stack?.name || null
+  const itemId = stack?.type
+  const beforeCount = Math.max(0, toNumber(stack?.count, 0))
+  if (!Number.isFinite(slot) || !stack || beforeCount <= 0 || !itemName) return 0
+  if (inventoryCapacityForItem(bot, itemName) < beforeCount) return 0
+
+  const beforeInventory = countWindowInventoryItems(window, itemId, itemName)
+  await assertWindowCursorEmpty(window, `before assigned chest cleanup slot=${slot}`)
+  await applyAdaptiveLatencyBackoff(bot, config, `assigned-chest-cleanup-slot-${slot}`)
+  await bot.clickWindow(slot, 0, 1)
+  await waitForWindowSlot(window, slot, (latest) => (
+    !latest ||
+    toNumber(latest.count, 0) <= 0 ||
+    latest.type !== itemId ||
+    toNumber(latest.count, 0) < beforeCount
+  ), timeoutMs, pollMs)
+  await assertWindowCursorEmpty(window, `after assigned chest cleanup slot=${slot}`)
+
+  const afterStack = window?.slots?.[slot]
+  const afterCount = afterStack?.type === itemId ? Math.max(0, toNumber(afterStack.count, 0)) : 0
+  const movedFromSource = Math.max(0, beforeCount - afterCount)
+  const afterInventory = await waitForWindowInventoryCount(
+    window,
+    itemId,
+    itemName,
+    beforeInventory + Math.max(1, movedFromSource),
+    timeoutMs,
+    pollMs
+  )
+  return Math.max(movedFromSource, Math.max(0, afterInventory - beforeInventory))
+}
+
+async function cleanAssignedMaterialChest(bot, config, window, chestPos, targetName, targetItemId) {
+  const advanced = config.advanced || {}
+  if (advanced.cleanAssignedMaterialChests === false) return { reopen: false, removed: [] }
+
+  const allowedNames = getAssignedMaterialChestAllowedNames(config, chestPos, targetName)
+  if (!allowedNames.size) return { reopen: false, removed: [] }
+
+  const maxStacks = Math.max(0, Math.floor(toNumber(advanced.cleanAssignedMaterialChestMaxStacksPerOpen, 8)))
+  if (maxStacks <= 0) return { reopen: false, removed: [] }
+
+  const unwanted = getChestWindowSlots(window)
+    .filter((entry) => {
+      const stack = entry.stack
+      if (!stack || toNumber(stack.count, 0) <= 0) return false
+      if (targetItemId && stack.type === targetItemId) return false
+      return !allowedNames.has(String(stack.name || '').replace(/^minecraft:/, ''))
+    })
+    .slice(0, maxStacks)
+
+  if (!unwanted.length) return { reopen: false, removed: [] }
+
+  const timeoutMs = getLatencyAdjustedTimeoutMs(
+    bot,
+    config,
+    Math.max(500, toNumber(advanced.assignedMaterialChestCleanupSyncWaitMs, toNumber(advanced.restockInventorySyncWaitMs, 2000))),
+    500
+  )
+  const pollMs = Math.max(25, toNumber(advanced.assignedMaterialChestCleanupPollMs, toNumber(advanced.restockSameChestRetryPollMs, 100)))
+  const removed = []
+
+  for (const entry of unwanted) {
+    assertRuntimeContinue(bot, config, 'stopping-during-assigned-chest-cleanup')
+    const stack = entry.stack
+    const moved = await quickMoveChestSlotToInventory(bot, config, window, entry, timeoutMs, pollMs)
+    if (moved <= 0) {
+      console.log(`[CHEST-CLEANUP-WARN] ${targetName}: could not remove ${formatWindowStack(stack)} from assigned chest; inventory may be full.`)
+      break
+    }
+    removed.push({ name: stack.name, type: stack.type, count: moved })
+    await delay(Math.max(0, toNumber(advanced.inventoryActionDelayMs, 100)))
+  }
+
+  if (removed.length > 0) {
+    console.log(`[CHEST-CLEANUP] ${targetName}: removed unwanted ${summarizeStacks(removed)} from assigned chest ${chestPos.x},${chestPos.y},${chestPos.z}; allowed=${[...allowedNames].join(',')}`)
+  }
+
+  return { reopen: removed.length > 0, removed }
 }
 
 function countChestWindowItems(window, itemId, itemName = null) {
@@ -8859,6 +8995,42 @@ async function dumpCarpetStacks(bot, config, stacks, reasonLabel = 'dumpedStacks
     console.log(`[PREDUMP] ${reasonLabel}=${dumped} at ${dumpPos.x} ${dumpPos.y} ${dumpPos.z} yaw=${targetStation?.yaw ?? 'n/a'} pitch=${targetStation?.pitch ?? 'n/a'}`)
   }
 
+  return dumped
+}
+
+async function dumpAssignedChestCleanupItems(bot, config, removedItems, targetName) {
+  const action = String(config.advanced?.cleanAssignedMaterialChestAction || 'dump').toLowerCase().trim()
+  if (action === 'none' || action === 'inventory-only' || !Array.isArray(removedItems) || removedItems.length <= 0) return 0
+  if (action !== 'dump') {
+    console.log(`[CHEST-CLEANUP-WARN] ${targetName}: unsupported cleanup action=${action}; keeping removed unwanted items in inventory.`)
+    return 0
+  }
+
+  const remainingByName = new Map()
+  for (const item of removedItems) {
+    const name = String(item?.name || '').replace(/^minecraft:/, '')
+    const count = Math.max(0, toNumber(item?.count, 0))
+    if (!name || count <= 0) continue
+    remainingByName.set(name, (remainingByName.get(name) || 0) + count)
+  }
+  if (!remainingByName.size) return 0
+
+  const candidates = []
+  for (const stack of bot.inventory.items()) {
+    const name = String(stack?.name || '').replace(/^minecraft:/, '')
+    let remaining = remainingByName.get(name) || 0
+    if (remaining <= 0) continue
+    candidates.push(stack)
+    remaining -= Math.max(0, toNumber(stack?.count, 0))
+    if (remaining > 0) remainingByName.set(name, remaining)
+    else remainingByName.delete(name)
+  }
+
+  if (!candidates.length) return 0
+  const dumped = await dumpCarpetStacks(bot, config, candidates, 'assignedChestCleanup')
+  if (dumped > 0) {
+    console.log(`[CHEST-CLEANUP] ${targetName}: dumped ${dumped} unwanted stack(s) removed from assigned material chest.`)
+  }
   return dumped
 }
 
