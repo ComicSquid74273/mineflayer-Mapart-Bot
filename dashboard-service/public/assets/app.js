@@ -1045,6 +1045,7 @@ function renderBotCard(bot) {
       <div class="bot-actions">
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
         <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Pause Print</button>
+        <button class="ghost-button small-button" type="button" data-action="home-platform-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Send /home platform">Home Platform</button>
         ${resettableCurrentNbt ? `<button class="danger-button small-button" type="button" data-action="reset-current-nbt" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-current-nbt="${escapeHtml(bot.currentNbt || '')}" title="Reset platform and restart this NBT from target 0">Reset NBT</button>` : ''}
         <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect from server (no auto-reconnect)">Disconnect</button>
         <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Reconnect to server">Reconnect</button>
@@ -1115,6 +1116,7 @@ function renderBots() {
             <button class="ghost-button small-button" type="button" data-action="edit-node-config" data-permission-needed="canManageOperators" data-host-label="${escapeHtml(node.hostLabel)}" data-config-name="${escapeHtml(editConfigName)}" title="${escapeHtml(editConfigName ? `Edit ${editConfigName}` : 'View config files')}">Edit Config</button>
             <button class="accent-button small-button" type="button" data-action="start-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Start Node</button>
             <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Pause Node</button>
+            <button class="ghost-button small-button" type="button" data-action="home-platform-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}" title="Send /home platform to every bot on this node">Home Platform</button>
             ${nodeHasActiveNbt ? `<button class="danger-button small-button" type="button" data-action="reset-node-current-nbt" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Reset Node NBT</button>` : ''}
           </div>
         </div>
@@ -2377,6 +2379,28 @@ async function onTpaBot(botName, tpaTarget) {
   pushEvent('info', `[${botName}] sent: ${msg}`)
 }
 
+async function onHomePlatformBot(botName) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before sending home commands.')
+    return
+  }
+  const msg = '/home platform'
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/chat`, { message: msg })
+  pushEvent('info', `[${botName}] sent: ${msg}`)
+  await refreshData()
+}
+
+async function onHomePlatformNode(hostLabel) {
+  if (!hasPermission('canOperate')) {
+    pushEvent('warn', 'Login as an operator before sending home commands.')
+    return
+  }
+  const msg = '/home platform'
+  await submitJson(`/api/dashboard/nodes/${encodeURIComponent(hostLabel)}/commands/chat`, { message: msg })
+  pushEvent('info', `[${hostLabel}] sent ${msg} to node bots`)
+  await refreshData()
+}
+
 async function onFleetAction(action, botName = null) {
   if (!hasPermission('canOperate')) {
     pushEvent('warn', 'Login as an operator before running fleet actions.')
@@ -2521,6 +2545,10 @@ document.addEventListener('click', async (event) => {
       await onDisconnectBot(button.dataset.botName || '')
     } else if (button.dataset.action === 'reconnect-bot') {
       await onReconnectBot(button.dataset.botName || '')
+    } else if (button.dataset.action === 'home-platform-bot') {
+      await onHomePlatformBot(button.dataset.botName || '')
+    } else if (button.dataset.action === 'home-platform-node') {
+      await onHomePlatformNode(button.dataset.hostLabel || '')
     } else if (button.dataset.action === 'reset-current-nbt') {
       await onResetCurrentNbt(button.dataset.botName || '', button.dataset.currentNbt || '')
     } else if (button.dataset.action === 'edit-config') {

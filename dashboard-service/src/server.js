@@ -344,6 +344,7 @@ function reqIsDashboardOperationPath(pathname, method) {
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/stop'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/chat'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/reset-current-nbt'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/reprint'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/start'))
@@ -2091,6 +2092,23 @@ async function route(req, res) {
       reason: body?.reason || null
     })
     auditOperatorAction(actor, 'pause-node', `Queued print pause for node ${params.hostLabel}.`, { hostLabel: params.hostLabel, botNames, reason: body?.reason || null }, 'warn')
+    return sendJson(res, 201, { items })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/chat')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const message = String(body?.message || '').trim()
+    if (!message) return badRequest(res, 'message is required')
+    const bots = store.listBotsForHost(params.hostLabel)
+    if (!bots.length) return notFound(res)
+    const botNames = bots.map((item) => item.botName)
+    const items = store.createCommandsForBots(botNames, 'chat', {
+      message,
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'chat-node', `Sent chat to node ${params.hostLabel}: ${message}`, { hostLabel: params.hostLabel, botNames, message })
     return sendJson(res, 201, { items })
   }
 

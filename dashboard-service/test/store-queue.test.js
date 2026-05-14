@@ -277,3 +277,19 @@ test('pause desired keeps original pause start time across repeated pause comman
   assert.equal(current.pausedAt, first.pausedAt)
   assert.equal(current.reason, 'second pause')
 })
+
+test('node home platform action can queue chat for every node bot', () => {
+  const { store } = makeStore()
+  registerNode(store, 'node-a', 'bot-a')
+  registerNode(store, 'node-a', 'bot-b')
+
+  const botNames = store.listBotsForHost('node-a').map((item) => item.botName)
+  const commands = store.createCommandsForBots(botNames, 'chat', {
+    message: '/home platform',
+    requestedBy: 'test'
+  })
+
+  assert.equal(commands.length, 2)
+  assert.deepEqual(commands.map((item) => item.targetBotName).sort(), ['bot-a', 'bot-b'])
+  assert.deepEqual(new Set(commands.map((item) => item.message)), new Set(['/home platform']))
+})
