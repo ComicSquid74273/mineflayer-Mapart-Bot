@@ -9,6 +9,7 @@ process.on('unhandledRejection', (reason) => {
 
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
+const duperBrokenGroupStateCache = new Map()
 const PROCESS_STARTED_AT = new Date().toISOString()
 const PROCESS_INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 // Persists across session reconnects within one process run.
@@ -44,6 +45,7 @@ const CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs
 const LEGACY_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config.json')
 const DEFAULT_IMPORTED_CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'carpet-printer-config.json')
 const TEST_BOT_CONFIG_FILE = path.resolve(process.cwd(), 'config.test.json')
+const DEFAULT_DUPER_GROUP_STATE_FILE = path.resolve(process.cwd(), 'nerv-printer-config', 'duper-group-state.json')
 const EXPLICIT_CONFIG_FILE = getCliValue('--config') || getCliValue('--config-file') || process.env.NERV_CONFIG_FILE || null
 const LOG_FILE = path.resolve(process.cwd(), 'logs', 'nerv-printer.log')
 const logContext = new AsyncLocalStorage()
@@ -576,6 +578,55 @@ function writeJson(filePath, data) {
     fs.mkdirSync(dir, { recursive: true })
   }
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8')
+}
+
+function toTimestampMs(value, fallback = 0) {
+  if (Number.isFinite(Number(value))) return Number(value)
+  const parsed = Date.parse(String(value || ''))
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function getDuperGroupStateFilePath(config) {
+  const configured = config?.advanced?.duperGroupStateFile || config?.advanced?.duperBrokenStateFile
+  if (configured) return path.resolve(process.cwd(), String(configured))
+  return DEFAULT_DUPER_GROUP_STATE_FILE
+}
+
+function normalizeDuperGroupState(raw) {
+  const groups = raw && typeof raw.groups === 'object' && raw.groups ? raw.groups : {}
+  return {
+    version: 1,
+    updatedAt: raw?.updatedAt || new Date().toISOString(),
+    groups
+  }
+}
+
+function loadDuperGroupStateFile(config) {
+  const filePath = getDuperGroupStateFilePath(config)
+  const raw = readOptionalJson(filePath)
+  return normalizeDuperGroupState(raw)
+}
+
+function saveDuperGroupStateFile(config, state) {
+  const filePath = getDuperGroupStateFilePath(config)
+  writeJson(filePath, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    groups: state && typeof state.groups === 'object' && state.groups ? state.groups : {}
+  })
+}
+
+function getDuperGroupStateKey(blockName, spots) {
+  const chestKeys = (Array.isArray(spots) ? spots : [])
+    .map((spot) => materialChestPositionKey(spot))
+    .filter(Boolean)
+    .sort()
+  return `${String(blockName || '')}|${chestKeys.join(';')}`
+}
+
+function hasPersistedBrokenDuperGroups(config) {
+  const state = loadDuperGroupStateFile(config)
+  return Object.values(state.groups).some((entry) => entry && (entry.status === 'broken' || entry.alertActive === true))
 }
 
 function logThrottled(key, message, options = {}) {
@@ -5925,6 +5976,138 @@ async function waitInterruptiblyForRequiredMaterial(bot, config, waitMs, detail 
   }
 }
 
+async function scanDuperGroupForRepairCheck(bot, config, entry, reason = 'duper-repair-check') {
+  const blockName = String(entry?.blockName || '').trim()
+  const itemId = bot?.registry?.itemsByName?.[blockName]?.id
+  const chests = Array.isArray(entry?.chests) ? entry.chests : []
+  if (!blockName || !itemId || !chests.length) return null
+
+  const advanced = config.advanced || {}
+  const scanned = []
+  let total = 0
+  for (const chest of chests) {
+    assertRuntimeContinue(bot, config, 'waiting-material-restock')
+    let container = null
+    try {
+      container = await openContainerAt(bot, chest, chest.accessPosition, {
+        config,
+        reason: `${reason}-${blockName}`,
+        strictAccess: Boolean(chest.accessPosition),
+        accessRange: toNumber(advanced.restockChestAccessRange, 1.25),
+        attempts: toNumber(advanced.restockChestOpenAttempts, 3),
+        timeoutMs: toNumber(advanced.restockChestOpenTimeoutMs, 2500),
+        retryDelayMs: toNumber(advanced.restockChestOpenRetryDelayMs, 250),
+        blockWaitMs: toNumber(advanced.restockChestBlockWaitMs, 5000),
+        blockPollMs: toNumber(advanced.restockChestBlockPollMs, 150),
+        expectedNames: ['chest', 'trapped_chest', 'barrel']
+      })
+      await delay(toNumber(advanced.preRestockDelayMs, 200))
+      const count = container.containerItems()
+        .filter((item) => item.type === itemId)
+        .reduce((sum, item) => sum + toNumber(item.count, 0), 0)
+      total += count
+      scanned.push({ x: chest.x, y: chest.y, z: chest.z, count })
+    } catch (err) {
+      console.log(`[DUPER-REPAIR-CHECK-WARN] ${blockName} chest=${chest.x},${chest.y},${chest.z} scan failed: ${err?.message || err}`)
+      return null
+    } finally {
+      if (container) {
+        try { container.close() } catch { }
+      }
+    }
+  }
+  return { blockName, total, scanned, fullGroupScanned: scanned.length === chests.length }
+}
+
+async function checkDuePersistedBrokenDuperGroup(bot, config, currentBlockName = null) {
+  const advanced = config.advanced || {}
+  const intervalMs = Math.max(60 * 1000, toNumber(advanced.duperBrokenRepairCheckMs, 10 * 60 * 1000))
+  const alertAfterMs = Math.max(0, toNumber(advanced.duperBrokenAlertAfterMs, 3 * 60 * 1000))
+  if (alertAfterMs <= 0) return
+
+  const state = loadDuperGroupStateFile(config)
+  const now = Date.now()
+  const entries = Object.entries(state.groups)
+    .map(([key, entry]) => ({ key, entry }))
+    .filter(({ entry }) => entry && (entry.status === 'broken' || entry.alertActive === true))
+    .filter(({ entry }) => String(entry.blockName || '') !== String(currentBlockName || ''))
+    .filter(({ entry }) => now - toTimestampMs(entry.lastCheckedAt, 0) >= intervalMs)
+  if (!entries.length) return
+
+  const { key, entry } = entries[0]
+  const scan = await scanDuperGroupForRepairCheck(bot, config, entry)
+  const latestState = loadDuperGroupStateFile(config)
+  const latestEntry = latestState.groups[key] || entry
+  const checkedAt = new Date().toISOString()
+  if (!scan || !scan.fullGroupScanned) {
+    latestState.groups[key] = {
+      ...latestEntry,
+      lastCheckedAt: checkedAt,
+      lastCheckedBy: bot?.username || config?.bot?.username || null
+    }
+    saveDuperGroupStateFile(config, latestState)
+    return
+  }
+
+  const blockName = scan.blockName
+  const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
+  const capacity = Math.max(1, scan.scanned.length * 27 * stackSize)
+  const fullRatio = Math.max(0, Math.min(1, toNumber(advanced.duperBrokenFullRatio, 0.9)))
+  const fullEnough = fullRatio > 0 && scan.total >= Math.floor(capacity * fullRatio)
+  const previousTotal = Number.isFinite(Number(latestEntry.lastObservedTotal)) ? Number(latestEntry.lastObservedTotal) : null
+  const refilled = previousTotal == null || scan.total > previousTotal || fullEnough
+  if (refilled) {
+    latestState.groups[key] = {
+      ...latestEntry,
+      lastObservedTotal: scan.total,
+      lastPreviousTotal: previousTotal,
+      lastObservedAt: checkedAt,
+      noIncreaseSinceAt: null,
+      lastCapacity: capacity,
+      lastFullEnough: fullEnough,
+      status: 'healthy',
+      alertActive: false,
+      lastCheckedAt: checkedAt,
+      lastCheckedBy: bot?.username || config?.bot?.username || null,
+      repairCheckedBy: bot?.username || config?.bot?.username || null,
+      repairCheckedAt: checkedAt
+    }
+    saveDuperGroupStateFile(config, latestState)
+    console.log(`[DUPER-FIXED] ${blockName} group=${toNumber(latestEntry.groupIndex, 0) + 1} refilled during repair check; total=${scan.total} previous=${previousTotal ?? 'none'}.`)
+    reportDashboardWarning(config, 'duper-fixed', `Duper fixed: ${blockName} group ${toNumber(latestEntry.groupIndex, 0) + 1} refilled.`, {
+      blockName,
+      groupIndex: latestEntry.groupIndex,
+      total: scan.total,
+      previousTotal,
+      checkedAt
+    })
+    if (!hasPersistedBrokenDuperGroups(config)) clearDashboardAlert(config, 'duper-broken')
+    return
+  }
+
+  latestState.groups[key] = {
+    ...latestEntry,
+    lastObservedTotal: scan.total,
+    lastPreviousTotal: previousTotal,
+    lastObservedAt: checkedAt,
+    lastCapacity: capacity,
+    lastFullEnough: fullEnough,
+    status: 'broken',
+    alertActive: true,
+    lastCheckedAt: checkedAt,
+    lastCheckedBy: bot?.username || config?.bot?.username || null
+  }
+  saveDuperGroupStateFile(config, latestState)
+  setDashboardAlert(config, 'duper-broken', `Duper may be broken: ${blockName} group ${toNumber(latestEntry.groupIndex, 0) + 1} still has no refill; repair needed.`, {
+    blockName,
+    groupIndex: latestEntry.groupIndex,
+    currentTotal: scan.total,
+    previousTotal,
+    checkedAt,
+    source: 'duper-repair-check'
+  }, 'warn')
+}
+
 async function waitForRequiredMaterialRestock(bot, config, blockName, requestedPulls = 1, neededByBlock = null, reason = 'required-material', options = {}) {
   assertRuntimeContinue(bot, config, 'waiting-material-restock')
   const advanced = config.advanced || {}
@@ -5948,19 +6131,88 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
   const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
   const materialIsCarpet = String(blockName || '').endsWith('_carpet')
   let attempt = 0
-  const groupStates = spotGroups.map((group, groupIndex) => ({
-    groupIndex,
-    chests: group.map((spot) => ({ x: spot.x, y: spot.y, z: spot.z })),
-    noIncreaseSinceAt: 0,
-    lastObservedAt: 0,
-    lastObservedTotal: null,
-    lastPreviousTotal: null,
-    lastCapacity: Math.max(1, group.length) * 27 * stackSize,
-    lastFullEnough: false,
-    activeBroken: false
-  }))
-  const activeBrokenGroups = new Set()
-  let duperBrokenAlertActive = false
+  const scanGroupByChestKey = new Map()
+  for (let groupIndex = 0; groupIndex < spotGroups.length; groupIndex += 1) {
+    for (const spot of spotGroups[groupIndex]) {
+      const key = materialChestPositionKey(spot)
+      if (key) scanGroupByChestKey.set(key, groupIndex)
+    }
+  }
+  const groupSignature = spotGroups
+    .map((group) => group.map((spot) => materialChestPositionKey(spot)).filter(Boolean).join(','))
+    .join(';')
+  const groupStateKeys = spotGroups.map((group) => getDuperGroupStateKey(blockName, group))
+  const cacheKey = `${bot?.username || config?.bot?.username || 'bot'}|${blockName}|${groupSignature}`
+  const cachedGroupState = duperBrokenGroupStateCache.get(cacheKey)
+  const persistedDuperState = materialIsCarpet && duperBrokenAlertAfterMs > 0
+    ? loadDuperGroupStateFile(config)
+    : { version: 1, updatedAt: new Date().toISOString(), groups: {} }
+  const groupStates = spotGroups.map((group, groupIndex) => {
+    const persisted = persistedDuperState.groups[groupStateKeys[groupIndex]]
+    const cached = cachedGroupState?.groupSignature === groupSignature ? cachedGroupState.groupStates?.[groupIndex] : null
+    const source = persisted || cached || {}
+    return {
+      ...source,
+      groupIndex,
+      stateKey: groupStateKeys[groupIndex],
+      chests: group.map((spot) => ({ x: spot.x, y: spot.y, z: spot.z, accessPosition: spot.accessPosition || null })),
+      noIncreaseSinceAt: toTimestampMs(source.noIncreaseSinceAt, 0),
+      lastObservedAt: toTimestampMs(source.lastObservedAt, 0),
+      lastObservedTotal: Number.isFinite(Number(source.lastObservedTotal)) ? Number(source.lastObservedTotal) : null,
+      lastPreviousTotal: Number.isFinite(Number(source.lastPreviousTotal)) ? Number(source.lastPreviousTotal) : null,
+      lastCapacity: Math.max(1, group.length) * 27 * stackSize,
+      lastFullEnough: source.lastFullEnough === true,
+      activeBroken: source.activeBroken === true || source.alertActive === true || source.status === 'broken',
+      status: source.status || 'unknown',
+      alertActive: source.alertActive === true
+    }
+  })
+  const activeBrokenGroups = new Set(groupStates.filter((group) => group.activeBroken).map((group) => group.groupIndex))
+  let duperBrokenAlertActive = activeBrokenGroups.size > 0
+
+  const persistDuperBrokenGroupState = () => {
+    if (!materialIsCarpet || duperBrokenAlertAfterMs <= 0) return
+    const fileState = loadDuperGroupStateFile(config)
+    duperBrokenGroupStateCache.set(cacheKey, {
+      blockName,
+      groupSignature,
+      lastTouchedAt: Date.now(),
+      groupStates: groupStates.map((group) => ({
+        groupIndex: group.groupIndex,
+        chests: group.chests,
+        noIncreaseSinceAt: group.noIncreaseSinceAt,
+        lastObservedAt: group.lastObservedAt,
+        lastObservedTotal: group.lastObservedTotal,
+        lastPreviousTotal: group.lastPreviousTotal,
+        lastCapacity: group.lastCapacity,
+        lastFullEnough: group.lastFullEnough,
+        activeBroken: group.activeBroken
+      }))
+    })
+    for (const group of groupStates) {
+      if (!group.stateKey) continue
+      const noIncreaseSinceAt = group.noIncreaseSinceAt ? new Date(group.noIncreaseSinceAt).toISOString() : null
+      const lastObservedAt = group.lastObservedAt ? new Date(group.lastObservedAt).toISOString() : null
+      fileState.groups[group.stateKey] = {
+        version: 1,
+        blockName,
+        groupIndex: group.groupIndex,
+        stateKey: group.stateKey,
+        chests: group.chests,
+        lastObservedTotal: group.lastObservedTotal,
+        lastPreviousTotal: group.lastPreviousTotal,
+        lastObservedAt,
+        noIncreaseSinceAt,
+        lastCapacity: group.lastCapacity,
+        lastFullEnough: group.lastFullEnough,
+        status: group.activeBroken ? 'broken' : (group.noIncreaseSinceAt ? 'suspect' : 'healthy'),
+        alertActive: group.activeBroken === true,
+        lastCheckedBy: bot?.username || config?.bot?.username || null,
+        lastCheckedAt: new Date().toISOString()
+      }
+    }
+    saveDuperGroupStateFile(config, fileState)
+  }
 
   const updateDuperBrokenAlert = (have, elapsedMs) => {
     const groups = [...activeBrokenGroups]
@@ -6004,6 +6256,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
 
   const clearDuperBrokenAlertIfNeeded = () => {
     if (activeBrokenGroups.size > 0) return
+    if (hasPersistedBrokenDuperGroups(config)) return
     if (!duperBrokenAlertActive) return
     clearDashboardAlert(config, 'duper-broken')
     duperBrokenAlertActive = false
@@ -6020,6 +6273,9 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
   while (true) {
     assertRuntimeContinue(bot, config, 'waiting-material-restock')
     attempt += 1
+    if (materialIsCarpet && duperBrokenAlertAfterMs > 0) {
+      await checkDuePersistedBrokenDuperGroup(bot, config, blockName)
+    }
     const attemptGroupScans = spotGroups.map(() => ({ total: 0, scanned: new Set(), chests: [] }))
     const haveBefore = countInventoryItems(bot, blockName)
     if (haveBefore >= targetCount) {
@@ -6035,10 +6291,12 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
       ignoreFailureCooldown: true,
       markUnavailableOnFailure: false,
       onMaterialChestScanned: (scan = {}) => {
-        const groupIndex = Number.isFinite(Number(scan.groupIndex)) ? Number(scan.groupIndex) : null
+        const chestKey = materialChestPositionKey(scan.chest)
+        const groupIndex = chestKey && scanGroupByChestKey.has(chestKey)
+          ? scanGroupByChestKey.get(chestKey)
+          : (Number.isFinite(Number(scan.groupIndex)) ? Number(scan.groupIndex) : null)
         const groupScan = groupIndex == null ? null : attemptGroupScans[groupIndex]
         if (!groupScan) return
-        const chestKey = materialChestPositionKey(scan.chest)
         if (chestKey) groupScan.scanned.add(chestKey)
         groupScan.total += Math.max(0, toNumber(scan.count, 0))
         if (scan.chest) groupScan.chests.push({ x: scan.chest.x, y: scan.chest.y, z: scan.chest.z, count: Math.max(0, toNumber(scan.count, 0)) })
@@ -6049,27 +6307,6 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     if (haveAfter > haveBefore && config.advanced?.debugPrints) {
       console.log(`[REQUIRED-MATERIAL-WAIT-OBSERVED] ${blockName} inventoryIncrease=${haveAfter - haveBefore}`)
     }
-    if (restocked || haveAfter >= targetCount) {
-      restockFailureCache.delete(blockName)
-      unavailableMaterialCache.delete(blockName)
-      activeBrokenGroups.clear()
-      clearDuperBrokenAlertIfNeeded()
-      return true
-    }
-
-    const capacityAfter = inventoryCapacityForItem(bot, blockName)
-    if (capacityAfter < stackSize) {
-      if (options.logCapacityBlocked !== false) {
-        console.log(`[REQUIRED-MATERIAL-WAIT-CAPACITY] ${blockName} blocked by inventory capacity; have=${haveAfter} target=${targetCount} capacity=${capacityAfter}/${stackSize} reason=${reason}.`)
-      }
-      return false
-    }
-
-    if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
-      console.log(`[REQUIRED-MATERIAL-WAIT-WARN] ${blockName} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s; have=${haveAfter} target=${targetCount} reason=${reason}.`)
-      return false
-    }
-
     const elapsedMs = Date.now() - startedAt
     if (materialIsCarpet && duperBrokenAlertAfterMs > 0) {
       let changedBrokenGroups = false
@@ -6163,7 +6400,34 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
           console.log(`[DUPER-BROKEN-WARN] ${blockName} group=${groupIndex + 1} no refill observed after ${Math.round(noIncreaseMs / 1000)}s across ${groupSize} chest(s); total=${currentTotal} have=${haveAfter} target=${targetCount} reason=${reason}.`)
         }
       }
-      if (changedBrokenGroups) updateDuperBrokenAlert(haveAfter, elapsedMs)
+      persistDuperBrokenGroupState()
+      if (changedBrokenGroups || activeBrokenGroups.size > 0) updateDuperBrokenAlert(haveAfter, elapsedMs)
+    }
+
+    if (restocked || haveAfter >= targetCount) {
+      restockFailureCache.delete(blockName)
+      unavailableMaterialCache.delete(blockName)
+      if (activeBrokenGroups.size === 0) {
+        clearDuperBrokenAlertIfNeeded()
+      } else {
+        persistDuperBrokenGroupState()
+      }
+      return true
+    }
+
+    const capacityAfter = inventoryCapacityForItem(bot, blockName)
+    if (capacityAfter < stackSize) {
+      if (options.logCapacityBlocked !== false) {
+        console.log(`[REQUIRED-MATERIAL-WAIT-CAPACITY] ${blockName} blocked by inventory capacity; have=${haveAfter} target=${targetCount} capacity=${capacityAfter}/${stackSize} reason=${reason}.`)
+      }
+      persistDuperBrokenGroupState()
+      return false
+    }
+
+    if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
+      console.log(`[REQUIRED-MATERIAL-WAIT-WARN] ${blockName} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s; have=${haveAfter} target=${targetCount} reason=${reason}.`)
+      persistDuperBrokenGroupState()
+      return false
     }
 
     logThrottled(
