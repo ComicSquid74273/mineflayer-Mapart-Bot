@@ -39,6 +39,17 @@ function toNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+function sanitizeRuntimeMetrics(input) {
+  if (!input || typeof input !== 'object') return null
+  return {
+    cpuPercent: Math.max(0, toNumber(input.cpuPercent, 0)),
+    rssBytes: Math.max(0, Math.floor(toNumber(input.rssBytes, 0))),
+    heapUsedBytes: Math.max(0, Math.floor(toNumber(input.heapUsedBytes, 0))),
+    heapTotalBytes: Math.max(0, Math.floor(toNumber(input.heapTotalBytes, 0))),
+    uptimeSeconds: Math.max(0, Math.floor(toNumber(input.uptimeSeconds, 0)))
+  }
+}
+
 function createStore(baseDir) {
   const dataDir = path.resolve(baseDir)
   const filesDir = path.join(dataDir, 'files')
@@ -852,7 +863,8 @@ function createStore(baseDir) {
         latestFinishedMapStatusAtMs: 0,
         timing: summarizeNodeTiming(timingByHost[hostLabel]),
         assignmentStats: assignmentStatsByHost.get(hostLabel) || createAssignmentStats(),
-        operationalStats: createNodeOperationalStats()
+        operationalStats: createNodeOperationalStats(),
+        runtimeMetrics: null
       }
       current.botCount += 1
       const botLastStatusMs = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
@@ -886,6 +898,7 @@ function createStore(baseDir) {
       const botStatusAt = bot.serverStatusAt || bot.lastStatusAt || null
       if (!current.lastStatusAt || String(botStatusAt || '') > String(current.lastStatusAt || '')) {
         current.lastStatusAt = botStatusAt
+        current.runtimeMetrics = sanitizeRuntimeMetrics(bot.runtimeMetrics)
       }
       byHost.set(hostLabel, current)
     }
@@ -991,6 +1004,7 @@ function createStore(baseDir) {
       ...status,
       reconnectCount,
       nodeRestartCount: Math.max(0, toNumber(previous.nodeRestartCount, 0)) + (runtimeRestartDetected ? 1 : 0),
+      runtimeMetrics: sanitizeRuntimeMetrics(status.runtimeMetrics),
       reportedLastStatusAt: status.lastStatusAt || null,
       reportedHeartbeatAt: status.heartbeatAt || null,
       serverStatusAt: receivedAt,

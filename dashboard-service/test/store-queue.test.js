@@ -66,6 +66,34 @@ test('failed queue item below maxAttempts returns to pending for auto retry', ()
   assert.equal(claimedAgain.claimedByBotName, 'bot-b')
 })
 
+test('node list exposes latest runtime metrics from bot heartbeat', () => {
+  const { store } = makeStore()
+
+  store.upsertBotStatus({
+    botName: 'node-a-bot',
+    hostLabel: 'node-a',
+    online: true,
+    phase: 'idle',
+    runtimeMetrics: {
+      cpuPercent: 12.4,
+      rssBytes: 412 * 1024 * 1024,
+      heapUsedBytes: 84 * 1024 * 1024,
+      heapTotalBytes: 132 * 1024 * 1024,
+      uptimeSeconds: 45
+    }
+  })
+
+  const node = store.listNodes().find((item) => item.hostLabel === 'node-a')
+  assert.ok(node)
+  assert.deepEqual(node.runtimeMetrics, {
+    cpuPercent: 12.4,
+    rssBytes: 412 * 1024 * 1024,
+    heapUsedBytes: 84 * 1024 * 1024,
+    heapTotalBytes: 132 * 1024 * 1024,
+    uptimeSeconds: 45
+  })
+})
+
 test('failed queue item at maxAttempts becomes failed-final and is not claimable', () => {
   const { store } = makeStore()
   const file = createQueueFile(store, 'final.nbt', { maxAttempts: 1 })

@@ -36,6 +36,9 @@ const state = {
   nbtSearch: '',
   nodeInventoryLoaded: false,
   nodeInventoryLoading: false,
+  resourceMetrics: null,
+  resourceMetricsLoading: false,
+  resourceMetricsLoaded: false,
   pendingNodeInventoryRefresh: false,
   botInventories: [],
   botInventoryLoaded: false,
@@ -63,6 +66,7 @@ const state = {
     uploadAssignments: '',
     failedQueue: '',
     botInventory: '',
+    resourceMetrics: '',
     fleetJump: '',
     queueSummary: '',
     events: '',
@@ -137,6 +141,8 @@ const elements = {
   queueRemainingMeta: document.getElementById('queueRemainingMeta'),
   queueTracker: document.getElementById('queueTracker'),
   serviceStatus: document.getElementById('serviceStatus'),
+  resourceMetricsDetails: document.getElementById('resourceMetricsDetails'),
+  resourceMetricsGrid: document.getElementById('resourceMetricsGrid'),
   startAllButton: document.getElementById('startAllButton'),
   stopAllButton: document.getElementById('stopAllButton'),
   distributeCheckbox: document.getElementById('distributeCheckbox'),
@@ -282,6 +288,12 @@ function formatFileSize(bytes) {
   if (n < 1024) return `${n} B`
   if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1048576).toFixed(1)} MB`
+}
+
+function formatRuntimePercent(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return 'n/a'
+  return `${n >= 10 ? n.toFixed(0) : n.toFixed(1)}%`
 }
 
 function normalizeRefreshInterval(value) {
@@ -1059,6 +1071,94 @@ function renderNodeOperationalTags(node) {
   if (Number(stats.errorCount || 0) > 0) tags.push(['status-offline', `Errors ${stats.errorCount}`])
   if (!tags.length) return ''
   return `<div class="node-alert-strip">${tags.map(([className, label]) => `<span class="tag ${className}">${escapeHtml(label)}</span>`).join('')}</div>`
+}
+
+function renderResourceMetricCard(title, metrics, meta = '') {
+  const safeMetrics = metrics || {}
+  const heapUsed = Number(safeMetrics.heapUsedBytes)
+  const heapTotal = Number(safeMetrics.heapTotalBytes)
+  const heapText = Number.isFinite(heapUsed) && heapUsed >= 0 && Number.isFinite(heapTotal) && heapTotal >= 0
+    ? `${formatFileSize(heapUsed)} / ${formatFileSize(heapTotal)}`
+    : 'n/a'
+  const uptimeMs = Number.isFinite(Number(safeMetrics.uptimeSeconds)) ? Number(safeMetrics.uptimeSeconds) * 1000 : NaN
+  return `
+    <article class="resource-metric-card">
+      <div class="file-row">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          ${meta ? `<p class="file-meta">${escapeHtml(meta)}</p>` : ''}
+        </div>
+      </div>
+      <div class="node-timing-strip">
+        <div class="metric metric-compact">CPU<strong>${escapeHtml(formatRuntimePercent(safeMetrics.cpuPercent))}</strong></div>
+        <div class="metric metric-compact">RAM<strong>${escapeHtml(formatFileSize(safeMetrics.rssBytes))}</strong></div>
+        <div class="metric metric-compact metric-wide">Heap<strong title="${escapeHtml(heapText)}">${escapeHtml(heapText)}</strong></div>
+        <div class="metric metric-compact">Uptime<strong>${escapeHtml(formatDuration(uptimeMs))}</strong></div>
+      </div>
+    </article>
+  `
+}
+
+function renderResourceMetrics() {
+  if (!elements.resourceMetricsGrid) return
+  const signature = JSON.stringify({
+    metrics: state.resourceMetrics,
+    loading: state.resourceMetricsLoading,
+    loaded: state.resourceMetricsLoaded
+  })
+  if (state.renderCache.resourceMetrics === signature) return
+  state.renderCache.resourceMetrics = signature
+
+  if (state.resourceMetricsLoading) {
+    elements.resourceMetricsGrid.innerHTML = `
+      <article class="empty-card">
+        <h3>Loading metrics</h3>
+        <p>Fetching current process resource usage.</p>
+      </article>
+    `
+    return
+  }
+
+  if (!state.resourceMetricsLoaded || !state.resourceMetrics) {
+    elements.resourceMetricsGrid.innerHTML = `
+      <article class="empty-card">
+        <h3>Metrics not loaded</h3>
+        <p>Click View Metrics to fetch current dashboard and node process usage.</p>
+      </article>
+    `
+    return
+  }
+
+  const dashboard = state.resourceMetrics.dashboard || {}
+  const nodes = Array.isArray(state.resourceMetrics.nodes) ? state.resourceMetrics.nodes : []
+  const loadedAt = state.resourceMetrics.loadedAt ? `Loaded ${formatTime(state.resourceMetrics.loadedAt)}` : ''
+  elements.resourceMetricsGrid.innerHTML = `
+    ${renderResourceMetricCard('Dashboard VM', dashboard, loadedAt)}
+    ${nodes.length ? nodes.map((node) => {
+      const botText = Array.isArray(node.botNames) && node.botNames.length ? `Bots: ${node.botNames.join(', ')}` : 'Bots: none'
+      const statusText = `Online ${Number(node.onlineCount || 0)}/${Number(node.botCount || 0)} | ${botText}`
+      return renderResourceMetricCard(node.hostLabel || 'unknown-node', node.runtimeMetrics, statusText)
+    }).join('') : `
+      <article class="empty-card">
+        <h3>No node metrics</h3>
+        <p>Wait for bot nodes to post a heartbeat.</p>
+      </article>
+    `}
+  `
+}
+
+async function loadResourceMetrics() {
+  state.resourceMetricsLoading = true
+  state.renderCache.resourceMetrics = ''
+  renderResourceMetrics()
+  try {
+    state.resourceMetrics = await requestJson('/api/dashboard/resource-metrics', { requireAuth: state.auth.verified })
+    state.resourceMetricsLoaded = true
+  } finally {
+    state.resourceMetricsLoading = false
+    state.renderCache.resourceMetrics = ''
+    renderResourceMetrics()
+  }
 }
 
 function renderBotCard(bot) {
@@ -2571,6 +2671,7 @@ async function refreshData(options = {}) {
     renderTeleportWhitelist()
     renderDataFiles()
     renderAuthState()
+    renderResourceMetrics()
   } catch (error) {
     if (!snapshotLoaded) {
       elements.serviceStatus.textContent = 'Service offline'
@@ -3246,6 +3347,8 @@ document.addEventListener('click', async (event) => {
       await onDumpInventory(button.dataset.botName || '')
     } else if (button.dataset.action === 'load-bot-inventory') {
       await onRefreshAllBotInventories()
+    } else if (button.dataset.action === 'load-resource-metrics') {
+      await loadResourceMetrics()
     } else if (button.dataset.action === 'refresh-bot-inventory') {
       await onRefreshBotInventory(button.dataset.botName || '')
     } else if (button.dataset.action === 'edit-config') {
@@ -3406,6 +3509,12 @@ if (elements.botInventoryDetails) {
     if (elements.botInventoryDetails.open && !state.botInventoryLoaded && !state.botInventoryLoading) {
       void loadBotInventories().catch((error) => pushEvent('error', error.message))
     }
+  })
+}
+
+if (elements.resourceMetricsDetails) {
+  elements.resourceMetricsDetails.addEventListener('toggle', () => {
+    renderResourceMetrics()
   })
 }
 

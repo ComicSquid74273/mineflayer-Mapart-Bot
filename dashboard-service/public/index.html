@@ -297,6 +297,27 @@
           </div>
         </details>
       </section>
+
+      <section class="panel panel-wide">
+        <details id="resourceMetricsDetails" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Resources</p>
+              <h2>VM Metrics</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div class="inventory-toolbar collapsible-content">
+            <button class="accent-button small-button" type="button" data-action="load-resource-metrics">View Metrics</button>
+          </div>
+          <div id="resourceMetricsGrid" class="resource-metrics-grid collapsible-content">
+            <article class="empty-card">
+              <h3>Metrics not loaded</h3>
+              <p>Open this section and click View Metrics to load current dashboard and node process usage.</p>
+            </article>
+          </div>
+        </details>
+      </section>
     </main>
     <footer class="dashboard-credit" aria-label="Dashboard credit">
       Made with <span aria-hidden="true">&hearts;</span> by ComicSquid

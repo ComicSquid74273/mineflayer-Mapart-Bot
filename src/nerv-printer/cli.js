@@ -14,6 +14,10 @@ const DEFAULT_DUPER_BROKEN_ALERT_AFTER_MS = 20 * 60 * 1000
 const DEFAULT_DUPER_BROKEN_REPAIR_CHECK_MS = 15 * 60 * 1000
 const PROCESS_STARTED_AT = new Date().toISOString()
 const PROCESS_INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+const processMetricsState = {
+  sampledAtMs: Date.now(),
+  cpuUsage: process.cpuUsage()
+}
 // Persists across session reconnects within one process run.
 // Set true by any 'start' command; false by any pause/stop or dashboard-disconnect.
 let printingIntentActive = false
@@ -289,6 +293,32 @@ function getUserConfigPath() {
 function toNumber(value, fallback) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function buildProcessRuntimeMetrics() {
+  const nowMs = Date.now()
+  const previousCpu = processMetricsState.cpuUsage
+  const previousSampledAtMs = processMetricsState.sampledAtMs
+  const currentCpu = process.cpuUsage()
+  const memory = process.memoryUsage()
+  const cpuDelta = {
+    user: Math.max(0, currentCpu.user - toNumber(previousCpu?.user, currentCpu.user)),
+    system: Math.max(0, currentCpu.system - toNumber(previousCpu?.system, currentCpu.system))
+  }
+  const wallMs = Math.max(1, nowMs - toNumber(previousSampledAtMs, nowMs))
+  const cpuMs = (cpuDelta.user + cpuDelta.system) / 1000
+  const cpuPercent = Math.max(0, (cpuMs / wallMs) * 100)
+
+  processMetricsState.sampledAtMs = nowMs
+  processMetricsState.cpuUsage = currentCpu
+
+  return {
+    cpuPercent: Number(cpuPercent.toFixed(1)),
+    rssBytes: Math.max(0, toNumber(memory.rss, 0)),
+    heapUsedBytes: Math.max(0, toNumber(memory.heapUsed, 0)),
+    heapTotalBytes: Math.max(0, toNumber(memory.heapTotal, 0)),
+    uptimeSeconds: Math.max(0, Math.round(process.uptime()))
+  }
 }
 
 function delay(ms) {
@@ -1384,6 +1414,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       currentNbtStartedAt: state.currentNbtStartedAt || null,
       recentChat: chatBuffer.slice(),
       latencyMs: getBotLatencyMs(bot),
+      runtimeMetrics: buildProcessRuntimeMetrics(),
       tpaTarget: getTpaTarget(config)
     }
     if (clientState) payload.clientState = clientState

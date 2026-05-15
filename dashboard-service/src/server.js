@@ -34,6 +34,12 @@ const MAX_ZIP_ENTRIES = Math.max(1, Number(process.env.DASHBOARD_MAX_ZIP_ENTRIES
 const PROTECTED_DATA_FILES = new Set(['operators.json', 'upload-history.json'])
 const TELEPORT_WHITELIST_FILE_NAME = 'whitelisted-users.json'
 const TELEPORT_WHITELIST_PATH = path.join(DATA_DIR, TELEPORT_WHITELIST_FILE_NAME)
+const PROCESS_STARTED_AT = new Date().toISOString()
+const PROCESS_INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+const processMetricsState = {
+  sampledAtMs: Date.now(),
+  cpuUsage: process.cpuUsage()
+}
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
     canViewLogs: true,
@@ -76,6 +82,40 @@ function installTimestampedConsole() {
 }
 
 installTimestampedConsole()
+
+function toFiniteNumber(value, fallback) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function buildDashboardServiceMetrics() {
+  const nowMs = Date.now()
+  const previousCpu = processMetricsState.cpuUsage
+  const previousSampledAtMs = processMetricsState.sampledAtMs
+  const currentCpu = process.cpuUsage()
+  const memory = process.memoryUsage()
+  const cpuDelta = {
+    user: Math.max(0, currentCpu.user - toFiniteNumber(previousCpu?.user, currentCpu.user)),
+    system: Math.max(0, currentCpu.system - toFiniteNumber(previousCpu?.system, currentCpu.system))
+  }
+  const wallMs = Math.max(1, nowMs - toFiniteNumber(previousSampledAtMs, nowMs))
+  const cpuMs = (cpuDelta.user + cpuDelta.system) / 1000
+  const cpuPercent = Math.max(0, (cpuMs / wallMs) * 100)
+
+  processMetricsState.sampledAtMs = nowMs
+  processMetricsState.cpuUsage = currentCpu
+
+  return {
+    runtime: 'dashboard-service',
+    runtimeInstanceId: PROCESS_INSTANCE_ID,
+    runtimeStartedAt: PROCESS_STARTED_AT,
+    cpuPercent: Number(cpuPercent.toFixed(1)),
+    rssBytes: Math.max(0, toFiniteNumber(memory.rss, 0)),
+    heapUsedBytes: Math.max(0, toFiniteNumber(memory.heapUsed, 0)),
+    heapTotalBytes: Math.max(0, toFiniteNumber(memory.heapTotal, 0)),
+    uptimeSeconds: Math.max(0, Math.round(process.uptime()))
+  }
+}
 
 function sendJson(res, statusCode, payload, extraHeaders = {}) {
   res.writeHead(statusCode, {
@@ -1721,6 +1761,27 @@ function buildDashboardSnapshot(actor = null, options = {}) {
   return body
 }
 
+function summarizeResourceNode(node) {
+  return {
+    hostLabel: node.hostLabel,
+    botNames: Array.isArray(node.botNames) ? node.botNames : [],
+    onlineCount: Number.isFinite(Number(node.onlineCount)) ? Number(node.onlineCount) : 0,
+    botCount: Number.isFinite(Number(node.botCount)) ? Number(node.botCount) : 0,
+    lastStatusAt: node.lastStatusAt || null,
+    runtimeMetrics: node.runtimeMetrics || null
+  }
+}
+
+function buildResourceMetricsSnapshot() {
+  const nodes = store.listNodes().map(summarizeResourceNode)
+  return {
+    ok: true,
+    loadedAt: new Date().toISOString(),
+    dashboard: buildDashboardServiceMetrics(),
+    nodes
+  }
+}
+
 async function waitForNodeLogDownload(store, commandId, timeoutMs = 15000) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
@@ -1763,6 +1824,10 @@ async function route(req, res) {
     const includeNodeInventory = parseUrl(req).searchParams.get('includeNodeInventory') === 'true'
     const includeEvents = parseUrl(req).searchParams.get('includeEvents') === 'true'
     return sendJson(res, 200, buildDashboardSnapshot(actor, { includeNodeInventory, includeEvents }))
+  }
+
+  if (req.method === 'GET' && pathname === '/api/dashboard/resource-metrics') {
+    return sendJson(res, 200, buildResourceMetricsSnapshot())
   }
 
   if (req.method === 'POST' && pathname === '/api/dashboard/auth/login') {
