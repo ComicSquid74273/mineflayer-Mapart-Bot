@@ -32,6 +32,8 @@ const MAX_ZIP_ENTRY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_M
 const MAX_ZIP_TOTAL_BYTES = Math.max(MAX_ZIP_ENTRY_BYTES, Number(process.env.DASHBOARD_MAX_ZIP_TOTAL_BYTES || MAX_UPLOAD_BYTES))
 const MAX_ZIP_ENTRIES = Math.max(1, Number(process.env.DASHBOARD_MAX_ZIP_ENTRIES || 1000))
 const PROTECTED_DATA_FILES = new Set(['operators.json', 'upload-history.json'])
+const TELEPORT_WHITELIST_FILE_NAME = 'whitelisted-users.json'
+const TELEPORT_WHITELIST_PATH = path.join(DATA_DIR, TELEPORT_WHITELIST_FILE_NAME)
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
     canViewLogs: true,
@@ -412,6 +414,15 @@ function normalizeMinecraftUsername(value) {
   return /^[A-Za-z0-9_]{3,16}$/.test(username) ? username : ''
 }
 
+function normalizeTeleportWhitelistUsers(users) {
+  const byLower = new Map()
+  for (const entry of Array.isArray(users) ? users : []) {
+    const username = normalizeMinecraftUsername(entry)
+    if (username) byLower.set(username.toLowerCase(), username)
+  }
+  return [...byLower.values()].sort((left, right) => String(left).localeCompare(String(right), undefined, { sensitivity: 'base' }))
+}
+
 function listConfigFiles() {
   const files = []
   if (!fs.existsSync(CONFIG_DIR)) return files
@@ -437,67 +448,89 @@ function readConfigJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'))
 }
 
-function getTeleportWhitelistFromConfig(config) {
-  const list = Array.isArray(config?.advanced?.teleportRequestWhitelist)
-    ? config.advanced.teleportRequestWhitelist
-    : []
-  return list.map(normalizeMinecraftUsername).filter(Boolean)
+function readTeleportWhitelistFile() {
+  let data = {}
+  try {
+    data = fs.existsSync(TELEPORT_WHITELIST_PATH) ? JSON.parse(fs.readFileSync(TELEPORT_WHITELIST_PATH, 'utf8')) : {}
+  } catch (err) {
+    return {
+      name: TELEPORT_WHITELIST_FILE_NAME,
+      sizeBytes: 0,
+      modifiedAt: null,
+      whitelist: [],
+      error: String(err?.message || err)
+    }
+  }
+
+  const stats = fs.existsSync(TELEPORT_WHITELIST_PATH) ? fs.statSync(TELEPORT_WHITELIST_PATH) : null
+  const users = Array.isArray(data?.users)
+    ? data.users
+    : (Array.isArray(data?.whitelist) ? data.whitelist : [])
+  return {
+    name: TELEPORT_WHITELIST_FILE_NAME,
+    sizeBytes: stats?.size || 0,
+    modifiedAt: stats?.mtime?.toISOString?.() || null,
+    whitelist: normalizeTeleportWhitelistUsers(users),
+    updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : null
+  }
 }
 
-function listTeleportWhitelistConfigs() {
-  return listConfigFiles().map((file) => {
-    try {
-      const config = readConfigJsonFile(file.path)
-      return {
-        name: file.name,
-        sizeBytes: file.sizeBytes,
-        modifiedAt: file.modifiedAt,
-        whitelist: getTeleportWhitelistFromConfig(config)
-      }
-    } catch (err) {
-      return {
-        name: file.name,
-        sizeBytes: file.sizeBytes,
-        modifiedAt: file.modifiedAt,
-        whitelist: [],
-        error: String(err?.message || err)
-      }
-    }
+function writeTeleportWhitelistFile(users) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+  const next = {
+    users: normalizeTeleportWhitelistUsers(users),
+    updatedAt: new Date().toISOString()
+  }
+  fs.writeFileSync(TELEPORT_WHITELIST_PATH, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+  return readTeleportWhitelistFile()
+}
+
+function updateTeleportWhitelistFile(updater) {
+  const current = readTeleportWhitelistFile()
+  if (current.error) return { error: current.error }
+  const file = writeTeleportWhitelistFile(updater(current.whitelist))
+  return { file }
+}
+
+function teleportWhitelistSyncCommandPayload() {
+  const file = readTeleportWhitelistFile()
+  if (file.error) return { error: file.error }
+  if (!fs.existsSync(TELEPORT_WHITELIST_PATH)) return { file, contentBase64: null, hash: null }
+  const content = fs.readFileSync(TELEPORT_WHITELIST_PATH, 'utf8')
+  return {
+    file,
+    contentBase64: Buffer.from(content, 'utf8').toString('base64'),
+    hash: crypto.createHash('sha256').update(content).digest('hex')
+  }
+}
+
+function queueTeleportWhitelistSyncForHost(hostLabel, requestedBy = 'dashboard') {
+  const safeHostLabel = String(hostLabel || '').trim()
+  if (!safeHostLabel) return null
+  const payload = teleportWhitelistSyncCommandPayload()
+  if (payload.error || !payload.contentBase64 || !payload.hash) return null
+  const reason = `teleport-whitelist-sync:${payload.hash}`
+  const existing = store.listCommands((item) =>
+    item.commandType === 'sync-teleport-whitelist' &&
+    item.targetHostLabel === safeHostLabel &&
+    item.reason === reason
+  )[0]
+  if (existing) return existing
+  return store.createCommand({
+    targetHostLabel: safeHostLabel,
+    commandType: 'sync-teleport-whitelist',
+    fileName: TELEPORT_WHITELIST_FILE_NAME,
+    contentBase64: payload.contentBase64,
+    reason,
+    requestedBy
   })
 }
 
-function updateTeleportWhitelistConfig(fileName, updater) {
-  const filePath = getConfigFilePathByName(fileName)
-  if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    return { error: 'config file not found' }
-  }
-  let config
-  try {
-    config = readConfigJsonFile(filePath)
-  } catch {
-    return { error: 'invalid config JSON' }
-  }
-  if (!config || typeof config !== 'object' || Array.isArray(config)) {
-    return { error: 'config root must be an object' }
-  }
-
-  const advanced = config.advanced && typeof config.advanced === 'object' && !Array.isArray(config.advanced)
-    ? config.advanced
-    : {}
-  const next = updater(getTeleportWhitelistFromConfig({ advanced }))
-  advanced.autoAcceptTeleportRequests = advanced.autoAcceptTeleportRequests !== false
-  advanced.teleportRequestWhitelist = next
-  config.advanced = advanced
-  fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
-  const stats = fs.statSync(filePath)
-  return {
-    file: {
-      name: path.basename(filePath),
-      sizeBytes: stats.size,
-      modifiedAt: stats.mtime.toISOString(),
-      whitelist: next
-    }
-  }
+function queueTeleportWhitelistSyncForKnownNodes(requestedBy = 'dashboard') {
+  const hostLabels = [...new Set(store.listNodes()
+    .map((node) => String(node.hostLabel || '').trim())
+    .filter(Boolean))]
+  return hostLabels.map((hostLabel) => queueTeleportWhitelistSyncForHost(hostLabel, requestedBy)).filter(Boolean)
 }
 
 function listDownloadableLogs() {
@@ -1759,24 +1792,27 @@ async function route(req, res) {
   if (pathname === '/api/dashboard/teleport-whitelist') {
     if (normalizeRole(actor?.role, '') !== 'admin') return forbidden(res, 'admin permission required')
     if (req.method === 'GET') {
-      return sendJson(res, 200, { files: listTeleportWhitelistConfigs(), configDir: CONFIG_DIR })
+      const file = readTeleportWhitelistFile()
+      return sendJson(res, 200, { file, files: [file], dataFileName: TELEPORT_WHITELIST_FILE_NAME })
     }
     if (req.method === 'POST') {
       const body = await readBody(req)
-      const fileName = String(body?.fileName || '').trim()
       const username = normalizeMinecraftUsername(body?.username)
       if (!username) return badRequest(res, 'valid Minecraft username is required')
-      const result = updateTeleportWhitelistConfig(fileName, (current) => {
+      const result = updateTeleportWhitelistFile((current) => {
         const byLower = new Map(current.map((entry) => [entry.toLowerCase(), entry]))
         byLower.set(username.toLowerCase(), username)
         return [...byLower.values()].sort((left, right) => String(left).localeCompare(String(right), undefined, { sensitivity: 'base' }))
       })
       if (result.error) return badRequest(res, result.error)
+      const syncCommands = queueTeleportWhitelistSyncForKnownNodes(actor.username)
       auditOperatorAction(actor, 'teleport-whitelist-add', `Added teleport whitelist user ${username} to ${result.file.name}.`, {
         fileName: result.file.name,
-        username
+        username,
+        syncCommandCount: syncCommands.length
       })
-      return sendJson(res, 200, { ok: true, file: result.file })
+      invalidateSnapshotCache()
+      return sendJson(res, 200, { ok: true, file: result.file, syncCommandCount: syncCommands.length })
     }
     return methodNotAllowed(res)
   }
@@ -1785,19 +1821,20 @@ async function route(req, res) {
   if (teleportWhitelistDeleteParams) {
     if (normalizeRole(actor?.role, '') !== 'admin') return forbidden(res, 'admin permission required')
     if (req.method !== 'POST') return methodNotAllowed(res)
-    const body = await readBody(req)
-    const fileName = String(body?.fileName || '').trim()
     const username = normalizeMinecraftUsername(teleportWhitelistDeleteParams.username)
     if (!username) return badRequest(res, 'valid Minecraft username is required')
-    const result = updateTeleportWhitelistConfig(fileName, (current) => (
+    const result = updateTeleportWhitelistFile((current) => (
       current.filter((entry) => entry.toLowerCase() !== username.toLowerCase())
     ))
     if (result.error) return badRequest(res, result.error)
+    const syncCommands = queueTeleportWhitelistSyncForKnownNodes(actor.username)
     auditOperatorAction(actor, 'teleport-whitelist-remove', `Removed teleport whitelist user ${username} from ${result.file.name}.`, {
       fileName: result.file.name,
-      username
+      username,
+      syncCommandCount: syncCommands.length
     })
-    return sendJson(res, 200, { ok: true, file: result.file })
+    invalidateSnapshotCache()
+    return sendJson(res, 200, { ok: true, file: result.file, syncCommandCount: syncCommands.length })
   }
 
   const configDownloadParams = matchPath(pathname, '/api/dashboard/config/:fileName/download')
@@ -2003,6 +2040,7 @@ async function route(req, res) {
     const rawIp = req.socket?.remoteAddress || req.connection?.remoteAddress || null
     const botIp = rawIp ? rawIp.replace(/^::ffff:/, '') : null
     const bot = store.upsertBotStatus({ ...body, botIp })
+    queueTeleportWhitelistSyncForHost(bot.hostLabel || body.hostLabel, 'node-status')
     return sendJson(res, 200, { ok: true, nextPollMs: 3000, bot: summarizeBot(bot, store.getBotPauseState(bot.botName)) })
   }
 

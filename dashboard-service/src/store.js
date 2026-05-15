@@ -978,7 +978,7 @@ function createStore(baseDir) {
   function compactCommandRecord(item) {
     if (!item || typeof item !== 'object') return item
     const status = String(item.status || '').trim().toLowerCase()
-    if (item.commandType === 'upload-node-file' && status !== 'pending' && status !== 'claimed' && Object.prototype.hasOwnProperty.call(item, 'contentBase64')) {
+    if ((item.commandType === 'upload-node-file' || item.commandType === 'sync-teleport-whitelist') && status !== 'pending' && status !== 'claimed' && Object.prototype.hasOwnProperty.call(item, 'contentBase64')) {
       const { contentBase64, ...rest } = item
       return rest
     }

@@ -1543,6 +1543,13 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return path.join(folder, safeName)
   }
 
+  function resolveTeleportWhitelistPath(fileName = 'whitelisted-users.json') {
+    const configuredFile = String(config.advanced?.teleportRequestWhitelistFile || '').trim()
+    if (configuredFile) return path.resolve(process.cwd(), configuredFile)
+    const safeName = path.basename(String(fileName || '').trim()) || 'whitelisted-users.json'
+    return path.resolve(process.cwd(), 'nerv-printer-config', safeName)
+  }
+
   function queueStatePath() {
     const folder = path.resolve(process.cwd(), config.files?.nbtFolder || './nerv-printer-config')
     return path.join(folder, '.dashboard-queue.json')
@@ -1801,6 +1808,34 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           invalidateNodeInventoryCache()
           noteActivity()
           await reportNodeCommandResult(command.commandId, 'succeeded', `uploaded ${fileName}`)
+        } catch (error) {
+          await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
+        }
+        return true
+      }
+      case 'sync-teleport-whitelist': {
+        const fileName = path.basename(String(command.fileName || '').trim()) || 'whitelisted-users.json'
+        if (!fileName.toLowerCase().endsWith('.json')) {
+          await reportNodeCommandResult(command.commandId, 'failed', `invalid whitelist file name: ${command.fileName || 'unknown'}`)
+          return true
+        }
+        const targetPath = resolveTeleportWhitelistPath(fileName)
+        const contentBase64 = String(command.contentBase64 || '')
+        if (!contentBase64) {
+          await reportNodeCommandResult(command.commandId, 'failed', `missing whitelist content for ${fileName}`)
+          return true
+        }
+        try {
+          const content = Buffer.from(contentBase64, 'base64').toString('utf8')
+          const parsed = JSON.parse(content)
+          const users = Array.isArray(parsed?.users)
+            ? parsed.users
+            : (Array.isArray(parsed?.whitelist) ? parsed.whitelist : [])
+          const validUsers = users.map(normalizeMinecraftUsername).filter(Boolean)
+          fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+          fs.writeFileSync(targetPath, `${JSON.stringify({ users: validUsers, updatedAt: parsed?.updatedAt || new Date().toISOString() }, null, 2)}\n`, 'utf8')
+          noteActivity()
+          await reportNodeCommandResult(command.commandId, 'succeeded', `synced teleport whitelist ${path.basename(targetPath)} users=${validUsers.length}`)
         } catch (error) {
           await reportNodeCommandResult(command.commandId, 'failed', error?.message || String(error))
         }
@@ -13271,8 +13306,19 @@ function normalizeMinecraftUsername(value) {
 }
 
 function getTeleportRequestWhitelist(config) {
-  const raw = config?.advanced?.teleportRequestWhitelist
-  const entries = Array.isArray(raw) ? raw : []
+  const advanced = config?.advanced || {}
+  const configuredFile = String(advanced.teleportRequestWhitelistFile || '').trim()
+  const whitelistFile = configuredFile
+    ? path.resolve(process.cwd(), configuredFile)
+    : path.resolve(process.cwd(), 'nerv-printer-config', 'whitelisted-users.json')
+  const fileData = readOptionalJson(whitelistFile)
+  const fileEntries = Array.isArray(fileData?.users)
+    ? fileData.users
+    : (Array.isArray(fileData?.whitelist) ? fileData.whitelist : [])
+  const configEntries = Array.isArray(advanced.teleportRequestWhitelist)
+    ? advanced.teleportRequestWhitelist
+    : []
+  const entries = [...configEntries, ...fileEntries]
   return new Set(entries
     .map((entry) => normalizeMinecraftUsername(entry).toLowerCase())
     .filter(Boolean))
@@ -13288,9 +13334,8 @@ function installTeleportRequestAutoAccept(bot, config) {
   const advanced = config.advanced || {}
   if (advanced.autoAcceptTeleportRequests === false) return
 
-  const whitelist = getTeleportRequestWhitelist(config)
-  if (!whitelist.size) {
-    console.log('[TPA] Auto-accept enabled, but teleportRequestWhitelist is empty.')
+  if (!getTeleportRequestWhitelist(config).size) {
+    console.log('[TPA] Auto-accept enabled, but teleport whitelist is empty.')
   }
 
   const command = String(advanced.teleportRequestAcceptCommand || '/tpy').trim() || '/tpy'
@@ -13301,6 +13346,7 @@ function installTeleportRequestAutoAccept(bot, config) {
     const username = extractTeleportRequestUsername(message)
     if (!username) return
     const key = username.toLowerCase()
+    const whitelist = getTeleportRequestWhitelist(config)
     if (!whitelist.has(key)) {
       if (advanced.debugPrints) console.log(`[TPA] Ignored teleport request from non-whitelisted user ${username}.`)
       return

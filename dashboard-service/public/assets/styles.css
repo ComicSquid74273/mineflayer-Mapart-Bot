@@ -339,6 +339,16 @@ h1 {
   border-radius: 20px;
 }
 
+.admin-top-panel.minimized {
+  gap: 0;
+  padding-top: 16px;
+  padding-bottom: 16px;
+}
+
+.teleport-whitelist-body.hidden {
+  display: none;
+}
+
 .teleport-whitelist-form {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
