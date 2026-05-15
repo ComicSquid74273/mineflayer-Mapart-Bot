@@ -10,7 +10,7 @@ process.on('unhandledRejection', (reason) => {
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
 const duperBrokenGroupStateCache = new Map()
-const DEFAULT_DUPER_BROKEN_ALERT_AFTER_MS = 20 * 60 * 1000
+const DEFAULT_DUPER_BROKEN_ALERT_AFTER_MS = 35 * 60 * 1000
 const DEFAULT_DUPER_BROKEN_REPAIR_CHECK_MS = 15 * 60 * 1000
 const PROCESS_STARTED_AT = new Date().toISOString()
 const PROCESS_INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -5673,8 +5673,26 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
             sameChestRetryPollMs
           )
           const haveAfterTopUp = countInventoryItems(bot, blockName)
+          const totalAfterTopUp = container.containerItems()
+            .filter((entry) => entry.type === itemId)
+            .reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+          const partialPulled = Math.max(0, Math.min(totalInChest, Math.max(moved, haveAfterTopUp - haveAtStart)))
           if (config.errorHandling?.logErrors !== false) {
             console.log(`[RESTOCK-PARTIAL] ${blockName}: have=${haveAtStart} needExact=${exactDesiredItemCount} moved=${moved} capacity=${capacityBeforePull}`)
+          }
+          if (partialPulled > 0 && typeof options.onMaterialPulled === 'function') {
+            try {
+              options.onMaterialPulled({
+                blockName,
+                pulledCount: partialPulled,
+                beforeChestTotal: totalInChest,
+                afterChestTotal: totalAfterTopUp,
+                chest: { x: spot.x, y: spot.y, z: spot.z },
+                groupIndex,
+                groupSize: Array.isArray(spotGroups[groupIndex]) ? spotGroups[groupIndex].length : null,
+                spotIndex
+              })
+            } catch { }
           }
           try { container.close() } catch { }
           container = null
@@ -5888,6 +5906,29 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           countInventoryItems(bot, blockName) >= desiredItemCount) {
           restockFailureCache.delete(blockName)
           unavailableMaterialCache.delete(blockName)
+          const totalAfterPull = container
+            ? container.containerItems()
+              .filter((entry) => entry.type === itemId)
+              .reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+            : Math.max(0, totalInChest - willPullTotal)
+          const pulledCount = Math.max(0, Math.min(
+            willPullTotal,
+            Math.max(maxWindowHave, observedHave, countInventoryItems(bot, blockName)) - haveAtStart
+          ))
+          if (pulledCount > 0 && typeof options.onMaterialPulled === 'function') {
+            try {
+              options.onMaterialPulled({
+                blockName,
+                pulledCount,
+                beforeChestTotal: totalInChest,
+                afterChestTotal: totalAfterPull,
+                chest: { x: spot.x, y: spot.y, z: spot.z },
+                groupIndex,
+                groupSize: Array.isArray(spotGroups[groupIndex]) ? spotGroups[groupIndex].length : null,
+                spotIndex
+              })
+            } catch { }
+          }
           if (container) {
             try { container.close() } catch { }
             container = null
@@ -6097,6 +6138,9 @@ async function checkDuePersistedBrokenDuperGroup(bot, config, currentBlockName =
       lastObservedAt: checkedAt,
       noIncreaseSinceAt: null,
       pendingBrokenSinceAt: null,
+      lastUsefulActivityAt: checkedAt,
+      lastPullAt: null,
+      lastPulledCount: 0,
       lastCapacity: capacity,
       lastFullEnough: fullEnough,
       status: 'healthy',
@@ -6192,6 +6236,9 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
       chests: group.map((spot) => ({ x: spot.x, y: spot.y, z: spot.z, accessPosition: spot.accessPosition || null })),
       noIncreaseSinceAt: toTimestampMs(source.noIncreaseSinceAt, 0),
       pendingBrokenSinceAt: toTimestampMs(source.pendingBrokenSinceAt, 0),
+      lastUsefulActivityAt: toTimestampMs(source.lastUsefulActivityAt, 0),
+      lastPullAt: toTimestampMs(source.lastPullAt, 0),
+      lastPulledCount: Math.max(0, toNumber(source.lastPulledCount, 0)),
       lastObservedAt: toTimestampMs(source.lastObservedAt, 0),
       lastObservedTotal: Number.isFinite(Number(source.lastObservedTotal)) ? Number(source.lastObservedTotal) : null,
       lastPreviousTotal: Number.isFinite(Number(source.lastPreviousTotal)) ? Number(source.lastPreviousTotal) : null,
@@ -6217,6 +6264,9 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
         chests: group.chests,
         noIncreaseSinceAt: group.noIncreaseSinceAt,
         pendingBrokenSinceAt: group.pendingBrokenSinceAt,
+        lastUsefulActivityAt: group.lastUsefulActivityAt,
+        lastPullAt: group.lastPullAt,
+        lastPulledCount: group.lastPulledCount,
         lastObservedAt: group.lastObservedAt,
         lastObservedTotal: group.lastObservedTotal,
         lastPreviousTotal: group.lastPreviousTotal,
@@ -6229,6 +6279,8 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
       if (!group.stateKey) continue
       const noIncreaseSinceAt = group.noIncreaseSinceAt ? new Date(group.noIncreaseSinceAt).toISOString() : null
       const pendingBrokenSinceAt = group.pendingBrokenSinceAt ? new Date(group.pendingBrokenSinceAt).toISOString() : null
+      const lastUsefulActivityAt = group.lastUsefulActivityAt ? new Date(group.lastUsefulActivityAt).toISOString() : null
+      const lastPullAt = group.lastPullAt ? new Date(group.lastPullAt).toISOString() : null
       const lastObservedAt = group.lastObservedAt ? new Date(group.lastObservedAt).toISOString() : null
       fileState.groups[group.stateKey] = {
         version: 1,
@@ -6241,6 +6293,9 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
         lastObservedAt,
         noIncreaseSinceAt,
         pendingBrokenSinceAt,
+        lastUsefulActivityAt,
+        lastPullAt,
+        lastPulledCount: Math.max(0, toNumber(group.lastPulledCount, 0)),
         lastCapacity: group.lastCapacity,
         lastFullEnough: group.lastFullEnough,
         status: group.activeBroken ? 'broken' : (group.pendingBrokenSinceAt ? 'confirming' : (group.noIncreaseSinceAt ? 'suspect' : 'healthy')),
@@ -6262,6 +6317,9 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
         chests: group.chests,
         noIncreaseSinceAt: group.noIncreaseSinceAt ? new Date(group.noIncreaseSinceAt).toISOString() : null,
         noIncreaseMs: group.noIncreaseSinceAt ? Date.now() - group.noIncreaseSinceAt : elapsedMs,
+        lastUsefulActivityAt: group.lastUsefulActivityAt ? new Date(group.lastUsefulActivityAt).toISOString() : null,
+        lastPullAt: group.lastPullAt ? new Date(group.lastPullAt).toISOString() : null,
+        lastPulledCount: group.lastPulledCount || 0,
         currentTotal: group.lastObservedTotal,
         previousTotal: group.lastPreviousTotal,
         capacity: group.lastCapacity,
@@ -6290,6 +6348,16 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     setDashboardAlert(config, 'duper-broken', message, details, 'warn')
     duperBrokenAlertActive = true
     reportDashboardWarning(config, 'duper-broken', message, details)
+  }
+
+  const noteUsefulDuperActivity = (group, now, fields = {}) => {
+    group.noIncreaseSinceAt = 0
+    group.pendingBrokenSinceAt = 0
+    group.lastUsefulActivityAt = now
+    if (toNumber(fields.pullCount, 0) > 0) {
+      group.lastPullAt = now
+      group.lastPulledCount = Math.max(0, toNumber(fields.pullCount, 0))
+    }
   }
 
   const clearDuperBrokenAlertIfNeeded = () => {
@@ -6329,7 +6397,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     if (materialIsCarpet && duperBrokenAlertAfterMs > 0) {
       await checkDuePersistedBrokenDuperGroup(bot, config, blockName)
     }
-    const attemptGroupScans = spotGroups.map(() => ({ total: 0, scanned: new Set(), chests: [] }))
+    const attemptGroupScans = spotGroups.map(() => ({ total: 0, scanned: new Set(), chests: [], pulledCount: 0, pulledChests: [] }))
     const haveBefore = countInventoryItems(bot, blockName)
     if (haveBefore >= targetCount) {
       activeBrokenGroups.clear()
@@ -6354,7 +6422,27 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
         groupScan.total += Math.max(0, toNumber(scan.count, 0))
         if (scan.chest) groupScan.chests.push({ x: scan.chest.x, y: scan.chest.y, z: scan.chest.z, count: Math.max(0, toNumber(scan.count, 0)) })
       },
-      onMaterialObserved: noteMaterialObserved
+      onMaterialObserved: noteMaterialObserved,
+      onMaterialPulled: (pull = {}) => {
+        const chestKey = materialChestPositionKey(pull.chest)
+        const groupIndex = chestKey && scanGroupByChestKey.has(chestKey)
+          ? scanGroupByChestKey.get(chestKey)
+          : (Number.isFinite(Number(pull.groupIndex)) ? Number(pull.groupIndex) : null)
+        const groupScan = groupIndex == null ? null : attemptGroupScans[groupIndex]
+        if (!groupScan) return
+        const pulledCount = Math.max(0, toNumber(pull.pulledCount, 0))
+        groupScan.pulledCount += pulledCount
+        if (pull.chest) {
+          groupScan.pulledChests.push({
+            x: pull.chest.x,
+            y: pull.chest.y,
+            z: pull.chest.z,
+            pulledCount,
+            beforeChestTotal: Math.max(0, toNumber(pull.beforeChestTotal, 0)),
+            afterChestTotal: Math.max(0, toNumber(pull.afterChestTotal, 0))
+          })
+        }
+      }
     })
     const haveAfter = countInventoryItems(bot, blockName)
     if (haveAfter > haveBefore && config.advanced?.debugPrints) {
@@ -6367,10 +6455,23 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
         const scan = attemptGroupScans[groupIndex]
         const groupSize = Array.isArray(spotGroups[groupIndex]) ? spotGroups[groupIndex].length : 0
         const fullGroupScanned = groupSize > 0 && scan.scanned.size >= groupSize
-        if (!fullGroupScanned) continue
-
         const group = groupStates[groupIndex]
         const now = Date.now()
+        if (Math.max(0, toNumber(scan.pulledCount, 0)) > 0) {
+          noteUsefulDuperActivity(group, now, { pullCount: scan.pulledCount })
+          group.lastObservedAt = now
+          if (group.activeBroken) {
+            group.activeBroken = false
+            activeBrokenGroups.delete(groupIndex)
+            changedBrokenGroups = true
+          }
+          if (config.advanced?.debugPrints) {
+            console.log(`[DUPER-GROUP-PULL] ${blockName} group=${groupIndex + 1} pulled=${scan.pulledCount}; treating as useful activity.`)
+          }
+          if (!fullGroupScanned) continue
+        }
+        if (!fullGroupScanned) continue
+
         const currentTotal = Math.max(0, toNumber(scan.total, 0))
         const previousTotal = group.lastObservedTotal
         const capacity = Math.max(1, groupSize * 27 * stackSize)
@@ -6388,9 +6489,16 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
           }
         }
 
+        if (Math.max(0, toNumber(scan.pulledCount, 0)) > 0) {
+          noteUsefulDuperActivity(group, now, { pullCount: scan.pulledCount })
+          group.lastObservedAt = now
+          group.lastPreviousTotal = previousTotal == null ? currentTotal : previousTotal
+          group.lastObservedTotal = currentTotal
+          continue
+        }
+
         if (fullEnough) {
-          group.noIncreaseSinceAt = 0
-          group.pendingBrokenSinceAt = 0
+          noteUsefulDuperActivity(group, now)
           group.lastObservedAt = Date.now()
           group.lastPreviousTotal = previousTotal
           group.lastObservedTotal = currentTotal
@@ -6406,8 +6514,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
         }
 
         if (previousTotal != null && currentTotal > previousTotal) {
-          group.noIncreaseSinceAt = 0
-          group.pendingBrokenSinceAt = 0
+          noteUsefulDuperActivity(group, now)
           group.lastObservedAt = now
           group.lastPreviousTotal = previousTotal
           group.lastObservedTotal = currentTotal
