@@ -2917,7 +2917,7 @@ async function onDumpInventory(botName) {
     pushEvent('warn', 'Login as admin before dumping inventory.')
     return
   }
-  const confirmed = confirm(`Dump all inventory stacks for ${botName}? The bot will use its configured dump station.`)
+  const confirmed = confirm(`Dump non-essential inventory stacks for ${botName}? Carpet, food, XP bottles, empty maps, filled/renamed maps, and glass panes are kept.`)
   if (!confirmed) return
   await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/dump-inventory`, {})
   pushEvent('warn', `Queued inventory dump for ${botName}`)

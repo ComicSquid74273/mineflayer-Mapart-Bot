@@ -2209,9 +2209,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       }
       case 'dump-inventory': {
         try {
-          const stacks = bot?.inventory?.items?.() || []
+          const materialNames = getKnownBuildMaterials(config, [])
+          const stacks = (bot?.inventory?.items?.() || [])
+            .filter((stack) => isDumpableInventoryItem(config, stack?.name, materialNames))
           if (!stacks.length) {
-            await reportCommandResult(claimed.commandId, 'succeeded', 'inventory already empty')
+            await reportCommandResult(claimed.commandId, 'succeeded', 'no non-essential inventory stacks to dump')
             break
           }
           state.statusDetail = 'dumping-inventory'
@@ -2220,9 +2222,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           noteActivity()
           await postStatus()
           if (dumped > 0) {
-            await reportCommandResult(claimed.commandId, 'succeeded', `dumped ${dumped} inventory stack(s)`)
+            await reportCommandResult(claimed.commandId, 'succeeded', `dumped ${dumped} non-essential inventory stack(s)`)
           } else {
-            await reportCommandResult(claimed.commandId, 'failed', 'no inventory stacks were dumped; check dump station config')
+            await reportCommandResult(claimed.commandId, 'failed', 'no non-essential inventory stacks were dumped; check dump station config')
           }
         } catch (err) {
           await reportCommandResult(claimed.commandId, 'failed', `dump inventory failed: ${err?.message || err}`)
@@ -8891,14 +8893,38 @@ async function waitForInventoryCountChangeOrTarget(bot, itemName, beforeCount, t
   return countInventoryItems(bot, itemName)
 }
 
-function getBuildMaterialSlotCapacity(bot) {
+function isProtectedInventoryItem(config, itemName) {
+  const name = String(itemName || '').replace(/^minecraft:/, '')
+  if (!name) return true
+
+  const advanced = config?.advanced || {}
+  const protectedNames = new Set([
+    String(advanced.autoEatFoodItem || 'cooked_beef').replace(/^minecraft:/, ''),
+    'experience_bottle',
+    'map',
+    'filled_map',
+    'glass_pane'
+  ])
+
+  return protectedNames.has(name)
+}
+
+function isDumpableInventoryItem(config, itemName, materialNames = new Set()) {
+  const name = String(itemName || '').replace(/^minecraft:/, '')
+  if (!name || materialNames.has(name)) return false
+  return !isProtectedInventoryItem(config, name)
+}
+
+function getBuildMaterialSlotCapacity(bot, config = null, targets = []) {
   const inventory = bot.inventory || {}
   const { start, end } = getInventorySlotBounds(bot)
+  const materialNames = config ? getKnownBuildMaterials(config, targets) : new Set()
   let capacity = 0
 
   for (let i = start; i < end; i += 1) {
     const slot = inventory.slots[i]
-    if (!slot || String(slot.name || '').endsWith('_carpet')) {
+    const name = String(slot?.name || '').replace(/^minecraft:/, '')
+    if (!slot || materialNames.has(name) || (!config && name.endsWith('_carpet')) || (config && isDumpableInventoryItem(config, name, materialNames))) {
       capacity += 1
     }
   }
@@ -8947,7 +8973,8 @@ function getNervAvailableSlots(bot, config, targets = []) {
 
   for (let slotIndex = start; slotIndex < end; slotIndex += 1) {
     const stack = bot.inventory.slots[slotIndex]
-    if (!stack || materialNames.has(stack.name)) {
+    const name = String(stack?.name || '').replace(/^minecraft:/, '')
+    if (!stack || materialNames.has(name) || isDumpableInventoryItem(config, name, materialNames)) {
       availableSlots.push({ slotIndex, stack: stack || null })
     }
   }
@@ -9206,9 +9233,9 @@ function buildNervInventoryPlanFromRequired(bot, config, targets, requiredItems,
   }
 }
 
-function estimateNeededFromTargetsLimitedByCapacity(targets, bot, capacityOverride) {
+function estimateNeededFromTargetsLimitedByCapacity(targets, bot, capacityOverride, config = null) {
   const neededByBlock = new Map()
-  const capacitySlots = (capacityOverride != null) ? capacityOverride : getBuildMaterialSlotCapacity(bot)
+  const capacitySlots = (capacityOverride != null) ? capacityOverride : getBuildMaterialSlotCapacity(bot, config, targets)
 
   for (const target of targets) {
     const name = target.blockName
