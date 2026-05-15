@@ -10,6 +10,8 @@ process.on('unhandledRejection', (reason) => {
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
 const duperBrokenGroupStateCache = new Map()
+const DEFAULT_DUPER_BROKEN_ALERT_AFTER_MS = 15 * 60 * 1000
+const DEFAULT_DUPER_BROKEN_REPAIR_CHECK_MS = 20 * 60 * 1000
 const PROCESS_STARTED_AT = new Date().toISOString()
 const PROCESS_INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 // Persists across session reconnects within one process run.
@@ -6021,8 +6023,8 @@ async function scanDuperGroupForRepairCheck(bot, config, entry, reason = 'duper-
 
 async function checkDuePersistedBrokenDuperGroup(bot, config, currentBlockName = null) {
   const advanced = config.advanced || {}
-  const intervalMs = Math.max(60 * 1000, toNumber(advanced.duperBrokenRepairCheckMs, 10 * 60 * 1000))
-  const alertAfterMs = Math.max(0, toNumber(advanced.duperBrokenAlertAfterMs, 3 * 60 * 1000))
+  const intervalMs = Math.max(60 * 1000, toNumber(advanced.duperBrokenRepairCheckMs, DEFAULT_DUPER_BROKEN_REPAIR_CHECK_MS))
+  const alertAfterMs = Math.max(0, toNumber(advanced.duperBrokenAlertAfterMs, DEFAULT_DUPER_BROKEN_ALERT_AFTER_MS))
   if (alertAfterMs <= 0) return
 
   const state = loadDuperGroupStateFile(config)
@@ -6124,7 +6126,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
   const retryMs = Math.max(250, toNumber(advanced.waitForRequiredMaterialRetryMs, 5000))
   const logEveryMs = Math.max(1000, toNumber(advanced.waitForRequiredMaterialLogEveryMs, 30000))
   const timeoutMs = Math.max(0, toNumber(advanced.waitForRequiredMaterialTimeoutMs, 0))
-  const duperBrokenAlertAfterMs = Math.max(0, toNumber(advanced.duperBrokenAlertAfterMs, 3 * 60 * 1000))
+  const duperBrokenAlertAfterMs = Math.max(0, toNumber(advanced.duperBrokenAlertAfterMs, DEFAULT_DUPER_BROKEN_ALERT_AFTER_MS))
   const duperBrokenFullRatio = Math.max(0, Math.min(1, toNumber(advanced.duperBrokenFullRatio, 0.9)))
   const startedAt = Date.now()
   const targetCount = getRequiredMaterialTargetCount(bot, blockName, requestedPulls, neededByBlock)
