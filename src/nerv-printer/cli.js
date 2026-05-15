@@ -6092,10 +6092,10 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
           group.lastObservedTotal = currentTotal
           group.lastPreviousTotal = currentTotal
           group.lastObservedAt = now
+          if (!fullEnough) group.noIncreaseSinceAt = startedAt
           if (config.advanced?.debugPrints) {
             console.log(`[DUPER-GROUP-SCAN] ${blockName} group=${groupIndex + 1} total=${currentTotal} last=none chests=${groupSize}`)
           }
-          continue
         }
 
         if (fullEnough) {
@@ -6114,7 +6114,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
           continue
         }
 
-        if (currentTotal > previousTotal) {
+        if (previousTotal != null && currentTotal > previousTotal) {
           group.noIncreaseSinceAt = 0
           group.lastObservedAt = now
           group.lastPreviousTotal = previousTotal
@@ -6130,25 +6130,27 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
           continue
         }
 
-        if (currentTotal < previousTotal) {
-          group.noIncreaseSinceAt = now
+        if (previousTotal != null && currentTotal < previousTotal) {
+          if (!group.noIncreaseSinceAt) group.noIncreaseSinceAt = now
           group.lastObservedAt = now
           group.lastPreviousTotal = previousTotal
           group.lastObservedTotal = currentTotal
-          if (group.activeBroken) {
-            group.activeBroken = false
-            activeBrokenGroups.delete(groupIndex)
-            changedBrokenGroups = true
-          }
+          const noIncreaseMs = now - group.noIncreaseSinceAt
           if (config.advanced?.debugPrints) {
-            console.log(`[DUPER-GROUP-DECREASE] ${blockName} group=${groupIndex + 1} total=${currentTotal} last=${previousTotal}; baseline reset`)
+            console.log(`[DUPER-GROUP-DECREASE] ${blockName} group=${groupIndex + 1} total=${currentTotal} last=${previousTotal} noIncrease=${Math.round(noIncreaseMs / 1000)}s`)
+          }
+          if (noIncreaseMs >= duperBrokenAlertAfterMs && !group.activeBroken) {
+            group.activeBroken = true
+            activeBrokenGroups.add(groupIndex)
+            changedBrokenGroups = true
+            console.log(`[DUPER-BROKEN-WARN] ${blockName} group=${groupIndex + 1} no refill observed after ${Math.round(noIncreaseMs / 1000)}s across ${groupSize} chest(s); total=${currentTotal} previous=${previousTotal} have=${haveAfter} target=${targetCount} reason=${reason}.`)
           }
           continue
         }
 
         if (!group.noIncreaseSinceAt) group.noIncreaseSinceAt = now
         group.lastObservedAt = now
-        group.lastPreviousTotal = previousTotal
+        group.lastPreviousTotal = previousTotal == null ? currentTotal : previousTotal
         group.lastObservedTotal = currentTotal
         const noIncreaseMs = now - group.noIncreaseSinceAt
         if (config.advanced?.debugPrints) {
