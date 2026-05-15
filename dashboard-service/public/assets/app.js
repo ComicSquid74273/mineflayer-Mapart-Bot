@@ -2361,6 +2361,7 @@ async function refreshData(options = {}) {
   if (options.background === true && state.bots.some((bot) => bot.tokenWaiting)) return
 
   state.busy = true
+  let snapshotLoaded = false
   try {
     const includeNodeInventory = options.includeNodeInventory === true || elements.nodeNbtDetails?.open === true || String(state.nbtSearch || '').trim().length > 0
     const includeEvents = options.includeEvents === true || elements.operatorLogDetails?.open === true
@@ -2371,6 +2372,7 @@ async function refreshData(options = {}) {
     const snapshotQuery = snapshotParams.toString()
     const snapshotUrl = `/api/dashboard/snapshot${snapshotQuery ? `?${snapshotQuery}` : ''}`
     const snapshot = await requestJson(snapshotUrl, { requireAuth: state.auth.verified })
+    snapshotLoaded = true
     state.bots = Array.isArray(snapshot.bots) ? snapshot.bots : []
     state.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : []
     state.nodeInventoryLoaded = snapshot.nodeInventoryIncluded === true
@@ -2403,21 +2405,29 @@ async function refreshData(options = {}) {
     renderFleetJump()
     renderBots()
     renderQueueSummary()
-    const logs = state.auth.verified && hasPermission('canViewLogs')
-      ? await requestJson('/api/dashboard/logs', { requireAuth: true })
-      : { items: [] }
-    const operators = state.auth.verified && hasPermission('canManageOperators')
-      ? await requestJson('/api/dashboard/operators', { requireAuth: true })
-      : { items: [] }
-    const configs = state.auth.verified && hasPermission('canManageOperators')
-      ? await requestJson('/api/dashboard/config', { requireAuth: true })
-      : { files: [] }
-    const teleportWhitelist = state.auth.verified && hasPermission('admin')
-      ? await requestJson('/api/dashboard/teleport-whitelist', { requireAuth: true })
-      : { files: [] }
-    const dataFiles = state.auth.verified && hasPermission('canManageOperators')
-      ? await requestJson('/api/dashboard/data', { requireAuth: true })
-      : { files: [] }
+    const optionalRequests = await Promise.allSettled([
+      state.auth.verified && hasPermission('canViewLogs')
+        ? requestJson('/api/dashboard/logs', { requireAuth: true })
+        : Promise.resolve({ items: [] }),
+      state.auth.verified && hasPermission('canManageOperators')
+        ? requestJson('/api/dashboard/operators', { requireAuth: true })
+        : Promise.resolve({ items: [] }),
+      state.auth.verified && hasPermission('canManageOperators')
+        ? requestJson('/api/dashboard/config', { requireAuth: true })
+        : Promise.resolve({ files: [] }),
+      state.auth.verified && hasPermission('admin')
+        ? requestJson('/api/dashboard/teleport-whitelist', { requireAuth: true })
+        : Promise.resolve({ files: [] }),
+      state.auth.verified && hasPermission('canManageOperators')
+        ? requestJson('/api/dashboard/data', { requireAuth: true })
+        : Promise.resolve({ files: [] })
+    ])
+    const optionalFallbacks = [{ items: [] }, { items: [] }, { files: [] }, { files: [] }, { files: [] }]
+    const [logs, operators, configs, teleportWhitelist, dataFiles] = optionalRequests.map((result, index) => {
+      if (result.status === 'fulfilled') return result.value
+      pushEvent('warn', result.reason?.message || 'A dashboard detail panel failed to load.')
+      return optionalFallbacks[index]
+    })
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = Array.isArray(configs.files) ? configs.files : []
@@ -2446,12 +2456,14 @@ async function refreshData(options = {}) {
     renderDataFiles()
     renderAuthState()
   } catch (error) {
-    elements.serviceStatus.textContent = 'Service offline'
-    elements.serviceStatus.className = 'status-pill status-offline'
-    if (elements.queueRemainingValue) elements.queueRemainingValue.textContent = '--'
-    if (elements.queueCompletedValue) elements.queueCompletedValue.textContent = '--'
-    if (elements.queueTotalValue) elements.queueTotalValue.textContent = '--'
-    if (elements.queueRemainingMeta) elements.queueRemainingMeta.textContent = 'Service offline'
+    if (!snapshotLoaded) {
+      elements.serviceStatus.textContent = 'Service offline'
+      elements.serviceStatus.className = 'status-pill status-offline'
+      if (elements.queueRemainingValue) elements.queueRemainingValue.textContent = '--'
+      if (elements.queueCompletedValue) elements.queueCompletedValue.textContent = '--'
+      if (elements.queueTotalValue) elements.queueTotalValue.textContent = '--'
+      if (elements.queueRemainingMeta) elements.queueRemainingMeta.textContent = 'Service offline'
+    }
     pushEvent('error', error.message)
   } finally {
     state.nodeInventoryLoading = false
