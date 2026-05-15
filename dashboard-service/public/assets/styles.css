@@ -41,6 +41,17 @@ textarea {
   padding: 28px 0 40px;
 }
 
+.dashboard-credit {
+  margin-top: 24px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.dashboard-credit span {
+  color: var(--danger-strong);
+}
+
 .hero {
   display: flex;
   justify-content: space-between;
