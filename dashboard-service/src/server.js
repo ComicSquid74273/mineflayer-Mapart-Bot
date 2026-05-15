@@ -1510,7 +1510,7 @@ function buildDashboardAlerts(bots, nodes, assignments, assignmentSignals = null
     }))
   }
   if (duperBrokenBots.length) {
-    alerts.push(createAlert('warn', 'duper-broken', 'Duper repair needed', `${duperBrokenBots.length} bot(s) have not seen carpet refill for 10 minutes.`, {
+    alerts.push(createAlert('warn', 'duper-broken', 'Duper repair needed', `${duperBrokenBots.length} bot(s) reported carpet duper groups not refilling.`, {
       botNames: duperBrokenBots.map((bot) => bot.botName),
       bots: duperBrokenBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
     }))
