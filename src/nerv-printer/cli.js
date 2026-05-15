@@ -6011,14 +6011,6 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
 
   const noteMaterialObserved = (observation = {}) => {
     const groupIndex = Number.isFinite(Number(observation.groupIndex)) ? Number(observation.groupIndex) : null
-    if (groupIndex != null && groupStates[groupIndex]) {
-      const group = groupStates[groupIndex]
-      group.noIncreaseSinceAt = 0
-      group.lastObservedAt = Date.now()
-      group.activeBroken = false
-      activeBrokenGroups.delete(groupIndex)
-      clearDuperBrokenAlertIfNeeded()
-    }
     if (config.advanced?.debugPrints) {
       const groupText = groupIndex == null ? '' : ` group=${groupIndex + 1}`
       console.log(`[REQUIRED-MATERIAL-WAIT-OBSERVED] ${blockName}${groupText} count=${observation.count ?? 'unknown'} chest=${observation.chest ? `${observation.chest.x},${observation.chest.y},${observation.chest.z}` : 'unknown'}`)
