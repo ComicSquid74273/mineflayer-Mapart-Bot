@@ -1308,6 +1308,9 @@ function buildDashboardAlerts(bots, nodes, assignments) {
   const activeWaterBots = bots.filter((bot) =>
     Array.isArray(bot.alerts) && bot.alerts.some((alert) => alert?.active === true && String(alert.category || '') === 'platform-water')
   )
+  const duperBrokenBots = bots.filter((bot) =>
+    Array.isArray(bot.alerts) && bot.alerts.some((alert) => alert?.active === true && String(alert.category || '') === 'duper-broken')
+  )
   const stockWarnings = bots.filter((bot) => bot.online === true).flatMap((bot) => (Array.isArray(bot.warnings) ? bot.warnings : [])
     .filter((warning) => /stock|material|food|map|xp|bottle/i.test(`${warning.category || ''} ${warning.message || ''}`))
     .map((warning) => ({ bot, warning })))
@@ -1325,6 +1328,12 @@ function buildDashboardAlerts(bots, nodes, assignments) {
     alerts.push(createAlert('critical', 'platform-water', 'Water on platform', `${activeWaterBots.length} bot(s) are paused until water is removed from the carpet layer.`, {
       botNames: activeWaterBots.map((bot) => bot.botName),
       bots: activeWaterBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+    }))
+  }
+  if (duperBrokenBots.length) {
+    alerts.push(createAlert('warn', 'duper-broken', 'Duper repair needed', `${duperBrokenBots.length} bot(s) have not seen carpet refill for 10 minutes.`, {
+      botNames: duperBrokenBots.map((bot) => bot.botName),
+      bots: duperBrokenBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
     }))
   }
   if (longRuntimeBots.length) {

@@ -5432,6 +5432,18 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           break
         }
 
+        if (typeof options.onMaterialObserved === 'function') {
+          try {
+            options.onMaterialObserved({
+              blockName,
+              count: totalInChest,
+              chest: { x: spot.x, y: spot.y, z: spot.z },
+              groupIndex,
+              spotIndex
+            })
+          } catch { }
+        }
+
         // How much do we need vs what the chest has?
         const haveAtStart = countInventoryItems(bot, blockName)
         retryStartHave = haveAtStart
@@ -5816,28 +5828,49 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
   const retryMs = Math.max(250, toNumber(advanced.waitForRequiredMaterialRetryMs, 5000))
   const logEveryMs = Math.max(1000, toNumber(advanced.waitForRequiredMaterialLogEveryMs, 30000))
   const timeoutMs = Math.max(0, toNumber(advanced.waitForRequiredMaterialTimeoutMs, 0))
+  const duperBrokenAlertAfterMs = Math.max(0, toNumber(advanced.duperBrokenAlertAfterMs, 10 * 60 * 1000))
   const startedAt = Date.now()
   const targetCount = getRequiredMaterialTargetCount(bot, blockName, requestedPulls, neededByBlock)
   const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
+  const materialIsCarpet = String(blockName || '').endsWith('_carpet')
   let attempt = 0
+  let materialObserved = false
+  let duperBrokenAlertSent = false
+
+  const noteMaterialObserved = (observation = {}) => {
+    materialObserved = true
+    if (duperBrokenAlertSent) {
+      clearDashboardAlert(config, 'duper-broken')
+      duperBrokenAlertSent = false
+    }
+    if (config.advanced?.debugPrints) {
+      console.log(`[REQUIRED-MATERIAL-WAIT-OBSERVED] ${blockName} count=${observation.count ?? 'unknown'} chest=${observation.chest ? `${observation.chest.x},${observation.chest.y},${observation.chest.z}` : 'unknown'}`)
+    }
+  }
 
   while (true) {
     assertRuntimeContinue(bot, config, 'waiting-material-restock')
     attempt += 1
     const haveBefore = countInventoryItems(bot, blockName)
-    if (haveBefore >= targetCount) return true
+    if (haveBefore >= targetCount) {
+      if (duperBrokenAlertSent) clearDashboardAlert(config, 'duper-broken')
+      return true
+    }
 
     config.__dashboardRuntime?.setStatusDetail?.('waiting-material-restock')
     restockFailureCache.delete(blockName)
     unavailableMaterialCache.delete(blockName)
     const restocked = await restockMaterial(bot, config, blockName, requestedPulls, neededByBlock, {
       ignoreFailureCooldown: true,
-      markUnavailableOnFailure: false
+      markUnavailableOnFailure: false,
+      onMaterialObserved: noteMaterialObserved
     })
     const haveAfter = countInventoryItems(bot, blockName)
+    if (haveAfter > haveBefore) noteMaterialObserved({ count: haveAfter - haveBefore, chest: null })
     if (restocked || haveAfter >= targetCount) {
       restockFailureCache.delete(blockName)
       unavailableMaterialCache.delete(blockName)
+      if (duperBrokenAlertSent) clearDashboardAlert(config, 'duper-broken')
       return true
     }
 
@@ -5852,6 +5885,24 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
       console.log(`[REQUIRED-MATERIAL-WAIT-WARN] ${blockName} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s; have=${haveAfter} target=${targetCount} reason=${reason}.`)
       return false
+    }
+
+    const elapsedMs = Date.now() - startedAt
+    if (materialIsCarpet && duperBrokenAlertAfterMs > 0 && !materialObserved && !duperBrokenAlertSent && elapsedMs >= duperBrokenAlertAfterMs) {
+      const message = `Duper may be broken: no ${blockName} refill seen for ${Math.round(duperBrokenAlertAfterMs / 60000)}m; repair needed.`
+      const details = {
+        blockName,
+        reason,
+        elapsedMs,
+        targetCount,
+        have: haveAfter,
+        chestCount: spots.length,
+        attempt
+      }
+      setDashboardAlert(config, 'duper-broken', message, details, 'warn')
+      reportDashboardWarning(config, 'duper-broken', message, details)
+      console.log(`[DUPER-BROKEN-WARN] ${blockName} no refill observed after ${Math.round(elapsedMs / 1000)}s across ${spots.length} configured chest(s); have=${haveAfter} target=${targetCount} reason=${reason}.`)
+      duperBrokenAlertSent = true
     }
 
     logThrottled(
