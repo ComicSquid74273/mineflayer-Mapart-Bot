@@ -65,10 +65,23 @@
       </div>
     </header>
 
+    <nav class="section-jump-bar" aria-label="Dashboard sections">
+      <a class="section-jump-link" href="#fleetPanel">Fleet</a>
+      <a class="section-jump-link" href="#uploadPanel">Upload</a>
+      <a class="section-jump-link" href="#operatorsPanel">Operators</a>
+      <a class="section-jump-link" href="#dataFilesPanel">Data</a>
+      <a class="section-jump-link" href="#nodeNbtDetails">NBT Files</a>
+      <a class="section-jump-link" href="#logsDetails">Logs</a>
+      <a class="section-jump-link" href="#teleportWhitelistPanel">Whitelist</a>
+      <a class="section-jump-link" href="#operatorLogDetails">Activity</a>
+      <a class="section-jump-link" href="#botInventoryDetails">Inventory</a>
+      <a class="section-jump-link" href="#resourceMetricsDetails">Resources</a>
+    </nav>
+
     <section id="alertsBar" class="alerts-bar hidden"></section>
 
     <main class="layout-grid">
-      <section class="panel panel-wide">
+      <section id="fleetPanel" class="panel panel-wide">
         <div class="panel-header">
           <div>
             <p class="panel-kicker">Fleet</p>
@@ -88,7 +101,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section id="uploadPanel" class="panel">
         <div class="panel-header">
           <div>
             <p class="panel-kicker">Delivery</p>
@@ -146,7 +159,7 @@
         <div id="uploadAssignmentsList" class="file-list"></div>
       </section>
 
-      <section class="panel panel-wide">
+      <section id="operatorsPanel" class="panel panel-wide">
         <div class="panel-header">
           <div>
             <p class="panel-kicker">Admin</p>
@@ -187,7 +200,7 @@
         </div>
       </section>
 
-      <section class="panel panel-wide">
+      <section id="dataFilesPanel" class="panel panel-wide">
         <div class="panel-header">
           <div>
             <p class="panel-kicker">Admin</p>
@@ -220,7 +233,7 @@
       </section>
 
       <section class="panel panel-wide">
-        <details class="collapsible-section">
+        <details id="logsDetails" class="collapsible-section">
           <summary class="panel-header collapsible-summary">
             <div>
               <p class="panel-kicker">Diagnostics</p>

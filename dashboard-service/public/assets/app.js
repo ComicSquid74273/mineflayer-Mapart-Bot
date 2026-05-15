@@ -3267,6 +3267,20 @@ async function onDeleteOperator(username) {
 
 document.addEventListener('click', async (event) => {
   markUserInteraction()
+  const sectionLink = event.target.closest('a.section-jump-link')
+  if (sectionLink) {
+    const targetId = String(sectionLink.getAttribute('href') || '').replace(/^#/, '')
+    const target = targetId ? document.getElementById(targetId) : null
+    if (target) {
+      event.preventDefault()
+      if (target.tagName === 'DETAILS') target.open = true
+      const nestedDetails = target.querySelector?.('details')
+      if (nestedDetails) nestedDetails.open = true
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      history.replaceState(null, '', `#${targetId}`)
+    }
+    return
+  }
   const button = event.target.closest('button[data-action]')
   if (!button) return
   const requiredPermission = button.dataset.permissionNeeded || ''
