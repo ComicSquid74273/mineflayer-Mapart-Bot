@@ -67,33 +67,6 @@
 
     <section id="alertsBar" class="alerts-bar hidden"></section>
 
-    <section id="teleportWhitelistPanel" class="panel admin-top-panel hidden">
-      <div class="panel-header">
-        <div>
-          <p class="panel-kicker">Admin</p>
-          <h2>Teleport Whitelist</h2>
-        </div>
-        <div class="status-inline">
-          <span id="teleportWhitelistStatus" class="timestamp">whitelisted-users.json</span>
-          <button id="teleportWhitelistToggle" class="ghost-button small-button" type="button" data-permission-needed="admin">Show</button>
-        </div>
-      </div>
-      <div id="teleportWhitelistBody" class="teleport-whitelist-body hidden">
-        <form id="teleportWhitelistForm" class="teleport-whitelist-form">
-          <label>
-            <span>Whitelist file</span>
-            <select id="teleportWhitelistConfig"></select>
-          </label>
-          <label>
-            <span>Minecraft username</span>
-            <input id="teleportWhitelistUsername" type="text" placeholder="ComicSquid74273" autocomplete="off">
-          </label>
-          <button class="accent-button" type="submit" data-permission-needed="admin">Add User</button>
-        </form>
-        <div id="teleportWhitelistList" class="whitelist-list"></div>
-      </div>
-    </section>
-
     <main class="layout-grid">
       <section class="panel panel-wide">
         <div class="panel-header">
@@ -262,6 +235,33 @@
             </article>
           </div>
         </details>
+      </section>
+
+      <section id="teleportWhitelistPanel" class="panel admin-top-panel panel-wide hidden">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Admin</p>
+            <h2>Teleport Whitelist</h2>
+          </div>
+          <div class="status-inline">
+            <span id="teleportWhitelistStatus" class="timestamp">whitelisted-users.json</span>
+            <button id="teleportWhitelistToggle" class="ghost-button small-button" type="button" data-permission-needed="admin">Show</button>
+          </div>
+        </div>
+        <div id="teleportWhitelistBody" class="teleport-whitelist-body hidden">
+          <form id="teleportWhitelistForm" class="teleport-whitelist-form">
+            <label>
+              <span>Whitelist file</span>
+              <select id="teleportWhitelistConfig"></select>
+            </label>
+            <label>
+              <span>Minecraft username</span>
+              <input id="teleportWhitelistUsername" type="text" placeholder="ComicSquid74273" autocomplete="off">
+            </label>
+            <button class="accent-button" type="submit" data-permission-needed="admin">Add User</button>
+          </form>
+          <div id="teleportWhitelistList" class="whitelist-list"></div>
+        </div>
       </section>
 
       <section class="panel panel-wide">
