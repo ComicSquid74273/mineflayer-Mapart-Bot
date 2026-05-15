@@ -1088,6 +1088,31 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return mapDashboardLocationDetail(currentRuntimeLocation())
   }
 
+  function buildBotInventorySnapshot() {
+    const stacks = bot?.inventory?.items?.() || []
+    const items = stacks
+      .map((stack) => ({
+        slot: Number.isFinite(Number(stack?.slot)) ? Number(stack.slot) : null,
+        type: Number.isFinite(Number(stack?.type)) ? Number(stack.type) : null,
+        name: String(stack?.name || 'unknown'),
+        displayName: String(stack?.displayName || stack?.name || 'Unknown'),
+        count: Math.max(0, toNumber(stack?.count, 0))
+      }))
+      .filter((item) => item.count > 0)
+      .sort((left, right) => {
+        const leftSlot = Number.isFinite(Number(left.slot)) ? Number(left.slot) : 9999
+        const rightSlot = Number.isFinite(Number(right.slot)) ? Number(right.slot) : 9999
+        return leftSlot - rightSlot
+      })
+    const totalCount = items.reduce((sum, item) => sum + toNumber(item.count, 0), 0)
+    return {
+      items,
+      stackCount: items.length,
+      totalCount,
+      updatedAt: new Date().toISOString()
+    }
+  }
+
   function listNbtFilesInFolder(folder, warningKey, warningLabel) {
     if (!fs.existsSync(folder)) return []
     try {
@@ -1352,10 +1377,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     state[key].unref?.()
   }
 
-  async function reportCommandResult(commandId, status, resultMessage) {
+  async function reportCommandResult(commandId, status, resultMessage, extraPayload = {}) {
     await createDashboardRequest(`${dashboard.serviceUrl}/api/bots/${encodeURIComponent(botName)}/commands/${encodeURIComponent(commandId)}/result`, 'POST', {
       status,
-      resultMessage
+      resultMessage,
+      ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {})
     })
   }
 
@@ -2164,6 +2190,42 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           await reportCommandResult(claimed.commandId, 'succeeded', `sent: ${msg}`)
         } catch (err) {
           await reportCommandResult(claimed.commandId, 'failed', `chat failed: ${err?.message || err}`)
+        }
+        break
+      }
+      case 'inventory-snapshot': {
+        try {
+          const snapshot = buildBotInventorySnapshot()
+          await reportCommandResult(
+            claimed.commandId,
+            'succeeded',
+            `inventory: ${snapshot.stackCount} stack(s), ${snapshot.totalCount} item(s)`,
+            { inventory: snapshot }
+          )
+        } catch (err) {
+          await reportCommandResult(claimed.commandId, 'failed', `inventory snapshot failed: ${err?.message || err}`)
+        }
+        break
+      }
+      case 'dump-inventory': {
+        try {
+          const stacks = bot?.inventory?.items?.() || []
+          if (!stacks.length) {
+            await reportCommandResult(claimed.commandId, 'succeeded', 'inventory already empty')
+            break
+          }
+          state.statusDetail = 'dumping-inventory'
+          noteActivity()
+          const dumped = await dumpCarpetStacks(bot, config, stacks, 'dashboardDumpInventory')
+          noteActivity()
+          await postStatus()
+          if (dumped > 0) {
+            await reportCommandResult(claimed.commandId, 'succeeded', `dumped ${dumped} inventory stack(s)`)
+          } else {
+            await reportCommandResult(claimed.commandId, 'failed', 'no inventory stacks were dumped; check dump station config')
+          }
+        } catch (err) {
+          await reportCommandResult(claimed.commandId, 'failed', `dump inventory failed: ${err?.message || err}`)
         }
         break
       }

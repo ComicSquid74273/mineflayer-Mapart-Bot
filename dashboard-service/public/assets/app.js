@@ -37,6 +37,9 @@ const state = {
   nodeInventoryLoaded: false,
   nodeInventoryLoading: false,
   pendingNodeInventoryRefresh: false,
+  botInventories: [],
+  botInventoryLoaded: false,
+  botInventoryLoading: false,
   localReprintCommands: [],
   configEditor: { name: null, content: '', dirty: false },
   refreshTimer: null,
@@ -59,6 +62,7 @@ const state = {
     uploadHistory: '',
     uploadAssignments: '',
     failedQueue: '',
+    botInventory: '',
     fleetJump: '',
     queueSummary: '',
     events: '',
@@ -98,6 +102,8 @@ const elements = {
   backToTopButton: document.getElementById('backToTopButton'),
   botsGrid: document.getElementById('botsGrid'),
   botSummary: document.getElementById('botSummary'),
+  botInventoryDetails: document.getElementById('botInventoryDetails'),
+  botInventoryGrid: document.getElementById('botInventoryGrid'),
   eventLog: document.getElementById('eventLog'),
   fileInput: document.getElementById('fileInput'),
   fleetJump: document.getElementById('fleetJump'),
@@ -543,6 +549,7 @@ function renderAuthState() {
   }
 
   renderTeleportWhitelist()
+  renderBotInventory()
 }
 
 function updateBackToTopVisibility() {
@@ -1211,6 +1218,82 @@ function renderBots() {
   }
 
   elements.botsGrid.innerHTML = renderedNodes.join('')
+}
+
+function renderBotInventory() {
+  if (!elements.botInventoryGrid) return
+  const sig = JSON.stringify({
+    isAdmin: hasPermission('admin'),
+    loaded: state.botInventoryLoaded,
+    loading: state.botInventoryLoading,
+    bots: state.bots.map((bot) => `${bot.botName}:${bot.online}:${bot.hostLabel}`),
+    inventories: state.botInventories
+  })
+  if (state.renderCache.botInventory === sig) return
+  state.renderCache.botInventory = sig
+
+  if (!hasPermission('admin')) {
+    elements.botInventoryGrid.innerHTML = `
+      <article class="empty-card">
+        <h3>Admin only</h3>
+        <p>Log in as admin to request inventory snapshots or dump bot inventory.</p>
+      </article>
+    `
+    return
+  }
+
+  if (!state.bots.length) {
+    elements.botInventoryGrid.innerHTML = `
+      <article class="empty-card">
+        <h3>No inventory yet</h3>
+        <p>Known bots will appear here after they report dashboard status.</p>
+      </article>
+    `
+    return
+  }
+
+  const byBotName = new Map(state.botInventories.map((item) => [String(item.botName || ''), item]))
+  elements.botInventoryGrid.innerHTML = state.bots
+    .slice()
+    .sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
+    .map((bot) => {
+      const inventory = byBotName.get(String(bot.botName || '')) || {}
+      const items = Array.isArray(inventory.items) ? inventory.items.filter((item) => Number(item?.count || 0) > 0) : []
+      const fallbackTotal = items.reduce((sum, item) => {
+        const count = Number(item.count || 0)
+        return sum + (Number.isFinite(count) ? count : 0)
+      }, 0)
+      const rawStackCount = Number(inventory.stackCount)
+      const rawTotalCount = Number(inventory.totalCount)
+      const stackCount = Number.isFinite(rawStackCount) ? Math.max(0, rawStackCount) : items.length
+      const totalCount = Number.isFinite(rawTotalCount) ? Math.max(0, rawTotalCount) : fallbackTotal
+      const canDump = hasPermission('admin') && bot.online && items.length > 0
+      const canRefresh = hasPermission('admin') && bot.online
+      const itemHtml = items.length
+        ? items.map((item) => `
+          <div class="inventory-item" title="${escapeHtml(item.name || '')}">
+            <span class="inventory-slot">${escapeHtml(item.slot ?? '-')}</span>
+            <span class="inventory-name">${escapeHtml(item.displayName || item.name || 'Unknown')}</span>
+            <strong class="inventory-count">${escapeHtml(item.count || 0)}</strong>
+          </div>
+        `).join('')
+        : '<p class="hint">Inventory is empty.</p>'
+      return `
+        <article class="inventory-card">
+          <div class="file-row">
+            <div>
+              <strong>${escapeHtml(bot.botName)}</strong>
+              <p class="file-meta">${escapeHtml(bot.hostLabel || 'unknown-host')} | ${bot.online ? 'online' : 'offline'} | ${escapeHtml(stackCount)} stack(s), ${escapeHtml(totalCount)} item(s) | updated ${escapeHtml(formatTime(inventory.updatedAt))}</p>
+            </div>
+            <div class="file-actions">
+              <button class="ghost-button small-button" type="button" data-action="refresh-bot-inventory" data-permission-needed="admin" data-bot-name="${escapeHtml(bot.botName)}" ${canRefresh ? '' : 'disabled'}>Refresh</button>
+              <button class="danger-button small-button" type="button" data-action="dump-inventory" data-permission-needed="admin" data-bot-name="${escapeHtml(bot.botName)}" ${canDump ? '' : 'disabled'}>Dump</button>
+            </div>
+          </div>
+          <div class="inventory-items">${itemHtml}</div>
+        </article>
+      `
+    }).join('')
 }
 
 function renderFiles() {
@@ -2404,6 +2487,7 @@ async function refreshData(options = {}) {
     renderSummary()
     renderFleetJump()
     renderBots()
+    renderBotInventory()
     renderQueueSummary()
     const optionalRequests = await Promise.allSettled([
       state.auth.verified && hasPermission('canViewLogs')
@@ -2822,6 +2906,48 @@ async function onResetCurrentNbt(botName, currentNbt = '') {
   await refreshData()
 }
 
+async function onDumpInventory(botName) {
+  if (!hasPermission('admin')) {
+    pushEvent('warn', 'Login as admin before dumping inventory.')
+    return
+  }
+  const confirmed = confirm(`Dump all inventory stacks for ${botName}? The bot will use its configured dump station.`)
+  if (!confirmed) return
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/dump-inventory`, {})
+  pushEvent('warn', `Queued inventory dump for ${botName}`)
+  await loadBotInventories()
+}
+
+async function loadBotInventories() {
+  if (!hasPermission('admin')) {
+    pushEvent('warn', 'Login as admin before loading bot inventory.')
+    return
+  }
+  if (!elements.botInventoryDetails?.open) return
+  state.botInventoryLoading = true
+  state.renderCache.botInventory = ''
+  renderBotInventory()
+  try {
+    const result = await requestJson('/api/dashboard/bot-inventory', { requireAuth: true })
+    state.botInventories = Array.isArray(result.items) ? result.items : []
+    state.botInventoryLoaded = true
+    pushEvent('info', 'Loaded cached bot inventory')
+  } finally {
+    state.botInventoryLoading = false
+    state.renderCache.botInventory = ''
+    renderBotInventory()
+  }
+}
+
+async function onRefreshBotInventory(botName) {
+  if (!hasPermission('admin')) {
+    pushEvent('warn', 'Login as admin before refreshing bot inventory.')
+    return
+  }
+  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/inventory-refresh`, {})
+  pushEvent('info', `Queued inventory refresh for ${botName}`)
+}
+
 async function onTpaBot(botName, tpaTarget) {
   if (!hasPermission('canOperate')) {
     pushEvent('warn', 'Login as an operator before sending TPA commands.')
@@ -3012,6 +3138,12 @@ document.addEventListener('click', async (event) => {
       await onHomePlatformNode(button.dataset.hostLabel || '')
     } else if (button.dataset.action === 'reset-current-nbt') {
       await onResetCurrentNbt(button.dataset.botName || '', button.dataset.currentNbt || '')
+    } else if (button.dataset.action === 'dump-inventory') {
+      await onDumpInventory(button.dataset.botName || '')
+    } else if (button.dataset.action === 'load-bot-inventory') {
+      await loadBotInventories()
+    } else if (button.dataset.action === 'refresh-bot-inventory') {
+      await onRefreshBotInventory(button.dataset.botName || '')
     } else if (button.dataset.action === 'edit-config') {
       await onEditConfig(button.dataset.configName || '')
     } else if (button.dataset.action === 'edit-node-config') {
@@ -3161,6 +3293,14 @@ if (elements.nodeNbtDetails) {
   elements.nodeNbtDetails.addEventListener('toggle', () => {
     if (elements.nodeNbtDetails.open && !state.nodeInventoryLoaded) {
       void refreshData({ includeNodeInventory: true }).catch((error) => pushEvent('error', error.message))
+    }
+  })
+}
+
+if (elements.botInventoryDetails) {
+  elements.botInventoryDetails.addEventListener('toggle', () => {
+    if (elements.botInventoryDetails.open && !state.botInventoryLoaded && !state.botInventoryLoading) {
+      void loadBotInventories().catch((error) => pushEvent('error', error.message))
     }
   })
 }

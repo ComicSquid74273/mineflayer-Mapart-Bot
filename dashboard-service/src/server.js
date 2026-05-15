@@ -308,6 +308,12 @@ function reqIsAdminOnlyPath(pathname, method) {
     || Boolean(matchPath(pathname, '/api/dashboard/teleport-whitelist/:username/delete'))) {
     return true
   }
+  if (pathname === '/api/dashboard/bot-inventory'
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/inventory'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/inventory-refresh'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/dump-inventory'))) {
+    return true
+  }
   return method === 'POST' && (
     pathname === '/api/dashboard/reset-everything'
     || pathname === '/api/dashboard/nodes/finished-maps/delete-all'
@@ -911,6 +917,20 @@ function summarizeBot(bot, pauseState = null) {
     tpaTarget: bot.tpaTarget || null,
     clientState: bot.clientState || null,
     recentChat: Array.isArray(bot.recentChat) ? bot.recentChat : []
+  }
+}
+
+function summarizeBotInventory(item, bot = null) {
+  const inventory = item && typeof item === 'object' ? item : {}
+  return {
+    botName: inventory.botName || bot?.botName || null,
+    hostLabel: inventory.hostLabel || bot?.hostLabel || null,
+    online: bot ? summarizeBot(bot, store.getBotPauseState(bot.botName)).online : false,
+    items: Array.isArray(inventory.items) ? inventory.items : [],
+    stackCount: Number.isFinite(Number(inventory.stackCount)) ? Math.max(0, Number(inventory.stackCount)) : 0,
+    totalCount: Number.isFinite(Number(inventory.totalCount)) ? Math.max(0, Number(inventory.totalCount)) : 0,
+    updatedAt: inventory.updatedAt || null,
+    serverStatusAt: inventory.serverStatusAt || null
   }
 }
 
@@ -2170,7 +2190,8 @@ async function route(req, res) {
     if (error) return badRequest(res, error)
     const rawIp = req.socket?.remoteAddress || req.connection?.remoteAddress || null
     const botIp = rawIp ? rawIp.replace(/^::ffff:/, '') : null
-    const bot = store.upsertBotStatus({ ...body, botIp })
+    const { inventory: ignoredInventory, ...statusBody } = body || {}
+    const bot = store.upsertBotStatus({ ...statusBody, botIp })
     queueTeleportWhitelistSyncForHost(bot.hostLabel || body.hostLabel, 'node-status')
     return sendJson(res, 200, { ok: true, nextPollMs: 3000, bot: summarizeBot(bot, store.getBotPauseState(bot.botName)) })
   }
@@ -2195,6 +2216,13 @@ async function route(req, res) {
     const body = await readBody(req)
     const status = String(body?.status || '').trim().toLowerCase()
     if (status !== 'succeeded' && status !== 'failed') return badRequest(res, 'status must be succeeded or failed')
+    const pendingCommand = store.getCommand(params.commandId)
+    if (status === 'succeeded'
+      && pendingCommand?.targetBotName === params.botName
+      && pendingCommand?.commandType === 'inventory-snapshot'
+      && body?.inventory && typeof body.inventory === 'object') {
+      store.upsertBotInventory(params.botName, body.inventory)
+    }
     const command = store.completeCommand(params.botName, params.commandId, status, body?.resultMessage)
     if (!command) return notFound(res)
     return sendJson(res, 200, { ok: true, command })
@@ -2485,6 +2513,19 @@ async function route(req, res) {
     })
   }
 
+  if (req.method === 'GET' && pathname === '/api/dashboard/bot-inventory') {
+    const items = store.listBots().map((bot) => summarizeBotInventory(store.getBotInventory(bot.botName), bot))
+    return sendJson(res, 200, { items })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/inventory')
+  if (params) {
+    if (req.method !== 'GET') return methodNotAllowed(res)
+    const bot = store.getBot(params.botName)
+    if (!bot) return notFound(res)
+    return sendJson(res, 200, { item: summarizeBotInventory(store.getBotInventory(params.botName), bot) })
+  }
+
   if (req.method === 'POST' && pathname === '/api/dashboard/commands/start-all') {
     const botNames = store.listBots().map((item) => item.botName)
     store.setBotsPauseDesired(botNames, false, 'dashboard-ui start all')
@@ -2621,6 +2662,30 @@ async function route(req, res) {
       requestedBy: actor.username
     })
     auditOperatorAction(actor, 'chat-bot', `Sent chat to ${params.botName}: ${message}`, { botName: params.botName, message })
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/dump-inventory')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const command = store.createCommand({
+      targetBotName: params.botName,
+      commandType: 'dump-inventory',
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'dump-inventory', `Queued inventory dump for ${params.botName}.`, { botName: params.botName }, 'warn')
+    return sendJson(res, 201, { command })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/inventory-refresh')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const command = store.createCommand({
+      targetBotName: params.botName,
+      commandType: 'inventory-snapshot',
+      requestedBy: actor.username
+    })
+    auditOperatorAction(actor, 'inventory-refresh', `Queued inventory refresh for ${params.botName}.`, { botName: params.botName })
     return sendJson(res, 201, { command })
   }
 

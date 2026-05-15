@@ -471,6 +471,7 @@ h1 {
 
 .summary-card,
 .bot-card,
+.inventory-card,
 .file-item,
 .log-row,
 .empty-card,
@@ -507,13 +508,15 @@ h1 {
 
 .bot-grid,
 .node-grid,
+.inventory-grid,
 .fleet-node-bots {
   display: grid;
   gap: 16px;
 }
 
 .bot-grid,
-.node-grid {
+.node-grid,
+.inventory-grid {
   grid-template-columns: 1fr;
 }
 
@@ -537,6 +540,49 @@ h1 {
   transform: translateY(12px);
   opacity: 0;
   animation: card-enter 360ms ease forwards;
+}
+
+.inventory-card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.inventory-toolbar {
+  display: flex;
+  justify-content: end;
+}
+
+.inventory-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.inventory-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(151, 177, 190, 0.14);
+  border-radius: 10px;
+  background: rgba(151, 177, 190, 0.08);
+}
+
+.inventory-slot,
+.inventory-count {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.inventory-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bot-card:nth-child(2n) {

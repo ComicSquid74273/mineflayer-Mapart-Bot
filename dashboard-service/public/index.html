@@ -276,6 +276,27 @@
           <div id="eventLog" class="event-log collapsible-content"></div>
         </details>
       </section>
+
+      <section class="panel panel-wide">
+        <details id="botInventoryDetails" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Inventory</p>
+              <h2>Bot Inventory</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div class="inventory-toolbar collapsible-content">
+            <button class="accent-button small-button" type="button" data-action="load-bot-inventory" data-permission-needed="admin">Refresh Inventory</button>
+          </div>
+          <div id="botInventoryGrid" class="inventory-grid collapsible-content">
+            <article class="empty-card">
+              <h3>Admin only</h3>
+              <p>Log in as admin to request inventory snapshots or dump bot inventory.</p>
+            </article>
+          </div>
+        </details>
+      </section>
     </main>
     <footer class="dashboard-credit" aria-label="Dashboard credit">
       Made with <span aria-hidden="true">&hearts;</span> by ComicSquid

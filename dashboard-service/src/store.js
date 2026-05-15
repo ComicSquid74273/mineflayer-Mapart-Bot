@@ -51,6 +51,7 @@ function createStore(baseDir) {
   const operatorsFile = path.join(dataDir, 'operators.json')
   const nodeStatsFile = path.join(dataDir, 'node-stats.json')
   const nodeInventoryFile = path.join(dataDir, 'node-inventory.json')
+  const botInventoryFile = path.join(dataDir, 'bot-inventory.json')
   const nodeLogDownloadsDir = path.join(dataDir, 'node-log-downloads')
   const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
   const NODE_INVENTORY_FRESH_MS = Math.max(BOT_FRESH_MS, Number(process.env.DASHBOARD_NODE_INVENTORY_FRESH_MS || 3 * 60 * 1000))
@@ -126,6 +127,7 @@ function createStore(baseDir) {
   if (!fs.existsSync(operatorsFile)) writeJson(operatorsFile, defaultOperators())
   if (!fs.existsSync(nodeStatsFile)) writeJson(nodeStatsFile, {})
   if (!fs.existsSync(nodeInventoryFile)) writeJson(nodeInventoryFile, {})
+  if (!fs.existsSync(botInventoryFile)) writeJson(botInventoryFile, {})
 
   function toTimestamp(value) {
     const ms = new Date(value || 0).getTime()
@@ -159,6 +161,69 @@ function createStore(baseDir) {
 
   function writeNodeInventoryMap(items) {
     writeJson(nodeInventoryFile, items && typeof items === 'object' && !Array.isArray(items) ? items : {})
+  }
+
+  function readBotInventoryMap() {
+    const items = readJson(botInventoryFile, {})
+    return items && typeof items === 'object' && !Array.isArray(items) ? items : {}
+  }
+
+  function writeBotInventoryMap(items) {
+    writeJson(botInventoryFile, items && typeof items === 'object' && !Array.isArray(items) ? items : {})
+  }
+
+  function sanitizeBotInventory(input) {
+    const source = input && typeof input === 'object' ? input : {}
+    const items = (Array.isArray(source.items) ? source.items : [])
+      .map((item) => {
+        const count = Math.max(0, toNumber(item?.count, 0))
+        if (count <= 0) return null
+        return {
+          slot: Number.isFinite(Number(item?.slot)) ? Number(item.slot) : null,
+          type: Number.isFinite(Number(item?.type)) ? Number(item.type) : null,
+          name: String(item?.name || 'unknown').trim() || 'unknown',
+          displayName: String(item?.displayName || item?.name || 'Unknown').trim() || 'Unknown',
+          count
+        }
+      })
+      .filter(Boolean)
+      .sort((left, right) => {
+        const leftSlot = Number.isFinite(Number(left.slot)) ? Number(left.slot) : 9999
+        const rightSlot = Number.isFinite(Number(right.slot)) ? Number(right.slot) : 9999
+        return leftSlot - rightSlot
+      })
+    return {
+      items,
+      stackCount: items.length,
+      totalCount: items.reduce((sum, item) => sum + toNumber(item.count, 0), 0),
+      updatedAt: String(source.updatedAt || '').trim() || nowIso()
+    }
+  }
+
+  function upsertBotInventory(botName, inventory) {
+    const name = String(botName || '').trim()
+    if (!name) return null
+    const items = readBotInventoryMap()
+    const bot = getBot(name)
+    const next = {
+      botName: name,
+      hostLabel: bot?.hostLabel || null,
+      ...sanitizeBotInventory(inventory),
+      serverStatusAt: nowIso()
+    }
+    items[name] = next
+    writeBotInventoryMap(items)
+    return next
+  }
+
+  function getBotInventory(botName) {
+    const name = String(botName || '').trim()
+    if (!name) return null
+    return readBotInventoryMap()[name] || null
+  }
+
+  function listBotInventories() {
+    return Object.values(readBotInventoryMap()).sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
   }
 
   function readNodeStatsMap() {
@@ -1988,6 +2053,9 @@ function createStore(baseDir) {
     upsertOperator,
     deleteOperator,
     upsertBotStatus,
+    upsertBotInventory,
+    getBotInventory,
+    listBotInventories,
     listCommands,
     getCommand,
     createCommand,
