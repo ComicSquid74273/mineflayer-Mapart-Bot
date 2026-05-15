@@ -1425,6 +1425,8 @@ function buildQueueSummaryFast(nodes = [], bots = []) {
 }
 
 function createAlert(level, category, title, message, details = {}) {
+  const sinceAt = details?.sinceAt || details?.createdAt || null
+  const createdAt = timestampMs(sinceAt) ? new Date(timestampMs(sinceAt)).toISOString() : new Date().toISOString()
   return {
     id: `${category}:${crypto.createHash('sha1').update(`${title}:${message}`).digest('hex').slice(0, 10)}`,
     level,
@@ -1432,8 +1434,19 @@ function createAlert(level, category, title, message, details = {}) {
     title,
     message,
     details,
-    createdAt: new Date().toISOString()
+    createdAt
   }
+}
+
+function findActiveBotAlert(bot, category) {
+  const key = String(category || '').trim()
+  if (!key || !Array.isArray(bot?.alerts)) return null
+  return bot.alerts.find((alert) => alert?.active === true && String(alert.category || '') === key) || null
+}
+
+function botAlertSinceAt(bot, category) {
+  const alert = findActiveBotAlert(bot, category)
+  return alert?.firstSeenAt || alert?.createdAt || alert?.lastSeenAt || bot?.serverStatusAt || bot?.lastStatusAt || null
 }
 
 function botHasLobbyPortal4Signal(bot) {
@@ -1520,29 +1533,34 @@ function buildDashboardAlerts(bots, nodes, assignments, assignmentSignals = null
     const botNames = [...new Set(lobbyPortal4Bots.map((bot) => String(bot.botName || '').trim()).filter(Boolean))]
     const hostLabels = [...new Set(lobbyPortal4Bots.map((bot) => String(bot.hostLabel || '').trim()).filter(Boolean))]
     alerts.push(createAlert('critical', 'lobby-portal-4', 'Lobby portal error', `lobby-portal-4 reported by ${botNames.join(', ') || 'unknown bot'} on ${hostLabels.join(', ') || 'unknown node'}.`, {
+      sinceAt: lobbyPortal4Bots.map((bot) => botAlertSinceAt(bot, 'lobby-portal-4') || bot.serverStatusAt || bot.lastStatusAt).filter(Boolean).sort()[0] || null,
       botNames,
       hostLabels,
-      bots: lobbyPortal4Bots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+      bots: lobbyPortal4Bots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null, sinceAt: botAlertSinceAt(bot, 'lobby-portal-4') || bot.serverStatusAt || bot.lastStatusAt || null }))
     }))
   }
   if (activeWaterBots.length) {
     alerts.push(createAlert('critical', 'platform-water', 'Water on platform', `${activeWaterBots.length} bot(s) are paused until water is removed from the carpet layer.`, {
+      sinceAt: activeWaterBots.map((bot) => botAlertSinceAt(bot, 'platform-water')).filter(Boolean).sort()[0] || null,
       botNames: activeWaterBots.map((bot) => bot.botName),
-      bots: activeWaterBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+      bots: activeWaterBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null, sinceAt: botAlertSinceAt(bot, 'platform-water') }))
     }))
   }
   if (duperBrokenBots.length) {
     alerts.push(createAlert('warn', 'duper-broken', 'Duper repair needed', `${duperBrokenBots.length} bot(s) reported carpet duper groups not refilling.`, {
+      sinceAt: duperBrokenBots.map((bot) => botAlertSinceAt(bot, 'duper-broken')).filter(Boolean).sort()[0] || null,
       botNames: duperBrokenBots.map((bot) => bot.botName),
-      bots: duperBrokenBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+      bots: duperBrokenBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null, sinceAt: botAlertSinceAt(bot, 'duper-broken') }))
     }))
   }
   if (longRuntimeBots.length) {
     const alertMinutes = Math.round(RUNTIME_DURATION_ALERT_MS / 60000)
     alerts.push(createAlert('critical', 'runtime-duration', `Runtime over ${alertMinutes}m`, `${longRuntimeBots.length} bot(s) have been running the current NBT for more than ${alertMinutes} minutes.`, {
+      sinceAt: longRuntimeBots.map(({ bot }) => bot.currentNbtStartedAt).filter(Boolean).sort()[0] || null,
       bots: longRuntimeBots.map(({ bot, elapsedMs }) => ({
         botName: bot.botName,
         hostLabel: bot.hostLabel || null,
+        sinceAt: bot.currentNbtStartedAt || null,
         phase: bot.phase || null,
         currentNbt: bot.currentNbt || null,
         currentNbtStartedAt: bot.currentNbtStartedAt || null,
@@ -1554,10 +1572,12 @@ function buildDashboardAlerts(bots, nodes, assignments, assignmentSignals = null
     const summaries = deathBots.slice(0, 3).map((bot) => `${bot.botName || 'unknown bot'}: ${bot.deathMessage}`)
     const extra = deathBots.length > summaries.length ? ` +${deathBots.length - summaries.length} more` : ''
     alerts.push(createAlert('critical', 'bot-death', 'Bot death detected', `${summaries.join(' | ')}${extra}. Waiting until bot is back on platform.`, {
+      sinceAt: deathBots.map((bot) => bot.deathMessageAt).filter(Boolean).sort()[0] || null,
       botNames: deathBots.map((bot) => bot.botName),
       bots: deathBots.map((bot) => ({
         botName: bot.botName,
         hostLabel: bot.hostLabel || null,
+        sinceAt: bot.deathMessageAt || bot.serverStatusAt || bot.lastStatusAt || null,
         deathMessage: bot.deathMessage || null,
         deathMessageAt: bot.deathMessageAt || null,
         location: bot.location || null,
@@ -1567,47 +1587,69 @@ function buildDashboardAlerts(bots, nodes, assignments, assignmentSignals = null
   }
   if (offlineNodes.length) {
     alerts.push(createAlert('warn', 'offline-nodes', 'Offline nodes', `${offlineNodes.length} node(s) have no online bots.`, {
+      sinceAt: offlineNodes.map((node) => node.updatedAt || node.lastSeenAt).filter(Boolean).sort()[0] || null,
+      nodes: offlineNodes.map((node) => ({ hostLabel: node.hostLabel, sinceAt: node.updatedAt || node.lastSeenAt || null })),
       hostLabels: offlineNodes.map((node) => node.hostLabel)
     }))
   }
   if (offlineBots.length) {
     alerts.push(createAlert('warn', 'offline-bots', 'Offline bots', `${offlineBots.length}/${bots.length} bot(s) are offline.`, {
+      sinceAt: offlineBots.map((bot) => bot.serverStatusAt || bot.lastStatusAt).filter(Boolean).sort()[0] || null,
       botNames: offlineBots.map((bot) => bot.botName).slice(0, 20),
-      bots: offlineBots.slice(0, 20).map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+      bots: offlineBots.slice(0, 20).map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null, sinceAt: bot.serverStatusAt || bot.lastStatusAt || null }))
     }))
   }
   if (staleBots.length) {
     alerts.push(createAlert('warn', 'stale-bots', 'Stale bots', `${staleBots.length} bot(s) stopped sending fresh activity.`, {
+      sinceAt: staleBots.map((bot) => bot.serverStatusAt || bot.lastStatusAt).filter(Boolean).sort()[0] || null,
       botNames: staleBots.map((bot) => bot.botName),
-      bots: staleBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+      bots: staleBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null, sinceAt: bot.serverStatusAt || bot.lastStatusAt || null }))
     }))
   }
   if (errorBots.length) {
     alerts.push(createAlert('critical', 'bot-errors', 'Bot errors', `${errorBots.length} bot(s) reported a last error.`, {
+      sinceAt: errorBots.map((bot) => bot.lastErrorAt || bot.serverStatusAt || bot.lastStatusAt).filter(Boolean).sort()[0] || null,
       botNames: errorBots.map((bot) => bot.botName),
-      bots: errorBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+      bots: errorBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null, sinceAt: bot.lastErrorAt || bot.serverStatusAt || bot.lastStatusAt || null }))
     }))
   }
   if (stockWarnings.length) {
     const stockWarningBots = [...new Map(stockWarnings.map((item) => [item.bot.botName, item.bot])).values()]
     alerts.push(createAlert('warn', 'stock-warnings', 'Missing stock warnings', `${stockWarnings.length} active material/food/map/XP warning(s).`, {
+      sinceAt: stockWarnings.map(({ warning }) => warning.firstSeenAt || warning.lastSeenAt).filter(Boolean).sort()[0] || null,
       botNames: stockWarningBots.map((bot) => bot.botName),
-      bots: stockWarningBots.map((bot) => ({ botName: bot.botName, hostLabel: bot.hostLabel || null }))
+      bots: stockWarningBots.map((bot) => {
+        const warning = stockWarnings.find((item) => item.bot.botName === bot.botName)?.warning
+        return { botName: bot.botName, hostLabel: bot.hostLabel || null, sinceAt: warning?.firstSeenAt || warning?.lastSeenAt || bot.serverStatusAt || bot.lastStatusAt || null }
+      })
     }))
   }
   if (heldAssignments.length) {
     alerts.push(createAlert('warn', 'queue-held', 'Held queue files', `${heldAssignments.length} queue file(s) are held for an offline or stale bot.`, {
-      files: heldAssignments.slice(0, 20).map((item) => ({ fileName: item.fileName, botName: item.claimedByBotName, hostLabel: item.claimedByHostLabel || null }))
+      sinceAt: heldAssignments.map((item) => item.updatedAt || item.claimedAt || item.createdAt).filter(Boolean).sort()[0] || null,
+      files: heldAssignments.slice(0, 20).map((item) => ({ fileName: item.fileName, botName: item.claimedByBotName, hostLabel: item.claimedByHostLabel || null, sinceAt: item.updatedAt || item.claimedAt || item.createdAt || null }))
     }))
   }
   if (retryingFailures.length) {
     alerts.push(createAlert('warn', 'queue-retrying', 'Queue retry needed', `${retryingFailures.length} file(s) need to be requeued after a failed attempt.`, {
-      files: retryingFailures.slice(0, 20).map((item) => item.fileName)
+      sinceAt: retryingFailures.map((item) => item.updatedAt || item.failedAt || item.createdAt).filter(Boolean).sort()[0] || null,
+      files: retryingFailures.slice(0, 20).map((item) => ({
+        fileName: item.fileName,
+        botName: item.claimedByBotName || null,
+        hostLabel: item.claimedByHostLabel || null,
+        sinceAt: item.updatedAt || item.failedAt || item.createdAt || null
+      }))
     }))
   }
   if (exceededAttempts.length) {
     alerts.push(createAlert('warn', 'queue-attempts', 'Queue attention', `${exceededAttempts.length} file(s) exceeded configured attempts but remain retryable.`, {
-      files: exceededAttempts.slice(0, 20).map((item) => item.fileName)
+      sinceAt: exceededAttempts.map((item) => item.updatedAt || item.createdAt).filter(Boolean).sort()[0] || null,
+      files: exceededAttempts.slice(0, 20).map((item) => ({
+        fileName: item.fileName,
+        botName: item.claimedByBotName || null,
+        hostLabel: item.claimedByHostLabel || null,
+        sinceAt: item.updatedAt || item.createdAt || null
+      }))
     }))
   }
 

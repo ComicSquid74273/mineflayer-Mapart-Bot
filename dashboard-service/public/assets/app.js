@@ -908,25 +908,50 @@ function renderSummary() {
   `).join('')
 }
 
+function formatSinceDuration(value) {
+  if (!value) return ''
+  const sinceMs = new Date(value).getTime()
+  if (!Number.isFinite(sinceMs)) return ''
+  return `for ${formatDuration(Date.now() - sinceMs)}`
+}
+
+function alertEntrySinceAt(item, fallback = null) {
+  if (!item || typeof item !== 'object') return fallback
+  return item.sinceAt || item.firstSeenAt || item.createdAt || item.lastSeenAt || item.lastStatusAt || item.serverStatusAt || fallback
+}
+
 function formatAlertNodeBotDetails(alert) {
   const details = alert?.details && typeof alert.details === 'object' ? alert.details : {}
   const entries = []
-  const addEntry = (hostLabel, botName) => {
+  const addEntry = (hostLabel, botName, sinceAt = null) => {
     const host = String(hostLabel || '').trim()
     const bot = String(botName || '').trim()
     const label = host && bot ? `${host}/${bot}` : (host || bot)
-    if (label && !entries.includes(label)) entries.push(label)
+    if (!label) return
+    const age = formatSinceDuration(sinceAt)
+    const text = age ? `${label} (${age})` : label
+    if (!entries.includes(text)) entries.push(text)
   }
 
   if (Array.isArray(details.bots)) {
     for (const item of details.bots) {
-      addEntry(item?.hostLabel, item?.botName)
+      addEntry(item?.hostLabel, item?.botName, alertEntrySinceAt(item, alert?.createdAt || details.sinceAt || null))
+    }
+  }
+
+  if (Array.isArray(details.nodes)) {
+    for (const item of details.nodes) {
+      addEntry(item?.hostLabel, null, alertEntrySinceAt(item, alert?.createdAt || details.sinceAt || null))
     }
   }
 
   if (Array.isArray(details.files)) {
     for (const item of details.files) {
-      addEntry(item?.hostLabel, item?.botName)
+      if (item && typeof item === 'object') {
+        addEntry(item?.hostLabel, item?.botName || item?.fileName, alertEntrySinceAt(item, alert?.createdAt || details.sinceAt || null))
+      } else {
+        addEntry(null, item, alert?.createdAt || details.sinceAt || null)
+      }
     }
   }
 
@@ -948,7 +973,7 @@ function formatAlertNodeBotDetails(alert) {
 
 function renderAlerts() {
   if (!elements.alertsBar) return
-  const sig = JSON.stringify(state.alerts || [])
+  const sig = `${Math.floor(Date.now() / 60000)}:${JSON.stringify(state.alerts || [])}`
   if (state.renderCache.alerts === sig) return
   state.renderCache.alerts = sig
 
@@ -964,10 +989,11 @@ function renderAlerts() {
     const className = level === 'critical' || level === 'error' ? 'alert-critical'
       : (level === 'warn' ? 'alert-warn' : 'alert-info')
     const nodeBotDetails = formatAlertNodeBotDetails(alert)
+    const alertAge = formatSinceDuration(alert.createdAt || alert.details?.sinceAt || null)
     return `
       <article class="alert-item ${className}">
         <div>
-          <strong>${escapeHtml(alert.title || alert.category || 'Alert')}</strong>
+          <strong>${escapeHtml(alert.title || alert.category || 'Alert')}${alertAge ? ` <span class="alert-age">${escapeHtml(alertAge)}</span>` : ''}</strong>
           <p>${escapeHtml(alert.message || '')}</p>
           ${nodeBotDetails ? `<p class="alert-meta">${escapeHtml(nodeBotDetails)}</p>` : ''}
         </div>

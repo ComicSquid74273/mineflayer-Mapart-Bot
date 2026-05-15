@@ -10,8 +10,8 @@ process.on('unhandledRejection', (reason) => {
 const restockFailureCache = new Map()
 const unavailableMaterialCache = new Set()
 const duperBrokenGroupStateCache = new Map()
-const DEFAULT_DUPER_BROKEN_ALERT_AFTER_MS = 15 * 60 * 1000
-const DEFAULT_DUPER_BROKEN_REPAIR_CHECK_MS = 20 * 60 * 1000
+const DEFAULT_DUPER_BROKEN_ALERT_AFTER_MS = 20 * 60 * 1000
+const DEFAULT_DUPER_BROKEN_REPAIR_CHECK_MS = 15 * 60 * 1000
 const PROCESS_STARTED_AT = new Date().toISOString()
 const PROCESS_INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 // Persists across session reconnects within one process run.
@@ -6065,6 +6065,7 @@ async function checkDuePersistedBrokenDuperGroup(bot, config, currentBlockName =
       lastPreviousTotal: previousTotal,
       lastObservedAt: checkedAt,
       noIncreaseSinceAt: null,
+      pendingBrokenSinceAt: null,
       lastCapacity: capacity,
       lastFullEnough: fullEnough,
       status: 'healthy',
@@ -6159,6 +6160,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
       stateKey: groupStateKeys[groupIndex],
       chests: group.map((spot) => ({ x: spot.x, y: spot.y, z: spot.z, accessPosition: spot.accessPosition || null })),
       noIncreaseSinceAt: toTimestampMs(source.noIncreaseSinceAt, 0),
+      pendingBrokenSinceAt: toTimestampMs(source.pendingBrokenSinceAt, 0),
       lastObservedAt: toTimestampMs(source.lastObservedAt, 0),
       lastObservedTotal: Number.isFinite(Number(source.lastObservedTotal)) ? Number(source.lastObservedTotal) : null,
       lastPreviousTotal: Number.isFinite(Number(source.lastPreviousTotal)) ? Number(source.lastPreviousTotal) : null,
@@ -6183,6 +6185,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
         groupIndex: group.groupIndex,
         chests: group.chests,
         noIncreaseSinceAt: group.noIncreaseSinceAt,
+        pendingBrokenSinceAt: group.pendingBrokenSinceAt,
         lastObservedAt: group.lastObservedAt,
         lastObservedTotal: group.lastObservedTotal,
         lastPreviousTotal: group.lastPreviousTotal,
@@ -6194,6 +6197,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     for (const group of groupStates) {
       if (!group.stateKey) continue
       const noIncreaseSinceAt = group.noIncreaseSinceAt ? new Date(group.noIncreaseSinceAt).toISOString() : null
+      const pendingBrokenSinceAt = group.pendingBrokenSinceAt ? new Date(group.pendingBrokenSinceAt).toISOString() : null
       const lastObservedAt = group.lastObservedAt ? new Date(group.lastObservedAt).toISOString() : null
       fileState.groups[group.stateKey] = {
         version: 1,
@@ -6205,9 +6209,10 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
         lastPreviousTotal: group.lastPreviousTotal,
         lastObservedAt,
         noIncreaseSinceAt,
+        pendingBrokenSinceAt,
         lastCapacity: group.lastCapacity,
         lastFullEnough: group.lastFullEnough,
-        status: group.activeBroken ? 'broken' : (group.noIncreaseSinceAt ? 'suspect' : 'healthy'),
+        status: group.activeBroken ? 'broken' : (group.pendingBrokenSinceAt ? 'confirming' : (group.noIncreaseSinceAt ? 'suspect' : 'healthy')),
         alertActive: group.activeBroken === true,
         lastCheckedBy: bot?.username || config?.bot?.username || null,
         lastCheckedAt: new Date().toISOString()
@@ -6262,6 +6267,21 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     if (!duperBrokenAlertActive) return
     clearDashboardAlert(config, 'duper-broken')
     duperBrokenAlertActive = false
+  }
+
+  const markBrokenAfterConfirmation = (group, groupIndex, noIncreaseMs, currentTotal, previousTotal, haveAfter, groupSize) => {
+    const now = Date.now()
+    if (!group.pendingBrokenSinceAt) {
+      group.pendingBrokenSinceAt = now
+      if (config.advanced?.debugPrints) {
+        console.log(`[DUPER-BROKEN-CONFIRM] ${blockName} group=${groupIndex + 1} needs one more full scan before alert; noIncrease=${Math.round(noIncreaseMs / 1000)}s total=${currentTotal} previous=${previousTotal ?? 'none'}.`)
+      }
+      return false
+    }
+    group.activeBroken = true
+    activeBrokenGroups.add(groupIndex)
+    console.log(`[DUPER-BROKEN-WARN] ${blockName} group=${groupIndex + 1} confirmed no refill after ${Math.round(noIncreaseMs / 1000)}s across ${groupSize} chest(s); total=${currentTotal} previous=${previousTotal ?? 'none'} have=${haveAfter} target=${targetCount} reason=${reason}.`)
+    return true
   }
 
   const noteMaterialObserved = (observation = {}) => {
@@ -6339,6 +6359,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
 
         if (fullEnough) {
           group.noIncreaseSinceAt = 0
+          group.pendingBrokenSinceAt = 0
           group.lastObservedAt = Date.now()
           group.lastPreviousTotal = previousTotal
           group.lastObservedTotal = currentTotal
@@ -6355,6 +6376,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
 
         if (previousTotal != null && currentTotal > previousTotal) {
           group.noIncreaseSinceAt = 0
+          group.pendingBrokenSinceAt = 0
           group.lastObservedAt = now
           group.lastPreviousTotal = previousTotal
           group.lastObservedTotal = currentTotal
@@ -6379,10 +6401,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
             console.log(`[DUPER-GROUP-DECREASE] ${blockName} group=${groupIndex + 1} total=${currentTotal} last=${previousTotal} noIncrease=${Math.round(noIncreaseMs / 1000)}s`)
           }
           if (noIncreaseMs >= duperBrokenAlertAfterMs && !group.activeBroken) {
-            group.activeBroken = true
-            activeBrokenGroups.add(groupIndex)
-            changedBrokenGroups = true
-            console.log(`[DUPER-BROKEN-WARN] ${blockName} group=${groupIndex + 1} no refill observed after ${Math.round(noIncreaseMs / 1000)}s across ${groupSize} chest(s); total=${currentTotal} previous=${previousTotal} have=${haveAfter} target=${targetCount} reason=${reason}.`)
+            changedBrokenGroups = markBrokenAfterConfirmation(group, groupIndex, noIncreaseMs, currentTotal, previousTotal, haveAfter, groupSize) || changedBrokenGroups
           }
           continue
         }
@@ -6396,10 +6415,7 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
           console.log(`[DUPER-GROUP-SCAN] ${blockName} group=${groupIndex + 1} total=${currentTotal} last=${previousTotal} noIncrease=${Math.round(noIncreaseMs / 1000)}s chests=${groupSize}`)
         }
         if (noIncreaseMs >= duperBrokenAlertAfterMs && !group.activeBroken) {
-          group.activeBroken = true
-          activeBrokenGroups.add(groupIndex)
-          changedBrokenGroups = true
-          console.log(`[DUPER-BROKEN-WARN] ${blockName} group=${groupIndex + 1} no refill observed after ${Math.round(noIncreaseMs / 1000)}s across ${groupSize} chest(s); total=${currentTotal} have=${haveAfter} target=${targetCount} reason=${reason}.`)
+          changedBrokenGroups = markBrokenAfterConfirmation(group, groupIndex, noIncreaseMs, currentTotal, previousTotal, haveAfter, groupSize) || changedBrokenGroups
         }
       }
       persistDuperBrokenGroupState()

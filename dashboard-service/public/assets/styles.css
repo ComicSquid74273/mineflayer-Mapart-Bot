@@ -276,6 +276,13 @@ h1 {
   font-weight: 700;
 }
 
+.alert-age {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  margin-left: 6px;
+}
+
 .alert-critical {
   border-color: rgba(181, 73, 56, 0.42);
   background: rgba(181, 73, 56, 0.14);
