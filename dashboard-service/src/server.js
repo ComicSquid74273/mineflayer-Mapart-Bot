@@ -1768,6 +1768,7 @@ function summarizeResourceNode(node) {
     onlineCount: Number.isFinite(Number(node.onlineCount)) ? Number(node.onlineCount) : 0,
     botCount: Number.isFinite(Number(node.botCount)) ? Number(node.botCount) : 0,
     lastStatusAt: node.lastStatusAt || null,
+    latencyMs: Number.isFinite(Number(node.latencyMs)) ? Math.max(0, Math.round(Number(node.latencyMs))) : null,
     runtimeMetrics: node.runtimeMetrics || null
   }
 }

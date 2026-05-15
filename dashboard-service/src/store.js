@@ -864,7 +864,8 @@ function createStore(baseDir) {
         timing: summarizeNodeTiming(timingByHost[hostLabel]),
         assignmentStats: assignmentStatsByHost.get(hostLabel) || createAssignmentStats(),
         operationalStats: createNodeOperationalStats(),
-        runtimeMetrics: null
+        runtimeMetrics: null,
+        latencyMs: null
       }
       current.botCount += 1
       const botLastStatusMs = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
@@ -899,6 +900,7 @@ function createStore(baseDir) {
       if (!current.lastStatusAt || String(botStatusAt || '') > String(current.lastStatusAt || '')) {
         current.lastStatusAt = botStatusAt
         current.runtimeMetrics = sanitizeRuntimeMetrics(bot.runtimeMetrics)
+        current.latencyMs = Number.isFinite(Number(bot.latencyMs)) ? Math.max(0, Math.round(Number(bot.latencyMs))) : null
       }
       byHost.set(hostLabel, current)
     }

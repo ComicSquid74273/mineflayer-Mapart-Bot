@@ -81,7 +81,7 @@
           "port": 25565,
           "auth": "microsoft",
           "profilesFolder": "./auth-cache",
-          "viewDistance": "normal",
+          "viewDistance": 20,
           "checkTimeoutInterval": 90000,
           "requiredSpawnCountBeforeStartup": 3,
           "requiredSpawnFallbackSeconds": 90,

@@ -1076,7 +1076,13 @@ function renderNodeOperationalTags(node) {
   return `<div class="node-alert-strip">${tags.map(([className, label]) => `<span class="tag ${className}">${escapeHtml(label)}</span>`).join('')}</div>`
 }
 
-function buildResourceMetricRow(title, metrics, meta = '') {
+function formatLatencyMs(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return 'n/a'
+  return `${Math.round(n)}ms`
+}
+
+function buildResourceMetricRow(title, metrics, meta = '', latencyMs = null) {
   const safeMetrics = metrics || {}
   const heapUsed = Number(safeMetrics.heapUsedBytes)
   const heapTotal = Number(safeMetrics.heapTotalBytes)
@@ -1094,6 +1100,7 @@ function buildResourceMetricRow(title, metrics, meta = '') {
       <td>${escapeHtml(formatFileSize(safeMetrics.rssBytes))}</td>
       <td title="${escapeHtml(heapText)}">${escapeHtml(heapText)}</td>
       <td>${escapeHtml(formatDuration(uptimeMs))}</td>
+      <td>${escapeHtml(formatLatencyMs(latencyMs))}</td>
     </tr>
   `
 }
@@ -1134,7 +1141,7 @@ function renderResourceMetrics() {
   const nodeRows = nodes.map((node) => {
     const botText = Array.isArray(node.botNames) && node.botNames.length ? `Bots: ${node.botNames.join(', ')}` : 'Bots: none'
     const statusText = `Online ${Number(node.onlineCount || 0)}/${Number(node.botCount || 0)} | ${botText}`
-    return buildResourceMetricRow(node.hostLabel || 'unknown-node', node.runtimeMetrics, statusText)
+    return buildResourceMetricRow(node.hostLabel || 'unknown-node', node.runtimeMetrics, statusText, node.latencyMs)
   }).join('')
   elements.resourceMetricsGrid.innerHTML = `
     <div class="resource-metrics-table-wrap">
@@ -1146,6 +1153,7 @@ function renderResourceMetrics() {
             <th scope="col">RAM</th>
             <th scope="col">Heap</th>
             <th scope="col">Uptime</th>
+            <th scope="col">Ping</th>
           </tr>
         </thead>
         <tbody>
