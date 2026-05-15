@@ -66,6 +66,11 @@ const state = {
     auth: ''
   },
   events: [],
+  eventsLimit: 24,
+  eventsTotal: 0,
+  eventsHasMore: false,
+  eventsLoaded: false,
+  eventsLoading: false,
   localEvents: [],
   auth: {
     operator: '',
@@ -102,6 +107,7 @@ const elements = {
   nodeNbtDetails: document.getElementById('nodeNbtDetails'),
   nodesGrid: document.getElementById('nodesGrid'),
   operatorForm: document.getElementById('operatorForm'),
+  operatorLogDetails: document.getElementById('operatorLogDetails'),
   loginButton: document.getElementById('loginButton'),
   logoutButton: document.getElementById('logoutButton'),
   managedPassword: document.getElementById('managedPassword'),
@@ -2239,16 +2245,48 @@ async function onDeleteDataFile(fileName) {
 }
 
 function renderEvents() {
+  if (!elements.eventLog) return
   const eventsSignature = JSON.stringify({
     localEvents: state.localEvents,
-    events: state.events
+    events: state.events,
+    limit: state.eventsLimit,
+    total: state.eventsTotal,
+    hasMore: state.eventsHasMore,
+    loaded: state.eventsLoaded,
+    loading: state.eventsLoading,
+    open: elements.operatorLogDetails?.open === true
   })
   if (state.renderCache.events === eventsSignature) return
   state.renderCache.events = eventsSignature
 
+  if (elements.operatorLogDetails?.open !== true && !state.localEvents.length) {
+    elements.eventLog.innerHTML = ''
+    return
+  }
+
+  if (state.eventsLoading && !state.eventsLoaded) {
+    elements.eventLog.innerHTML = `
+      <article class="empty-card">
+        <h3>Loading activity</h3>
+        <p>Fetching operator actions and dashboard errors.</p>
+      </article>
+    `
+    return
+  }
+
+  if (!state.eventsLoaded && !state.localEvents.length) {
+    elements.eventLog.innerHTML = `
+      <article class="empty-card">
+        <h3>Activity not loaded</h3>
+        <p>Open this section to load operator actions and dashboard errors.</p>
+      </article>
+    `
+    return
+  }
+
   const items = [...state.localEvents, ...state.events]
     .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
-    .slice(0, 24)
+    .slice(0, state.eventsLimit)
 
   if (!items.length) {
     elements.eventLog.innerHTML = `
@@ -2260,7 +2298,7 @@ function renderEvents() {
     return
   }
 
-  elements.eventLog.innerHTML = items.map((entry) => `
+  const rows = items.map((entry) => `
     <article class="log-row ${escapeHtml(entry.level)}">
       <div>
         <strong>${escapeHtml(entry.operator || 'unknown')} | ${escapeHtml(entry.message)}</strong>
@@ -2269,6 +2307,39 @@ function renderEvents() {
       <span class="timestamp">${escapeHtml(formatTime(entry.createdAt))}</span>
     </article>
   `).join('')
+  const shown = Math.min(state.events.length, state.eventsLimit)
+  const total = Math.max(Number(state.eventsTotal || 0), state.events.length)
+  const showMore = state.eventsHasMore ? `
+    <button class="ghost-button small-button events-more" type="button" data-action="events-more" ${state.eventsLoading ? 'disabled' : ''}>
+      ${state.eventsLoading ? 'Loading...' : `Show More (${escapeHtml(shown)}/${escapeHtml(total)})`}
+    </button>
+  ` : ''
+  elements.eventLog.innerHTML = `${rows}${showMore}`
+}
+
+async function loadEvents(limit = state.eventsLimit) {
+  if (state.eventsLoading) return
+  state.eventsLoading = true
+  state.renderCache.events = ''
+  renderEvents()
+  try {
+    const nextLimit = Math.min(500, Math.max(24, Number(limit || state.eventsLimit || 24)))
+    const result = await requestJson(`/api/dashboard/events?limit=${encodeURIComponent(nextLimit)}`, { requireAuth: state.auth.verified })
+    state.events = Array.isArray(result.items) ? result.items : []
+    state.eventsLimit = Math.max(24, Number(result.limit || nextLimit))
+    state.eventsTotal = Math.max(Number(result.total || 0), state.events.length)
+    state.eventsHasMore = result.hasMore === true
+    state.eventsLoaded = true
+  } finally {
+    state.eventsLoading = false
+    state.renderCache.events = ''
+    renderEvents()
+  }
+}
+
+async function loadMoreEvents() {
+  const nextLimit = Math.min(500, Math.max(48, Number(state.eventsLimit || 24) + 50))
+  await loadEvents(nextLimit)
 }
 
 async function onVerifyBot(botName, action) {
@@ -2292,9 +2363,46 @@ async function refreshData(options = {}) {
   state.busy = true
   try {
     const includeNodeInventory = options.includeNodeInventory === true || elements.nodeNbtDetails?.open === true || String(state.nbtSearch || '').trim().length > 0
+    const includeEvents = options.includeEvents === true || elements.operatorLogDetails?.open === true
     if (includeNodeInventory) state.nodeInventoryLoading = true
-    const snapshotUrl = `/api/dashboard/snapshot${includeNodeInventory ? '?includeNodeInventory=true' : ''}`
+    const snapshotParams = new URLSearchParams()
+    if (includeNodeInventory) snapshotParams.set('includeNodeInventory', 'true')
+    if (includeEvents) snapshotParams.set('includeEvents', 'true')
+    const snapshotQuery = snapshotParams.toString()
+    const snapshotUrl = `/api/dashboard/snapshot${snapshotQuery ? `?${snapshotQuery}` : ''}`
     const snapshot = await requestJson(snapshotUrl, { requireAuth: state.auth.verified })
+    state.bots = Array.isArray(snapshot.bots) ? snapshot.bots : []
+    state.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : []
+    state.nodeInventoryLoaded = snapshot.nodeInventoryIncluded === true
+    state.queueSummary = snapshot.queueSummary && typeof snapshot.queueSummary === 'object' ? snapshot.queueSummary : state.queueSummary
+    state.alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : []
+    if (Array.isArray(snapshot.uploadAssignments)) {
+      state.uploadAssignments = snapshot.uploadAssignments
+      state.uploadAssignmentsLimit = Math.max(10, Number(snapshot.uploadAssignmentsLimit || state.uploadAssignments.length || 10))
+      state.uploadAssignmentsTotal = Math.max(Number(snapshot.uploadAssignmentsTotal || 0), state.uploadAssignments.length)
+      state.uploadAssignmentsHasMore = snapshot.uploadAssignmentsHasMore === true
+    }
+    if (Array.isArray(snapshot.uploadHistory)) {
+      state.uploadHistory = snapshot.uploadHistory
+      state.uploadHistoryLimit = Math.max(10, Number(snapshot.uploadHistoryLimit || state.uploadHistory.length || 10))
+      state.uploadHistoryTotal = Math.max(Number(snapshot.uploadHistoryTotal || 0), state.uploadHistory.length)
+      state.uploadHistoryHasMore = snapshot.uploadHistoryHasMore === true
+    }
+    if (Array.isArray(snapshot.events)) {
+      state.events = snapshot.events
+      state.eventsLimit = Math.max(24, Number(snapshot.eventsLimit || state.events.length || 24))
+      state.eventsTotal = Math.max(Number(snapshot.eventsTotal || 0), state.events.length)
+      state.eventsHasMore = snapshot.eventsHasMore === true
+      state.eventsLoaded = true
+    }
+    elements.serviceStatus.textContent = snapshot.ok ? 'Service online' : 'Service unknown'
+    elements.serviceStatus.className = `status-pill ${snapshot.ok ? 'status-online' : 'status-neutral'}`
+    elements.lastRefresh.textContent = formatTime(new Date().toISOString())
+    renderAlerts()
+    renderSummary()
+    renderFleetJump()
+    renderBots()
+    renderQueueSummary()
     const logs = state.auth.verified && hasPermission('canViewLogs')
       ? await requestJson('/api/dashboard/logs', { requireAuth: true })
       : { items: [] }
@@ -2310,34 +2418,17 @@ async function refreshData(options = {}) {
     const dataFiles = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/data', { requireAuth: true })
       : { files: [] }
-    state.bots = Array.isArray(snapshot.bots) ? snapshot.bots : []
-    state.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : []
-    state.nodeInventoryLoaded = snapshot.nodeInventoryIncluded === true
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = Array.isArray(configs.files) ? configs.files : []
     state.teleportWhitelist.files = Array.isArray(teleportWhitelist.files) ? teleportWhitelist.files : []
     state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
-    state.uploadAssignments = Array.isArray(snapshot.uploadAssignments) ? snapshot.uploadAssignments : []
-    state.uploadAssignmentsLimit = Math.max(10, Number(snapshot.uploadAssignmentsLimit || state.uploadAssignments.length || 10))
-    state.uploadAssignmentsTotal = Math.max(Number(snapshot.uploadAssignmentsTotal || 0), state.uploadAssignments.length)
-    state.uploadAssignmentsHasMore = snapshot.uploadAssignmentsHasMore === true
-    state.uploadHistory = Array.isArray(snapshot.uploadHistory) ? snapshot.uploadHistory : []
-    state.uploadHistoryLimit = Math.max(10, Number(snapshot.uploadHistoryLimit || state.uploadHistory.length || 10))
-    state.uploadHistoryTotal = Math.max(Number(snapshot.uploadHistoryTotal || 0), state.uploadHistory.length)
-    state.uploadHistoryHasMore = snapshot.uploadHistoryHasMore === true
-    state.queueSummary = snapshot.queueSummary && typeof snapshot.queueSummary === 'object' ? snapshot.queueSummary : state.queueSummary
-    state.events = Array.isArray(snapshot.events) ? snapshot.events : []
-    state.alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : []
     // Clear dismissed banners for bots that are no longer verifying
     for (const botName of [...state.dismissedVerify]) {
       if (!state.bots.some((b) => b.botName === botName && b.tokenWaiting)) {
         state.dismissedVerify.delete(botName)
       }
     }
-    elements.serviceStatus.textContent = snapshot.ok ? 'Service online' : 'Service unknown'
-    elements.serviceStatus.className = `status-pill ${snapshot.ok ? 'status-online' : 'status-neutral'}`
-    elements.lastRefresh.textContent = formatTime(new Date().toISOString())
     renderAlerts()
     renderSummary()
     renderFleetJump()
@@ -2867,6 +2958,8 @@ document.addEventListener('click', async (event) => {
       await loadMoreUploadAssignments()
     } else if (button.dataset.action === 'upload-history-more') {
       await loadMoreUploadHistory()
+    } else if (button.dataset.action === 'events-more') {
+      await loadMoreEvents()
     } else if (button.dataset.action === 'download-node-log') {
       await downloadNodeLogFile(button.dataset.hostLabel || '', button.dataset.fileName || '')
       pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
@@ -3057,6 +3150,16 @@ if (elements.nodeNbtDetails) {
     if (elements.nodeNbtDetails.open && !state.nodeInventoryLoaded) {
       void refreshData({ includeNodeInventory: true }).catch((error) => pushEvent('error', error.message))
     }
+  })
+}
+
+if (elements.operatorLogDetails) {
+  elements.operatorLogDetails.addEventListener('toggle', () => {
+    if (elements.operatorLogDetails.open && !state.eventsLoaded) {
+      void loadEvents().catch((error) => pushEvent('error', error.message))
+      return
+    }
+    renderEvents()
   })
 }
 

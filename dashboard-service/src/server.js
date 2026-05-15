@@ -1256,6 +1256,132 @@ function buildQueueSummary(assignments, nodes = []) {
   return summary
 }
 
+function createEmptyQueueSummary() {
+  return {
+    total: 0,
+    remaining: 0,
+    pending: 0,
+    active: 0,
+    retrying: 0,
+    requeued: 0,
+    completed: 0,
+    cancelled: 0,
+    attention: 0,
+    localNodeFiles: 0,
+    managedLocalNodeFiles: 0,
+    nodeFinishedMapCount: 0,
+    combinedRemaining: 0,
+    combinedCompleted: 0,
+    combinedTotal: 0,
+    eta: null
+  }
+}
+
+function getRawAssignmentStatus(item, botStatusByName, nowMs) {
+  const activeQueueStatuses = new Set(['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup'])
+  const status = String(item.queueStatus || item.deliveryStatus || 'pending').trim().toLowerCase() || 'pending'
+  const botName = String(item.claimedByBotName || '').trim()
+  if (!botName || !activeQueueStatuses.has(status)) return status
+  const bot = botStatusByName.get(botName)
+  const lastStatusMs = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
+  const fresh = Number.isFinite(lastStatusMs) && nowMs - lastStatusMs <= BOT_FRESH_MS && bot?.online === true
+  return fresh ? status : 'held'
+}
+
+function buildQueueSummaryFast(nodes = [], bots = []) {
+  const summary = createEmptyQueueSummary()
+  const activeStatuses = new Set(['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held'])
+  const completedStatuses = new Set(['placed', 'completed', 'succeeded'])
+  const nowMs = Date.now()
+  const botStatusByName = new Map((Array.isArray(bots) ? bots : []).map((bot) => [bot.botName, bot]))
+  const managedLocalNamesByHost = new Map()
+  const heldAssignments = []
+  const retryingFailures = []
+  const exceededAttempts = []
+
+  for (const item of store.listFilesRaw()) {
+    if (!(item.queueMode === true || item.assignedBotName || item.assignedHostLabel || item.claimedByBotName || item.deliveryStatus !== 'unassigned')) continue
+    const status = getRawAssignmentStatus(item, botStatusByName, nowMs)
+    const attemptCount = Number.isFinite(Number(item.attemptCount)) ? Number(item.attemptCount) : 0
+    const maxAttempts = Math.max(1, Number(item.maxAttempts || 3) || 3)
+    const compact = {
+      fileName: item.originalName || item.storedName || item.fileId,
+      claimedByBotName: item.claimedByBotName || null,
+      claimedByHostLabel: item.claimedByHostLabel || item.assignedHostLabel || item.targetHostLabel || null,
+      status,
+      attemptCount,
+      maxAttempts
+    }
+
+    summary.total += 1
+    if (completedStatuses.has(status)) {
+      summary.completed += 1
+      continue
+    }
+    if (status === 'cancelled') {
+      summary.cancelled += 1
+      continue
+    }
+
+    summary.remaining += 1
+    if (activeStatuses.has(status)) {
+      summary.active += 1
+    } else if (status === 'failed' || status === 'failed-final') {
+      summary.retrying += 1
+      retryingFailures.push(compact)
+    } else {
+      summary.pending += 1
+      if (attemptCount > 0) summary.requeued += 1
+    }
+    if (attemptCount >= maxAttempts) {
+      summary.attention += 1
+      if (['pending', 'failed', 'failed-final'].includes(status)) exceededAttempts.push(compact)
+    }
+    if (status === 'held') heldAssignments.push(compact)
+
+    const hostLabel = String(item.claimedByHostLabel || item.assignedHostLabel || item.targetHostLabel || '').trim()
+    const localName = path.basename(String(item.localFileName || item.originalName || item.storedName || '').trim())
+    if (hostLabel && localName) {
+      if (!managedLocalNamesByHost.has(hostLabel)) managedLocalNamesByHost.set(hostLabel, new Set())
+      managedLocalNamesByHost.get(hostLabel).add(localName)
+    }
+  }
+
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    const hostLabel = String(node?.hostLabel || '').trim()
+    const managedNames = managedLocalNamesByHost.get(hostLabel) || new Set()
+    for (const file of Array.isArray(node.nodeFiles) ? node.nodeFiles : []) {
+      const fileName = path.basename(String(file?.fileName || '').trim())
+      if (fileName && managedNames.has(fileName)) {
+        summary.managedLocalNodeFiles += 1
+      } else {
+        summary.localNodeFiles += 1
+      }
+    }
+  }
+
+  summary.nodeFinishedMapCount = (Array.isArray(nodes) ? nodes : []).reduce((count, node) => {
+    const currentFinished = Math.max(0, Number(node.finishedMapCount || 0) || 0)
+    const lifetimeCompleted = Math.max(
+      currentFinished,
+      Number(node.totalCompletedMapCount || 0) || 0,
+      Number(node?.timing?.totalCompletedMaps || 0) || 0
+    )
+    return count + lifetimeCompleted
+  }, 0)
+  summary.combinedRemaining = summary.remaining + summary.localNodeFiles
+  summary.combinedCompleted = Math.max(summary.completed, summary.nodeFinishedMapCount)
+  summary.combinedTotal = summary.combinedRemaining + summary.combinedCompleted
+  summary.eta = buildQueueEta(summary.combinedRemaining, nodes)
+
+  return {
+    summary,
+    heldAssignments,
+    retryingFailures,
+    exceededAttempts
+  }
+}
+
 function createAlert(level, category, title, message, details = {}) {
   return {
     id: `${category}:${crypto.createHash('sha1').update(`${title}:${message}`).digest('hex').slice(0, 10)}`,
@@ -1308,7 +1434,7 @@ function getRuntimeElapsedMs(bot, now = Date.now()) {
   return Math.max(0, now - startedAtMs)
 }
 
-function buildDashboardAlerts(bots, nodes, assignments) {
+function buildDashboardAlerts(bots, nodes, assignments, assignmentSignals = null) {
   const alerts = []
   const now = Date.now()
   const staleBots = bots.filter((bot) => bot.online === true && bot.activeState === 'stale')
@@ -1320,18 +1446,18 @@ function buildDashboardAlerts(bots, nodes, assignments) {
   const longRuntimeBots = bots
     .map((bot) => ({ bot, elapsedMs: getRuntimeElapsedMs(bot, now) }))
     .filter((entry) => entry.elapsedMs >= RUNTIME_DURATION_ALERT_MS)
-  const heldAssignments = assignments.filter((item) => {
+  const heldAssignments = Array.isArray(assignmentSignals?.heldAssignments) ? assignmentSignals.heldAssignments : assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
     if (!['claimed', 'downloaded', 'printing', 'repair', 'post-print', 'cleanup', 'held'].includes(status)) return false
     if (!item.claimedByBotName) return false
     const bot = bots.find((entry) => entry.botName === item.claimedByBotName)
     return !bot || bot.online !== true || bot.activeState === 'stale'
   })
-  const retryingFailures = assignments.filter((item) => {
+  const retryingFailures = Array.isArray(assignmentSignals?.retryingFailures) ? assignmentSignals.retryingFailures : assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
     return status === 'failed' || status === 'failed-final'
   })
-  const exceededAttempts = assignments.filter((item) => {
+  const exceededAttempts = Array.isArray(assignmentSignals?.exceededAttempts) ? assignmentSignals.exceededAttempts : assignments.filter((item) => {
     const status = getAssignmentDisplayStatus(item)
     if (!['pending', 'failed', 'failed-final'].includes(status)) return false
     const maxAttempts = Math.max(1, Number(item.maxAttempts || 3) || 3)
@@ -1456,7 +1582,8 @@ function invalidateSnapshotCache() {
 function buildDashboardSnapshot(actor = null, options = {}) {
   const now = Date.now()
   const includeNodeInventory = options.includeNodeInventory === true && actor?.permissions?.canOperate === true
-  const cacheKey = `${actor?.permissions?.canOperate === true ? 'operate' : 'public'}:${includeNodeInventory ? 'node-inventory' : 'summary'}`
+  const includeEvents = options.includeEvents === true
+  const cacheKey = `${actor?.permissions?.canOperate === true ? 'operate' : 'public'}:${includeNodeInventory ? 'node-inventory' : 'summary'}:${includeEvents ? 'events' : 'no-events'}`
   if (snapshotCache.payload?.cacheKey === cacheKey && snapshotCache.expiresAt > now) {
     return snapshotCache.payload.body
   }
@@ -1470,20 +1597,23 @@ function buildDashboardSnapshot(actor = null, options = {}) {
   const fleet = timed('fleet', () => store.listFleet())
   const bots = timed('bots', () => fleet.bots.map((bot) => summarizeBot(bot, store.getBotPauseState(bot.botName))))
   const nodes = timed('nodes', () => fleet.nodes.map((node) => summarizeNode(node, { includeInventory: includeNodeInventory })))
-  const events = timed('events', () => store.listEvents(150))
-  const allAssignments = timed('assignments', () => listUploadAssignments(0))
+  const eventPage = includeEvents ? timed('events', () => store.listEventPage(24)) : { items: undefined, total: 0, hasMore: false, limit: 24 }
+  const queueStats = timed('queueStats', () => buildQueueSummaryFast(nodes, bots))
   const assignmentPage = actor?.permissions?.canOperate
-    ? timed('assignmentPage', () => listUploadAssignmentPage(10, allAssignments))
+    ? timed('assignmentPage', () => listUploadAssignmentPage(10))
     : { items: [], total: 0, hasMore: false, limit: 10 }
   const uploadHistoryPage = actor?.permissions?.canOperate ? timed('uploadHistory', () => listUploadHistory(10)) : { items: [], total: 0, hasMore: false, limit: 10 }
-  const queueSummary = timed('queueSummary', () => buildQueueSummary(allAssignments, nodes))
-  const alerts = timed('alerts', () => buildDashboardAlerts(bots, nodes, allAssignments))
+  const queueSummary = queueStats.summary
+  const alerts = timed('alerts', () => buildDashboardAlerts(bots, nodes, [], queueStats))
   const body = {
     ok: true,
     health: { ok: true },
     bots,
     nodes,
-    events,
+    events: eventPage.items,
+    eventsTotal: eventPage.total,
+    eventsHasMore: eventPage.hasMore,
+    eventsLimit: eventPage.limit,
     alerts,
     queueSummary,
     uploadAssignments: assignmentPage.items,
@@ -1547,7 +1677,8 @@ async function route(req, res) {
 
   if (req.method === 'GET' && pathname === '/api/dashboard/snapshot') {
     const includeNodeInventory = parseUrl(req).searchParams.get('includeNodeInventory') === 'true'
-    return sendJson(res, 200, buildDashboardSnapshot(actor, { includeNodeInventory }))
+    const includeEvents = parseUrl(req).searchParams.get('includeEvents') === 'true'
+    return sendJson(res, 200, buildDashboardSnapshot(actor, { includeNodeInventory, includeEvents }))
   }
 
   if (req.method === 'POST' && pathname === '/api/dashboard/auth/login') {
@@ -2257,7 +2388,8 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/events') {
-    return sendJson(res, 200, { items: store.listEvents(150) })
+    const limit = Math.min(500, Math.max(24, Number(parseUrl(req).searchParams.get('limit') || 24)))
+    return sendJson(res, 200, store.listEventPage(limit))
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/upload-history') {

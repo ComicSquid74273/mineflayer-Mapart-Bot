@@ -1131,6 +1131,10 @@ function createStore(baseDir) {
     return readJson(uploadsFile, []).sort((left, right) => String(right.uploadedAt).localeCompare(String(left.uploadedAt)))
   }
 
+  function listFilesRaw() {
+    return readJson(uploadsFile, [])
+  }
+
   function listUploadHistory(limit = 200) {
     const items = readJson(uploadHistoryFile, [])
       .sort((left, right) => String(right.uploadedAt).localeCompare(String(left.uploadedAt)))
@@ -1276,6 +1280,17 @@ function createStore(baseDir) {
   function listEvents(limit = 100) {
     const items = readJson(eventsFile, [])
     return items.slice(-Math.max(1, Number(limit) || 100)).reverse()
+  }
+
+  function listEventPage(limit = 24) {
+    const items = readJson(eventsFile, [])
+    const parsedLimit = Math.min(500, Math.max(1, Number(limit) || 24))
+    return {
+      items: items.slice(-parsedLimit).reverse(),
+      total: items.length,
+      hasMore: items.length > parsedLimit,
+      limit: parsedLimit
+    }
   }
 
   function addEvent(input) {
@@ -1985,9 +2000,11 @@ function createStore(baseDir) {
     completeCommand,
     listPendingCommands,
     listFiles,
+    listFilesRaw,
     listUploadHistory,
     getFile,
     listEvents,
+    listEventPage,
     addEvent,
     appendUploadHistory,
     createFileUpload,
