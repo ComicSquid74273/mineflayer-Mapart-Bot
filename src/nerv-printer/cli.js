@@ -5458,6 +5458,19 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
         }
 
+        if (typeof options.onMaterialChestScanned === 'function') {
+          try {
+            options.onMaterialChestScanned({
+              blockName,
+              count: totalInChest,
+              chest: { x: spot.x, y: spot.y, z: spot.z },
+              groupIndex,
+              groupSize: Array.isArray(spotGroups[groupIndex]) ? spotGroups[groupIndex].length : null,
+              spotIndex
+            })
+          } catch { }
+        }
+
         if (totalInChest <= 0) {
           if (config.errorHandling?.logErrors !== false) {
             console.log(`[RESTOCK-SKIP] Chest at ${spot.x} ${spot.y} ${spot.z} has 0 of ${blockName}, moving to next.`)
@@ -5855,7 +5868,8 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     return await restockMaterial(bot, config, blockName, requestedPulls, neededByBlock)
   }
 
-  const spots = getMaterialChestGroupsForRefill(bot, config, blockName).flat()
+  const spotGroups = getMaterialChestGroupsForRefill(bot, config, blockName)
+  const spots = spotGroups.flat()
   if (!spots.length || !bot?.registry?.itemsByName?.[blockName]?.id) {
     return await restockMaterial(bot, config, blockName, requestedPulls, neededByBlock)
   }
@@ -5869,26 +5883,82 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
   const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
   const materialIsCarpet = String(blockName || '').endsWith('_carpet')
   let attempt = 0
-  let materialObserved = false
-  let duperBrokenAlertSent = false
+  const groupStates = spotGroups.map((group, groupIndex) => ({
+    groupIndex,
+    chests: group.map((spot) => ({ x: spot.x, y: spot.y, z: spot.z })),
+    emptySinceAt: 0,
+    lastObservedAt: 0,
+    activeBroken: false
+  }))
+  const activeBrokenGroups = new Set()
+  let duperBrokenAlertActive = false
+
+  const updateDuperBrokenAlert = (have, elapsedMs) => {
+    const groups = [...activeBrokenGroups]
+      .map((groupIndex) => groupStates[groupIndex])
+      .filter(Boolean)
+      .map((group) => ({
+        blockName,
+        groupIndex: group.groupIndex,
+        chests: group.chests,
+        emptySinceAt: group.emptySinceAt ? new Date(group.emptySinceAt).toISOString() : null,
+        elapsedMs: group.emptySinceAt ? Date.now() - group.emptySinceAt : elapsedMs
+      }))
+
+    if (!groups.length) {
+      clearDuperBrokenAlertIfNeeded()
+      return
+    }
+
+    const groupLabel = groups.map((group) => `group ${group.groupIndex + 1}`).join(', ')
+    const message = `Duper may be broken: ${blockName} ${groupLabel} saw no refill for ${Math.round(duperBrokenAlertAfterMs / 60000)}m; repair needed.`
+    const details = {
+      blockName,
+      reason,
+      elapsedMs,
+      targetCount,
+      have,
+      chestCount: spots.length,
+      groupCount: spotGroups.length,
+      groups,
+      attempt
+    }
+    setDashboardAlert(config, 'duper-broken', message, details, 'warn')
+    duperBrokenAlertActive = true
+    reportDashboardWarning(config, 'duper-broken', message, details)
+  }
+
+  const clearDuperBrokenAlertIfNeeded = () => {
+    if (activeBrokenGroups.size > 0) return
+    if (!duperBrokenAlertActive) return
+    clearDashboardAlert(config, 'duper-broken')
+    duperBrokenAlertActive = false
+  }
 
   const noteMaterialObserved = (observation = {}) => {
-    materialObserved = true
-    if (duperBrokenAlertSent) {
-      clearDashboardAlert(config, 'duper-broken')
-      duperBrokenAlertSent = false
+    const groupIndex = Number.isFinite(Number(observation.groupIndex)) ? Number(observation.groupIndex) : null
+    if (groupIndex != null && groupStates[groupIndex]) {
+      const group = groupStates[groupIndex]
+      group.emptySinceAt = 0
+      group.lastObservedAt = Date.now()
+      group.activeBroken = false
+      activeBrokenGroups.delete(groupIndex)
+      clearDuperBrokenAlertIfNeeded()
     }
     if (config.advanced?.debugPrints) {
-      console.log(`[REQUIRED-MATERIAL-WAIT-OBSERVED] ${blockName} count=${observation.count ?? 'unknown'} chest=${observation.chest ? `${observation.chest.x},${observation.chest.y},${observation.chest.z}` : 'unknown'}`)
+      const groupText = groupIndex == null ? '' : ` group=${groupIndex + 1}`
+      console.log(`[REQUIRED-MATERIAL-WAIT-OBSERVED] ${blockName}${groupText} count=${observation.count ?? 'unknown'} chest=${observation.chest ? `${observation.chest.x},${observation.chest.y},${observation.chest.z}` : 'unknown'}`)
     }
   }
 
   while (true) {
     assertRuntimeContinue(bot, config, 'waiting-material-restock')
     attempt += 1
+    const attemptGroupScans = spotGroups.map(() => ({ total: 0, scanned: new Set(), chests: [] }))
     const haveBefore = countInventoryItems(bot, blockName)
     if (haveBefore >= targetCount) {
-      if (duperBrokenAlertSent) clearDashboardAlert(config, 'duper-broken')
+      activeBrokenGroups.clear()
+      clearDuperBrokenAlertIfNeeded()
       return true
     }
 
@@ -5898,14 +5968,26 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     const restocked = await restockMaterial(bot, config, blockName, requestedPulls, neededByBlock, {
       ignoreFailureCooldown: true,
       markUnavailableOnFailure: false,
+      onMaterialChestScanned: (scan = {}) => {
+        const groupIndex = Number.isFinite(Number(scan.groupIndex)) ? Number(scan.groupIndex) : null
+        const groupScan = groupIndex == null ? null : attemptGroupScans[groupIndex]
+        if (!groupScan) return
+        const chestKey = materialChestPositionKey(scan.chest)
+        if (chestKey) groupScan.scanned.add(chestKey)
+        groupScan.total += Math.max(0, toNumber(scan.count, 0))
+        if (scan.chest) groupScan.chests.push({ x: scan.chest.x, y: scan.chest.y, z: scan.chest.z, count: Math.max(0, toNumber(scan.count, 0)) })
+      },
       onMaterialObserved: noteMaterialObserved
     })
     const haveAfter = countInventoryItems(bot, blockName)
-    if (haveAfter > haveBefore) noteMaterialObserved({ count: haveAfter - haveBefore, chest: null })
+    if (haveAfter > haveBefore && config.advanced?.debugPrints) {
+      console.log(`[REQUIRED-MATERIAL-WAIT-OBSERVED] ${blockName} inventoryIncrease=${haveAfter - haveBefore}`)
+    }
     if (restocked || haveAfter >= targetCount) {
       restockFailureCache.delete(blockName)
       unavailableMaterialCache.delete(blockName)
-      if (duperBrokenAlertSent) clearDashboardAlert(config, 'duper-broken')
+      activeBrokenGroups.clear()
+      clearDuperBrokenAlertIfNeeded()
       return true
     }
 
@@ -5923,21 +6005,42 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
     }
 
     const elapsedMs = Date.now() - startedAt
-    if (materialIsCarpet && duperBrokenAlertAfterMs > 0 && !materialObserved && !duperBrokenAlertSent && elapsedMs >= duperBrokenAlertAfterMs) {
-      const message = `Duper may be broken: no ${blockName} refill seen for ${Math.round(duperBrokenAlertAfterMs / 60000)}m; repair needed.`
-      const details = {
-        blockName,
-        reason,
-        elapsedMs,
-        targetCount,
-        have: haveAfter,
-        chestCount: spots.length,
-        attempt
+    if (materialIsCarpet && duperBrokenAlertAfterMs > 0) {
+      let changedBrokenGroups = false
+      for (let groupIndex = 0; groupIndex < attemptGroupScans.length; groupIndex += 1) {
+        const scan = attemptGroupScans[groupIndex]
+        const groupSize = Array.isArray(spotGroups[groupIndex]) ? spotGroups[groupIndex].length : 0
+        const fullGroupScanned = groupSize > 0 && scan.scanned.size >= groupSize
+        if (!fullGroupScanned) continue
+
+        const group = groupStates[groupIndex]
+        if (scan.total > 0) {
+          group.emptySinceAt = 0
+          group.lastObservedAt = Date.now()
+          if (group.activeBroken) {
+            group.activeBroken = false
+            activeBrokenGroups.delete(groupIndex)
+            changedBrokenGroups = true
+          }
+          if (config.advanced?.debugPrints) {
+            console.log(`[DUPER-GROUP-OBSERVED] ${blockName} group=${groupIndex + 1} total=${scan.total} chests=${groupSize}`)
+          }
+          continue
+        }
+
+        if (!group.emptySinceAt) group.emptySinceAt = startedAt
+        const emptyForMs = Date.now() - group.emptySinceAt
+        if (config.advanced?.debugPrints) {
+          console.log(`[DUPER-GROUP-SCAN] ${blockName} group=${groupIndex + 1} total=0 chests=${groupSize} emptyFor=${Math.round(emptyForMs / 1000)}s`)
+        }
+        if (emptyForMs >= duperBrokenAlertAfterMs && !group.activeBroken) {
+          group.activeBroken = true
+          activeBrokenGroups.add(groupIndex)
+          changedBrokenGroups = true
+          console.log(`[DUPER-BROKEN-WARN] ${blockName} group=${groupIndex + 1} no refill observed after ${Math.round(emptyForMs / 1000)}s across ${groupSize} chest(s); have=${haveAfter} target=${targetCount} reason=${reason}.`)
+        }
       }
-      setDashboardAlert(config, 'duper-broken', message, details, 'warn')
-      reportDashboardWarning(config, 'duper-broken', message, details)
-      console.log(`[DUPER-BROKEN-WARN] ${blockName} no refill observed after ${Math.round(elapsedMs / 1000)}s across ${spots.length} configured chest(s); have=${haveAfter} target=${targetCount} reason=${reason}.`)
-      duperBrokenAlertSent = true
+      if (changedBrokenGroups) updateDuperBrokenAlert(haveAfter, elapsedMs)
     }
 
     logThrottled(
