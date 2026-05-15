@@ -6,6 +6,8 @@ const state = {
   configs: [],
   teleportWhitelist: { files: [], selectedFile: '', collapsed: true },
   dataFiles: [],
+  dataFilesLoaded: false,
+  dataFilesLoading: false,
   uploadAssignments: [],
   uploadAssignmentsLimit: 10,
   uploadAssignmentsTotal: 0,
@@ -163,6 +165,7 @@ const elements = {
   clearDataButton: document.getElementById('clearDataButton'),
   configFilesList: document.getElementById('configFilesList'),
   dataFilesList: document.getElementById('dataFilesList'),
+  dataFilesPanel: document.getElementById('dataFilesPanel'),
   configEditorSection: document.getElementById('configEditorSection'),
   configEditorTitle: document.getElementById('configEditorTitle'),
   configEditorClose: document.getElementById('configEditorClose'),
@@ -1073,7 +1076,7 @@ function renderNodeOperationalTags(node) {
   return `<div class="node-alert-strip">${tags.map(([className, label]) => `<span class="tag ${className}">${escapeHtml(label)}</span>`).join('')}</div>`
 }
 
-function renderResourceMetricCard(title, metrics, meta = '') {
+function buildResourceMetricRow(title, metrics, meta = '') {
   const safeMetrics = metrics || {}
   const heapUsed = Number(safeMetrics.heapUsedBytes)
   const heapTotal = Number(safeMetrics.heapTotalBytes)
@@ -1082,20 +1085,16 @@ function renderResourceMetricCard(title, metrics, meta = '') {
     : 'n/a'
   const uptimeMs = Number.isFinite(Number(safeMetrics.uptimeSeconds)) ? Number(safeMetrics.uptimeSeconds) * 1000 : NaN
   return `
-    <article class="resource-metric-card">
-      <div class="file-row">
-        <div>
-          <strong>${escapeHtml(title)}</strong>
-          ${meta ? `<p class="file-meta">${escapeHtml(meta)}</p>` : ''}
-        </div>
-      </div>
-      <div class="node-timing-strip">
-        <div class="metric metric-compact">CPU<strong>${escapeHtml(formatRuntimePercent(safeMetrics.cpuPercent))}</strong></div>
-        <div class="metric metric-compact">RAM<strong>${escapeHtml(formatFileSize(safeMetrics.rssBytes))}</strong></div>
-        <div class="metric metric-compact metric-wide">Heap<strong title="${escapeHtml(heapText)}">${escapeHtml(heapText)}</strong></div>
-        <div class="metric metric-compact">Uptime<strong>${escapeHtml(formatDuration(uptimeMs))}</strong></div>
-      </div>
-    </article>
+    <tr>
+      <th scope="row">
+        <strong>${escapeHtml(title)}</strong>
+        ${meta ? `<span>${escapeHtml(meta)}</span>` : ''}
+      </th>
+      <td>${escapeHtml(formatRuntimePercent(safeMetrics.cpuPercent))}</td>
+      <td>${escapeHtml(formatFileSize(safeMetrics.rssBytes))}</td>
+      <td title="${escapeHtml(heapText)}">${escapeHtml(heapText)}</td>
+      <td>${escapeHtml(formatDuration(uptimeMs))}</td>
+    </tr>
   `
 }
 
@@ -1132,13 +1131,30 @@ function renderResourceMetrics() {
   const dashboard = state.resourceMetrics.dashboard || {}
   const nodes = Array.isArray(state.resourceMetrics.nodes) ? state.resourceMetrics.nodes : []
   const loadedAt = state.resourceMetrics.loadedAt ? `Loaded ${formatTime(state.resourceMetrics.loadedAt)}` : ''
+  const nodeRows = nodes.map((node) => {
+    const botText = Array.isArray(node.botNames) && node.botNames.length ? `Bots: ${node.botNames.join(', ')}` : 'Bots: none'
+    const statusText = `Online ${Number(node.onlineCount || 0)}/${Number(node.botCount || 0)} | ${botText}`
+    return buildResourceMetricRow(node.hostLabel || 'unknown-node', node.runtimeMetrics, statusText)
+  }).join('')
   elements.resourceMetricsGrid.innerHTML = `
-    ${renderResourceMetricCard('Dashboard VM', dashboard, loadedAt)}
-    ${nodes.length ? nodes.map((node) => {
-      const botText = Array.isArray(node.botNames) && node.botNames.length ? `Bots: ${node.botNames.join(', ')}` : 'Bots: none'
-      const statusText = `Online ${Number(node.onlineCount || 0)}/${Number(node.botCount || 0)} | ${botText}`
-      return renderResourceMetricCard(node.hostLabel || 'unknown-node', node.runtimeMetrics, statusText)
-    }).join('') : `
+    <div class="resource-metrics-table-wrap">
+      <table class="resource-metrics-table">
+        <thead>
+          <tr>
+            <th scope="col">Process</th>
+            <th scope="col">CPU</th>
+            <th scope="col">RAM</th>
+            <th scope="col">Heap</th>
+            <th scope="col">Uptime</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${buildResourceMetricRow('Dashboard VM', dashboard, loadedAt)}
+          ${nodeRows}
+        </tbody>
+      </table>
+    </div>
+    ${nodes.length ? '' : `
       <article class="empty-card">
         <h3>No node metrics</h3>
         <p>Wait for bot nodes to post a heartbeat.</p>
@@ -2260,7 +2276,12 @@ function renderTeleportWhitelist() {
 
 function renderDataFiles() {
   if (!elements.dataFilesList) return
-  const sig = JSON.stringify({ canAdmin: hasPermission('canManageOperators'), dataFiles: state.dataFiles })
+  const sig = JSON.stringify({
+    canAdmin: hasPermission('canManageOperators'),
+    dataFiles: state.dataFiles,
+    loaded: state.dataFilesLoaded,
+    loading: state.dataFilesLoading
+  })
   if (state.renderCache.dataFiles === sig) return
   state.renderCache.dataFiles = sig
 
@@ -2269,6 +2290,24 @@ function renderDataFiles() {
       <article class="empty-card">
         <h3>Admin only</h3>
         <p>Log in as admin to view and delete dashboard data files.</p>
+      </article>`
+    return
+  }
+
+  if (state.dataFilesLoading) {
+    elements.dataFilesList.innerHTML = `
+      <article class="empty-card">
+        <h3>Loading data files</h3>
+        <p>Fetching dashboard data folder contents.</p>
+      </article>`
+    return
+  }
+
+  if (!state.dataFilesLoaded) {
+    elements.dataFilesList.innerHTML = `
+      <article class="empty-card">
+        <h3>Data files not loaded</h3>
+        <p>Open this section to list dashboard data files.</p>
       </article>`
     return
   }
@@ -2298,6 +2337,25 @@ function renderDataFiles() {
         </div>
       </article>`
   }).join('')
+}
+
+async function loadDataFiles() {
+  if (!hasPermission('canManageOperators')) {
+    renderDataFiles()
+    return
+  }
+  state.dataFilesLoading = true
+  state.renderCache.dataFiles = ''
+  renderDataFiles()
+  try {
+    const result = await requestJson('/api/dashboard/data', { requireAuth: true })
+    state.dataFiles = Array.isArray(result.files) ? result.files : []
+    state.dataFilesLoaded = true
+  } finally {
+    state.dataFilesLoading = false
+    state.renderCache.dataFiles = ''
+    renderDataFiles()
+  }
 }
 
 function renderConfigEditor() {
@@ -2414,7 +2472,9 @@ async function onClearData() {
   try {
     const result = await submitJson('/api/dashboard/data/clear', {})
     pushEvent('warn', `Cleared data folder: deleted ${(result.deleted || []).length} file(s)`)
-    await refreshData()
+    state.dataFilesLoaded = false
+    state.dataFiles = []
+    await loadDataFiles()
   } catch (err) {
     pushEvent('error', `Clear data failed: ${err.message}`)
   }
@@ -2453,7 +2513,8 @@ async function onDeleteDataFile(fileName) {
   try {
     const result = await submitJson(`/api/dashboard/data/${encodeURIComponent(safeName)}/delete`, {})
     pushEvent('warn', `Deleted data file ${(result.deleted || [safeName])[0] || safeName}`)
-    await refreshData()
+    state.dataFilesLoaded = false
+    await loadDataFiles()
   } catch (err) {
     pushEvent('error', `Delete data file failed: ${err.message}`)
   }
@@ -2633,13 +2694,10 @@ async function refreshData(options = {}) {
         : Promise.resolve({ files: [] }),
       state.auth.verified && hasPermission('admin')
         ? requestJson('/api/dashboard/teleport-whitelist', { requireAuth: true })
-        : Promise.resolve({ files: [] }),
-      state.auth.verified && hasPermission('canManageOperators')
-        ? requestJson('/api/dashboard/data', { requireAuth: true })
         : Promise.resolve({ files: [] })
     ])
-    const optionalFallbacks = [{ items: [] }, { items: [] }, { files: [] }, { files: [] }, { files: [] }]
-    const [logs, operators, configs, teleportWhitelist, dataFiles] = optionalRequests.map((result, index) => {
+    const optionalFallbacks = [{ items: [] }, { items: [] }, { files: [] }, { files: [] }]
+    const [logs, operators, configs, teleportWhitelist] = optionalRequests.map((result, index) => {
       if (result.status === 'fulfilled') return result.value
       pushEvent('warn', result.reason?.message || 'A dashboard detail panel failed to load.')
       return optionalFallbacks[index]
@@ -2648,7 +2706,6 @@ async function refreshData(options = {}) {
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = Array.isArray(configs.files) ? configs.files : []
     state.teleportWhitelist.files = Array.isArray(teleportWhitelist.files) ? teleportWhitelist.files : []
-    state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
     // Clear dismissed banners for bots that are no longer verifying
     for (const botName of [...state.dismissedVerify]) {
       if (!state.bots.some((b) => b.botName === botName && b.tokenWaiting)) {
@@ -3515,6 +3572,16 @@ if (elements.nodeNbtDetails) {
     if (elements.nodeNbtDetails.open && !state.nodeInventoryLoaded) {
       void refreshData({ includeNodeInventory: true }).catch((error) => pushEvent('error', error.message))
     }
+  })
+}
+
+if (elements.dataFilesPanel) {
+  elements.dataFilesPanel.addEventListener('toggle', () => {
+    if (elements.dataFilesPanel.open && !state.dataFilesLoaded && !state.dataFilesLoading) {
+      void loadDataFiles().catch((error) => pushEvent('error', error.message))
+      return
+    }
+    renderDataFiles()
   })
 }
 

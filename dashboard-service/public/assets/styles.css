@@ -519,7 +519,6 @@ h1 {
 .summary-card,
 .bot-card,
 .inventory-card,
-.resource-metric-card,
 .file-item,
 .log-row,
 .empty-card,
@@ -599,16 +598,70 @@ h1 {
   gap: 12px;
 }
 
-.resource-metric-card {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
 .inventory-toolbar {
   display: flex;
   justify-content: end;
+}
+
+.resource-metrics-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel-strong);
+}
+
+.resource-metrics-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+}
+
+.resource-metrics-table th,
+.resource-metrics-table td {
+  padding: 11px 14px;
+  border-bottom: 1px solid rgba(151, 177, 190, 0.12);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.resource-metrics-table thead th {
+  color: var(--muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: rgba(151, 177, 190, 0.06);
+}
+
+.resource-metrics-table tbody tr:last-child th,
+.resource-metrics-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.resource-metrics-table tbody tr:hover {
+  background: rgba(151, 177, 190, 0.05);
+}
+
+.resource-metrics-table tbody th {
+  width: 34%;
+  color: var(--ink);
+}
+
+.resource-metrics-table tbody th strong,
+.resource-metrics-table tbody th span {
+  display: block;
+}
+
+.resource-metrics-table tbody th span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.resource-metrics-table td {
+  color: var(--ink);
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .inventory-items {

@@ -200,15 +200,25 @@
         </div>
       </section>
 
-      <section id="dataFilesPanel" class="panel panel-wide">
-        <div class="panel-header">
-          <div>
-            <p class="panel-kicker">Admin</p>
-            <h2>Data Files</h2>
+      <section class="panel panel-wide">
+        <details id="dataFilesPanel" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Admin</p>
+              <h2>Data Files</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div class="inventory-toolbar collapsible-content">
+            <button id="clearDataButton" class="danger-button small-button" type="button" data-permission-needed="canManageOperators" title="Delete all data JSON files (preserves operators.json)">Clear Data Folder</button>
           </div>
-          <button id="clearDataButton" class="danger-button small-button" type="button" data-permission-needed="canManageOperators" title="Delete all data JSON files (preserves operators.json)">Clear Data Folder</button>
-        </div>
-        <div id="dataFilesList" class="file-list"></div>
+          <div id="dataFilesList" class="file-list collapsible-content">
+            <article class="empty-card">
+              <h3>Data files not loaded</h3>
+              <p>Open this section to list dashboard data files.</p>
+            </article>
+          </div>
+        </details>
       </section>
 
       <section class="panel panel-wide">
