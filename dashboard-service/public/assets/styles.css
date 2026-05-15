@@ -333,6 +333,42 @@ h1 {
   grid-column: span 8;
 }
 
+.admin-top-panel {
+  width: 100%;
+  margin-bottom: 18px;
+  border-radius: 20px;
+}
+
+.teleport-whitelist-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.teleport-whitelist-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.whitelist-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.whitelist-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(151, 177, 190, 0.1);
+}
+
 .panel-header,
 .subsection-header,
 .status-inline,
@@ -1036,6 +1072,10 @@ button:disabled {
 
   .auth-box input {
     width: 100%;
+  }
+
+  .teleport-whitelist-form {
+    grid-template-columns: 1fr;
   }
 
   .back-to-top {

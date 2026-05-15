@@ -3751,6 +3751,10 @@ function createDefaultConfig() {
       cleanAssignedMaterialChests: true,
       cleanAssignedMaterialChestAction: 'dump',
       cleanAssignedMaterialChestMaxStacksPerOpen: 8,
+      autoAcceptTeleportRequests: true,
+      teleportRequestWhitelist: [],
+      teleportRequestAcceptCommand: '/tpy',
+      teleportRequestAcceptCooldownMs: 30000,
       waitForRequiredMaterialRestockEnabled: true,
       waitForRequiredMaterialRetryMs: 5000,
       waitForRequiredMaterialLogEveryMs: 30000,
@@ -12996,6 +13000,7 @@ function createBot(config) {
   installAdaptiveLatencyGuard(bot, config)
   applyAntiHunger(bot, config)
   installChatLogin(bot, config)
+  installTeleportRequestAutoAccept(bot, config)
   bot.once('login', () => applyInventoryStateSync(bot, config))
 
   return bot
@@ -13206,6 +13211,62 @@ function installChatLogin(bot, config) {
     setTimeout(() => {
       trySendChatLoginCommand(bot, 'spawn-auto')
     }, autoSendInitialDelayMs)
+  })
+}
+
+function normalizeMinecraftUsername(value) {
+  const username = String(value || '').trim()
+  return /^[A-Za-z0-9_]{3,16}$/.test(username) ? username : ''
+}
+
+function getTeleportRequestWhitelist(config) {
+  const raw = config?.advanced?.teleportRequestWhitelist
+  const entries = Array.isArray(raw) ? raw : []
+  return new Set(entries
+    .map((entry) => normalizeMinecraftUsername(entry).toLowerCase())
+    .filter(Boolean))
+}
+
+function extractTeleportRequestUsername(message) {
+  const text = stripMinecraftChatFormatting(message).replace(/\s+/g, ' ').trim()
+  const match = text.match(/^([A-Za-z0-9_]{3,16}) wants to teleport to you[.!]?$/i)
+  return normalizeMinecraftUsername(match?.[1] || '')
+}
+
+function installTeleportRequestAutoAccept(bot, config) {
+  const advanced = config.advanced || {}
+  if (advanced.autoAcceptTeleportRequests === false) return
+
+  const whitelist = getTeleportRequestWhitelist(config)
+  if (!whitelist.size) {
+    console.log('[TPA] Auto-accept enabled, but teleportRequestWhitelist is empty.')
+  }
+
+  const command = String(advanced.teleportRequestAcceptCommand || '/tpy').trim() || '/tpy'
+  const cooldownMs = Math.max(1000, toNumber(advanced.teleportRequestAcceptCooldownMs, 30000))
+  const acceptedAtByUser = new Map()
+
+  bot.on('messagestr', (message) => {
+    const username = extractTeleportRequestUsername(message)
+    if (!username) return
+    const key = username.toLowerCase()
+    if (!whitelist.has(key)) {
+      if (advanced.debugPrints) console.log(`[TPA] Ignored teleport request from non-whitelisted user ${username}.`)
+      return
+    }
+
+    const now = Date.now()
+    const lastAcceptedAt = acceptedAtByUser.get(key) || 0
+    if (now - lastAcceptedAt < cooldownMs) return
+    acceptedAtByUser.set(key, now)
+
+    const acceptCommand = `${command} ${username}`
+    console.log(`[TPA] Accepting teleport request from ${username}: ${acceptCommand}`)
+    try {
+      bot.chat(acceptCommand)
+    } catch (err) {
+      console.log(`[TPA-WARN] Failed to accept teleport request from ${username}: ${err?.message || err}`)
+    }
   })
 }
 

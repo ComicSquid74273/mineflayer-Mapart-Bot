@@ -4,6 +4,7 @@ const state = {
   logs: [],
   operators: [],
   configs: [],
+  teleportWhitelist: { files: [], selectedFile: '' },
   dataFiles: [],
   uploadAssignments: [],
   uploadAssignmentsLimit: 10,
@@ -53,6 +54,7 @@ const state = {
     logs: '',
     operators: '',
     configs: '',
+    teleportWhitelist: '',
     dataFiles: '',
     uploadHistory: '',
     uploadAssignments: '',
@@ -148,7 +150,13 @@ const elements = {
   configEditorClose: document.getElementById('configEditorClose'),
   configEditorTextarea: document.getElementById('configEditorTextarea'),
   configEditorSave: document.getElementById('configEditorSave'),
-  configEditorStatus: document.getElementById('configEditorStatus')
+  configEditorStatus: document.getElementById('configEditorStatus'),
+  teleportWhitelistPanel: document.getElementById('teleportWhitelistPanel'),
+  teleportWhitelistForm: document.getElementById('teleportWhitelistForm'),
+  teleportWhitelistConfig: document.getElementById('teleportWhitelistConfig'),
+  teleportWhitelistUsername: document.getElementById('teleportWhitelistUsername'),
+  teleportWhitelistList: document.getElementById('teleportWhitelistList'),
+  teleportWhitelistStatus: document.getElementById('teleportWhitelistStatus')
 }
 
 function roleDefaults(role) {
@@ -525,6 +533,8 @@ function renderAuthState() {
     const submit = elements.operatorForm.querySelector('button[type="submit"]')
     if (submit) submit.disabled = disabled
   }
+
+  renderTeleportWhitelist()
 }
 
 function updateBackToTopVisibility() {
@@ -1940,6 +1950,83 @@ function buildConfigNodeMap() {
   return configNodes
 }
 
+function selectedTeleportWhitelistFile() {
+  const files = Array.isArray(state.teleportWhitelist.files) ? state.teleportWhitelist.files : []
+  const selected = String(state.teleportWhitelist.selectedFile || '').trim()
+  return files.find((file) => file.name === selected) || files[0] || null
+}
+
+function renderTeleportWhitelist() {
+  if (!elements.teleportWhitelistPanel) return
+  if (!hasPermission('admin')) {
+    elements.teleportWhitelistPanel.classList.add('hidden')
+    state.renderCache.teleportWhitelist = ''
+    return
+  }
+
+  elements.teleportWhitelistPanel.classList.remove('hidden')
+  const files = Array.isArray(state.teleportWhitelist.files) ? state.teleportWhitelist.files : []
+  if (files.length && !files.some((file) => file.name === state.teleportWhitelist.selectedFile)) {
+    state.teleportWhitelist.selectedFile = files[0].name
+  }
+  const selected = selectedTeleportWhitelistFile()
+  const sig = JSON.stringify({ files, selected: selected?.name || '' })
+  if (state.renderCache.teleportWhitelist === sig) return
+  state.renderCache.teleportWhitelist = sig
+
+  if (elements.teleportWhitelistConfig) {
+    elements.teleportWhitelistConfig.innerHTML = files.map((file) => (
+      `<option value="${escapeHtml(file.name)}"${selected?.name === file.name ? ' selected' : ''}>${escapeHtml(file.name)}</option>`
+    )).join('')
+    elements.teleportWhitelistConfig.disabled = files.length <= 0
+  }
+
+  if (!selected) {
+    if (elements.teleportWhitelistStatus) elements.teleportWhitelistStatus.textContent = 'No config files'
+    if (elements.teleportWhitelistList) {
+      elements.teleportWhitelistList.innerHTML = `
+        <article class="empty-card">
+          <h3>No config files found</h3>
+          <p>Point DASHBOARD_CONFIG_DIR at the nerv-printer config folder.</p>
+        </article>`
+    }
+    return
+  }
+
+  const whitelist = Array.isArray(selected.whitelist) ? selected.whitelist : []
+  if (elements.teleportWhitelistStatus) {
+    elements.teleportWhitelistStatus.textContent = `${selected.name} | ${whitelist.length} user${whitelist.length === 1 ? '' : 's'}`
+  }
+
+  if (elements.teleportWhitelistList) {
+    if (selected.error) {
+      elements.teleportWhitelistList.innerHTML = `
+        <article class="empty-card">
+          <h3>Config cannot be read</h3>
+          <p>${escapeHtml(selected.error)}</p>
+        </article>`
+      return
+    }
+    if (!whitelist.length) {
+      elements.teleportWhitelistList.innerHTML = `
+        <article class="empty-card">
+          <h3>No whitelisted users</h3>
+          <p>Only admins can add users. Non-whitelisted teleport requests are ignored.</p>
+        </article>`
+      return
+    }
+    elements.teleportWhitelistList.innerHTML = whitelist.map((username) => `
+      <article class="whitelist-user">
+        <strong>${escapeHtml(username)}</strong>
+        <button class="danger-button small-button" type="button"
+          data-action="remove-teleport-whitelist-user"
+          data-permission-needed="admin"
+          data-username="${escapeHtml(username)}">Remove</button>
+      </article>
+    `).join('')
+  }
+}
+
 function renderDataFiles() {
   if (!elements.dataFilesList) return
   const sig = JSON.stringify({ canAdmin: hasPermission('canManageOperators'), dataFiles: state.dataFiles })
@@ -2037,6 +2124,57 @@ async function onSaveConfig() {
   } finally {
     if (elements.configEditorSave) elements.configEditorSave.disabled = false
   }
+}
+
+function normalizeMinecraftUsername(value) {
+  const username = String(value || '').trim()
+  return /^[A-Za-z0-9_]{3,16}$/.test(username) ? username : ''
+}
+
+async function refreshTeleportWhitelist() {
+  if (!hasPermission('admin')) return
+  const previous = state.teleportWhitelist.selectedFile
+  const result = await requestJson('/api/dashboard/teleport-whitelist', { requireAuth: true })
+  state.teleportWhitelist.files = Array.isArray(result.files) ? result.files : []
+  state.teleportWhitelist.selectedFile = previous
+  state.renderCache.teleportWhitelist = ''
+  renderTeleportWhitelist()
+}
+
+async function onAddTeleportWhitelistUser() {
+  if (!hasPermission('admin')) return
+  const file = selectedTeleportWhitelistFile()
+  const username = normalizeMinecraftUsername(elements.teleportWhitelistUsername?.value || '')
+  if (!file) {
+    pushEvent('warn', 'No config file selected for teleport whitelist.')
+    return
+  }
+  if (!username) {
+    pushEvent('warn', 'Enter a valid Minecraft username.')
+    return
+  }
+  await requestJson('/api/dashboard/teleport-whitelist', {
+    method: 'POST',
+    body: JSON.stringify({ fileName: file.name, username }),
+    requireAuth: true
+  })
+  if (elements.teleportWhitelistUsername) elements.teleportWhitelistUsername.value = ''
+  pushEvent('info', `Added ${username} to teleport whitelist in ${file.name}. Restart bot to apply.`)
+  await refreshTeleportWhitelist()
+}
+
+async function onRemoveTeleportWhitelistUser(username) {
+  if (!hasPermission('admin')) return
+  const file = selectedTeleportWhitelistFile()
+  const safeUsername = normalizeMinecraftUsername(username)
+  if (!file || !safeUsername) return
+  await requestJson(`/api/dashboard/teleport-whitelist/${encodeURIComponent(safeUsername)}/delete`, {
+    method: 'POST',
+    body: JSON.stringify({ fileName: file.name }),
+    requireAuth: true
+  })
+  pushEvent('info', `Removed ${safeUsername} from teleport whitelist in ${file.name}. Restart bot to apply.`)
+  await refreshTeleportWhitelist()
 }
 
 async function onClearData() {
@@ -2157,6 +2295,12 @@ async function refreshData(options = {}) {
     const operators = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/operators', { requireAuth: true })
       : { items: [] }
+    const configs = state.auth.verified && hasPermission('canManageOperators')
+      ? await requestJson('/api/dashboard/config', { requireAuth: true })
+      : { files: [] }
+    const teleportWhitelist = state.auth.verified && hasPermission('admin')
+      ? await requestJson('/api/dashboard/teleport-whitelist', { requireAuth: true })
+      : { files: [] }
     const dataFiles = state.auth.verified && hasPermission('canManageOperators')
       ? await requestJson('/api/dashboard/data', { requireAuth: true })
       : { files: [] }
@@ -2165,7 +2309,8 @@ async function refreshData(options = {}) {
     state.nodeInventoryLoaded = snapshot.nodeInventoryIncluded === true
     state.logs = Array.isArray(logs.items) ? logs.items : []
     state.operators = Array.isArray(operators.items) ? operators.items : []
-    state.configs = []
+    state.configs = Array.isArray(configs.files) ? configs.files : []
+    state.teleportWhitelist.files = Array.isArray(teleportWhitelist.files) ? teleportWhitelist.files : []
     state.dataFiles = Array.isArray(dataFiles.files) ? dataFiles.files : []
     state.uploadAssignments = Array.isArray(snapshot.uploadAssignments) ? snapshot.uploadAssignments : []
     state.uploadAssignmentsLimit = Math.max(10, Number(snapshot.uploadAssignmentsLimit || state.uploadAssignments.length || 10))
@@ -2199,6 +2344,8 @@ async function refreshData(options = {}) {
     renderNodes()
     renderLogs()
     renderOperators()
+    renderConfigs()
+    renderTeleportWhitelist()
     renderDataFiles()
     renderAuthState()
   } catch (error) {
@@ -2719,6 +2866,8 @@ document.addEventListener('click', async (event) => {
       pushEvent('info', `Downloaded ${button.dataset.fileName || ''} from ${button.dataset.hostLabel || 'node'}`)
     } else if (button.dataset.action === 'delete-operator') {
       await onDeleteOperator(button.dataset.username || '')
+    } else if (button.dataset.action === 'remove-teleport-whitelist-user') {
+      await onRemoveTeleportWhitelistUser(button.dataset.username || '')
     } else if (button.dataset.action === 'delete-data-file') {
       await onDeleteDataFile(button.dataset.fileName || '')
     } else if (button.dataset.action === 'download-log') {
@@ -2942,6 +3091,22 @@ if (elements.configEditorSave) {
       pushEvent('error', error.message)
       if (elements.configEditorStatus) elements.configEditorStatus.textContent = `Error: ${error.message}`
     }
+  })
+}
+
+if (elements.teleportWhitelistConfig) {
+  elements.teleportWhitelistConfig.addEventListener('change', () => {
+    if (!hasPermission('admin')) return
+    state.teleportWhitelist.selectedFile = elements.teleportWhitelistConfig.value
+    state.renderCache.teleportWhitelist = ''
+    renderTeleportWhitelist()
+  })
+}
+
+if (elements.teleportWhitelistForm) {
+  elements.teleportWhitelistForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    void onAddTeleportWhitelistUser().catch((error) => pushEvent('error', error.message))
   })
 }
 

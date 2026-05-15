@@ -302,6 +302,10 @@ function reqIsFinishedMapDeletePath(pathname, method) {
 }
 
 function reqIsAdminOnlyPath(pathname, method) {
+  if (pathname === '/api/dashboard/teleport-whitelist'
+    || Boolean(matchPath(pathname, '/api/dashboard/teleport-whitelist/:username/delete'))) {
+    return true
+  }
   return method === 'POST' && (
     pathname === '/api/dashboard/reset-everything'
     || pathname === '/api/dashboard/nodes/finished-maps/delete-all'
@@ -401,6 +405,99 @@ function resolveDeletableDataFilePath(fileName) {
   if (!ensureWithinDir(filePath, DATA_DIR)) return null
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) return null
   return filePath
+}
+
+function normalizeMinecraftUsername(value) {
+  const username = String(value || '').trim()
+  return /^[A-Za-z0-9_]{3,16}$/.test(username) ? username : ''
+}
+
+function listConfigFiles() {
+  const files = []
+  if (!fs.existsSync(CONFIG_DIR)) return files
+  for (const entry of fs.readdirSync(CONFIG_DIR, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue
+    const filePath = path.join(CONFIG_DIR, entry.name)
+    if (!ensureWithinDir(filePath, CONFIG_DIR)) continue
+    const stats = fs.statSync(filePath)
+    files.push({ name: entry.name, path: filePath, sizeBytes: stats.size, modifiedAt: stats.mtime.toISOString() })
+  }
+  return files.sort((left, right) => String(left.name).localeCompare(String(right.name), undefined, { sensitivity: 'base' }))
+}
+
+function getConfigFilePathByName(fileName) {
+  const safeName = path.basename(String(fileName || '').trim())
+  if (!safeName || !safeName.toLowerCase().endsWith('.json')) return null
+  const filePath = path.join(CONFIG_DIR, safeName)
+  if (!ensureWithinDir(filePath, CONFIG_DIR)) return null
+  return filePath
+}
+
+function readConfigJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+}
+
+function getTeleportWhitelistFromConfig(config) {
+  const list = Array.isArray(config?.advanced?.teleportRequestWhitelist)
+    ? config.advanced.teleportRequestWhitelist
+    : []
+  return list.map(normalizeMinecraftUsername).filter(Boolean)
+}
+
+function listTeleportWhitelistConfigs() {
+  return listConfigFiles().map((file) => {
+    try {
+      const config = readConfigJsonFile(file.path)
+      return {
+        name: file.name,
+        sizeBytes: file.sizeBytes,
+        modifiedAt: file.modifiedAt,
+        whitelist: getTeleportWhitelistFromConfig(config)
+      }
+    } catch (err) {
+      return {
+        name: file.name,
+        sizeBytes: file.sizeBytes,
+        modifiedAt: file.modifiedAt,
+        whitelist: [],
+        error: String(err?.message || err)
+      }
+    }
+  })
+}
+
+function updateTeleportWhitelistConfig(fileName, updater) {
+  const filePath = getConfigFilePathByName(fileName)
+  if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    return { error: 'config file not found' }
+  }
+  let config
+  try {
+    config = readConfigJsonFile(filePath)
+  } catch {
+    return { error: 'invalid config JSON' }
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    return { error: 'config root must be an object' }
+  }
+
+  const advanced = config.advanced && typeof config.advanced === 'object' && !Array.isArray(config.advanced)
+    ? config.advanced
+    : {}
+  const next = updater(getTeleportWhitelistFromConfig({ advanced }))
+  advanced.autoAcceptTeleportRequests = advanced.autoAcceptTeleportRequests !== false
+  advanced.teleportRequestWhitelist = next
+  config.advanced = advanced
+  fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
+  const stats = fs.statSync(filePath)
+  return {
+    file: {
+      name: path.basename(filePath),
+      sizeBytes: stats.size,
+      modifiedAt: stats.mtime.toISOString(),
+      whitelist: next
+    }
+  }
 }
 
 function listDownloadableLogs() {
@@ -1646,19 +1743,52 @@ async function route(req, res) {
   if (pathname === '/api/dashboard/config') {
     if (!actor?.permissions?.canManageOperators) return forbidden(res, 'admin permission required')
     if (req.method !== 'GET') return methodNotAllowed(res)
-    const files = []
-    try {
-      if (fs.existsSync(CONFIG_DIR)) {
-        for (const entry of fs.readdirSync(CONFIG_DIR, { withFileTypes: true })) {
-          if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.json')) continue
-          const filePath = path.join(CONFIG_DIR, entry.name)
-          const stats = fs.statSync(filePath)
-          files.push({ name: entry.name, sizeBytes: stats.size, modifiedAt: stats.mtime.toISOString() })
-        }
-      }
-    } catch {}
-    files.sort((left, right) => String(left.name).localeCompare(String(right.name), undefined, { sensitivity: 'base' }))
+    const files = listConfigFiles().map(({ path: _path, ...file }) => file)
     return sendJson(res, 200, { files, configDir: CONFIG_DIR })
+  }
+
+  if (pathname === '/api/dashboard/teleport-whitelist') {
+    if (normalizeRole(actor?.role, '') !== 'admin') return forbidden(res, 'admin permission required')
+    if (req.method === 'GET') {
+      return sendJson(res, 200, { files: listTeleportWhitelistConfigs(), configDir: CONFIG_DIR })
+    }
+    if (req.method === 'POST') {
+      const body = await readBody(req)
+      const fileName = String(body?.fileName || '').trim()
+      const username = normalizeMinecraftUsername(body?.username)
+      if (!username) return badRequest(res, 'valid Minecraft username is required')
+      const result = updateTeleportWhitelistConfig(fileName, (current) => {
+        const byLower = new Map(current.map((entry) => [entry.toLowerCase(), entry]))
+        byLower.set(username.toLowerCase(), username)
+        return [...byLower.values()].sort((left, right) => String(left).localeCompare(String(right), undefined, { sensitivity: 'base' }))
+      })
+      if (result.error) return badRequest(res, result.error)
+      auditOperatorAction(actor, 'teleport-whitelist-add', `Added teleport whitelist user ${username} to ${result.file.name}.`, {
+        fileName: result.file.name,
+        username
+      })
+      return sendJson(res, 200, { ok: true, file: result.file })
+    }
+    return methodNotAllowed(res)
+  }
+
+  const teleportWhitelistDeleteParams = matchPath(pathname, '/api/dashboard/teleport-whitelist/:username/delete')
+  if (teleportWhitelistDeleteParams) {
+    if (normalizeRole(actor?.role, '') !== 'admin') return forbidden(res, 'admin permission required')
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req)
+    const fileName = String(body?.fileName || '').trim()
+    const username = normalizeMinecraftUsername(teleportWhitelistDeleteParams.username)
+    if (!username) return badRequest(res, 'valid Minecraft username is required')
+    const result = updateTeleportWhitelistConfig(fileName, (current) => (
+      current.filter((entry) => entry.toLowerCase() !== username.toLowerCase())
+    ))
+    if (result.error) return badRequest(res, result.error)
+    auditOperatorAction(actor, 'teleport-whitelist-remove', `Removed teleport whitelist user ${username} from ${result.file.name}.`, {
+      fileName: result.file.name,
+      username
+    })
+    return sendJson(res, 200, { ok: true, file: result.file })
   }
 
   const configDownloadParams = matchPath(pathname, '/api/dashboard/config/:fileName/download')
