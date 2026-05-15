@@ -1222,6 +1222,11 @@ function renderBots() {
 
 function renderBotInventory() {
   if (!elements.botInventoryGrid) return
+  const refreshButton = document.querySelector('button[data-action="load-bot-inventory"]')
+  if (refreshButton) {
+    refreshButton.disabled = !hasPermission('admin') || state.botInventoryLoading || !elements.botInventoryDetails?.open
+    refreshButton.textContent = state.botInventoryLoading ? 'Refreshing...' : 'Refresh Inventory'
+  }
   const sig = JSON.stringify({
     isAdmin: hasPermission('admin'),
     loaded: state.botInventoryLoaded,
@@ -1267,8 +1272,9 @@ function renderBotInventory() {
       const rawTotalCount = Number(inventory.totalCount)
       const stackCount = Number.isFinite(rawStackCount) ? Math.max(0, rawStackCount) : items.length
       const totalCount = Number.isFinite(rawTotalCount) ? Math.max(0, rawTotalCount) : fallbackTotal
+      const hasInventoryTimestamp = Boolean(inventory.updatedAt || inventory.serverStatusAt)
       const canDump = hasPermission('admin') && bot.online && items.length > 0
-      const canRefresh = hasPermission('admin') && bot.online
+      const canRefresh = hasPermission('admin') && bot.online && !state.botInventoryLoading
       const itemHtml = items.length
         ? items.map((item) => `
           <div class="inventory-item" title="${escapeHtml(item.name || '')}">
@@ -1277,7 +1283,7 @@ function renderBotInventory() {
             <strong class="inventory-count">${escapeHtml(item.count || 0)}</strong>
           </div>
         `).join('')
-        : '<p class="hint">Inventory is empty.</p>'
+        : `<p class="hint">${state.botInventoryLoading && !hasInventoryTimestamp ? 'Waiting for this bot to report inventory.' : (hasInventoryTimestamp ? 'Inventory is empty.' : 'No cached inventory yet. Press Refresh to request a snapshot.')}</p>`
       return `
         <article class="inventory-card">
           <div class="file-row">
@@ -2928,10 +2934,70 @@ async function loadBotInventories() {
   state.renderCache.botInventory = ''
   renderBotInventory()
   try {
-    const result = await requestJson('/api/dashboard/bot-inventory', { requireAuth: true })
-    state.botInventories = Array.isArray(result.items) ? result.items : []
-    state.botInventoryLoaded = true
+    await fetchBotInventories()
     pushEvent('info', 'Loaded cached bot inventory')
+  } finally {
+    state.botInventoryLoading = false
+    state.renderCache.botInventory = ''
+    renderBotInventory()
+  }
+}
+
+async function fetchBotInventories() {
+  const result = await requestJson('/api/dashboard/bot-inventory', { requireAuth: true })
+  state.botInventories = Array.isArray(result.items) ? result.items : []
+  state.botInventoryLoaded = true
+  state.renderCache.botInventory = ''
+  renderBotInventory()
+  return state.botInventories
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function inventoryFreshForTargets(targetBotNames, startedAtMs) {
+  const wanted = new Set((Array.isArray(targetBotNames) ? targetBotNames : []).map((name) => String(name || '')))
+  if (!wanted.size) return true
+  const byBotName = new Map(state.botInventories.map((item) => [String(item.botName || ''), item]))
+  for (const botName of wanted) {
+    const item = byBotName.get(botName)
+    const updatedMs = Math.max(
+      new Date(item?.serverStatusAt || 0).getTime(),
+      new Date(item?.updatedAt || 0).getTime()
+    )
+    if (!Number.isFinite(updatedMs) || updatedMs < startedAtMs) return false
+  }
+  return true
+}
+
+async function pollBotInventoryRefresh(targetBotNames, startedAtMs) {
+  const deadline = Date.now() + 30000
+  do {
+    await sleep(1500)
+    await fetchBotInventories()
+    if (inventoryFreshForTargets(targetBotNames, startedAtMs)) return true
+  } while (Date.now() < deadline)
+  return false
+}
+
+async function onRefreshAllBotInventories() {
+  if (!hasPermission('admin')) {
+    pushEvent('warn', 'Login as admin before refreshing bot inventory.')
+    return
+  }
+  if (!elements.botInventoryDetails?.open) return
+  const startedAtMs = Date.now()
+  state.botInventoryLoading = true
+  state.renderCache.botInventory = ''
+  renderBotInventory()
+  try {
+    const result = await submitJson('/api/dashboard/bot-inventory/refresh', {})
+    const targetBotNames = Array.isArray(result.items) ? result.items.map((item) => item.botName).filter(Boolean) : []
+    pushEvent('info', `Queued inventory refresh for ${result.createdCount || 0}/${result.onlineCount || targetBotNames.length} online bot(s)`)
+    await fetchBotInventories()
+    const complete = await pollBotInventoryRefresh(targetBotNames, startedAtMs)
+    pushEvent(complete ? 'info' : 'warn', complete ? 'Inventory refresh complete' : 'Inventory refresh still waiting on some bots')
   } finally {
     state.botInventoryLoading = false
     state.renderCache.botInventory = ''
@@ -2944,8 +3010,20 @@ async function onRefreshBotInventory(botName) {
     pushEvent('warn', 'Login as admin before refreshing bot inventory.')
     return
   }
-  await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/inventory-refresh`, {})
-  pushEvent('info', `Queued inventory refresh for ${botName}`)
+  const startedAtMs = Date.now()
+  state.botInventoryLoading = true
+  state.renderCache.botInventory = ''
+  renderBotInventory()
+  try {
+    await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/inventory-refresh`, {})
+    pushEvent('info', `Queued inventory refresh for ${botName}`)
+    const complete = await pollBotInventoryRefresh([botName], startedAtMs)
+    pushEvent(complete ? 'info' : 'warn', complete ? `Inventory refreshed for ${botName}` : `Still waiting for ${botName} inventory`)
+  } finally {
+    state.botInventoryLoading = false
+    state.renderCache.botInventory = ''
+    renderBotInventory()
+  }
 }
 
 async function onTpaBot(botName, tpaTarget) {
@@ -3141,7 +3219,7 @@ document.addEventListener('click', async (event) => {
     } else if (button.dataset.action === 'dump-inventory') {
       await onDumpInventory(button.dataset.botName || '')
     } else if (button.dataset.action === 'load-bot-inventory') {
-      await loadBotInventories()
+      await onRefreshAllBotInventories()
     } else if (button.dataset.action === 'refresh-bot-inventory') {
       await onRefreshBotInventory(button.dataset.botName || '')
     } else if (button.dataset.action === 'edit-config') {

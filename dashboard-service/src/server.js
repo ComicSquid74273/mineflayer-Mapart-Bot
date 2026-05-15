@@ -311,6 +311,7 @@ function reqIsAdminOnlyPath(pathname, method) {
   if (pathname === '/api/dashboard/bot-inventory'
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/inventory'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/inventory-refresh'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bot-inventory/refresh'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/dump-inventory'))) {
     return true
   }
@@ -931,6 +932,27 @@ function summarizeBotInventory(item, bot = null) {
     totalCount: Number.isFinite(Number(inventory.totalCount)) ? Math.max(0, Number(inventory.totalCount)) : 0,
     updatedAt: inventory.updatedAt || null,
     serverStatusAt: inventory.serverStatusAt || null
+  }
+}
+
+function botIsDashboardOnline(bot) {
+  return summarizeBot(bot, store.getBotPauseState(bot.botName)).online === true
+}
+
+function createInventorySnapshotCommand(botName, requestedBy) {
+  const existing = store.listCommands((item) =>
+    item.targetBotName === botName
+    && item.commandType === 'inventory-snapshot'
+    && (item.status === 'pending' || item.status === 'claimed')
+  )[0]
+  if (existing) return { command: existing, created: false }
+  return {
+    command: store.createCommand({
+      targetBotName: botName,
+      commandType: 'inventory-snapshot',
+      requestedBy
+    }),
+    created: true
   }
 }
 
@@ -2518,6 +2540,34 @@ async function route(req, res) {
     return sendJson(res, 200, { items })
   }
 
+  if (req.method === 'POST' && pathname === '/api/dashboard/bot-inventory/refresh') {
+    const bots = store.listBots()
+      .filter(botIsDashboardOnline)
+      .sort((left, right) => String(left.botName).localeCompare(String(right.botName)))
+    const results = bots.map((bot) => ({
+      botName: bot.botName,
+      ...createInventorySnapshotCommand(bot.botName, actor.username)
+    }))
+    const createdCount = results.filter((item) => item.created).length
+    const existingCount = results.length - createdCount
+    auditOperatorAction(actor, 'inventory-refresh-all', `Queued inventory refresh for ${createdCount} online bot(s).`, {
+      createdCount,
+      existingCount,
+      botNames: results.map((item) => item.botName)
+    })
+    return sendJson(res, 201, {
+      ok: true,
+      createdCount,
+      existingCount,
+      onlineCount: bots.length,
+      items: results.map((item) => ({
+        botName: item.botName,
+        command: item.command,
+        created: item.created
+      }))
+    })
+  }
+
   params = matchPath(pathname, '/api/dashboard/bots/:botName/inventory')
   if (params) {
     if (req.method !== 'GET') return methodNotAllowed(res)
@@ -2680,13 +2730,12 @@ async function route(req, res) {
   params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/inventory-refresh')
   if (params) {
     if (req.method !== 'POST') return methodNotAllowed(res)
-    const command = store.createCommand({
-      targetBotName: params.botName,
-      commandType: 'inventory-snapshot',
-      requestedBy: actor.username
-    })
+    const bot = store.getBot(params.botName)
+    if (!bot) return notFound(res)
+    if (!botIsDashboardOnline(bot)) return badRequest(res, `${params.botName} is not online`)
+    const { command, created } = createInventorySnapshotCommand(params.botName, actor.username)
     auditOperatorAction(actor, 'inventory-refresh', `Queued inventory refresh for ${params.botName}.`, { botName: params.botName })
-    return sendJson(res, 201, { command })
+    return sendJson(res, 201, { command, created })
   }
 
   params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/disconnect')
