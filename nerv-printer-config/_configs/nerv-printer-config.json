@@ -28,7 +28,7 @@
     ],
     "version": "1.20",
     "profilesFolder": "./auth-cache",
-    "viewDistance": "far",
+    "viewDistance": "normal",
     "checkTimeoutInterval": 60000,
     "reconnect": {
       "enabled": true,

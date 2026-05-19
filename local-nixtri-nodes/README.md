@@ -26,3 +26,14 @@ Stop commands:
 npm run nixtri:nodes -- stop
 npm run nixtri:dashboard -- stop
 ```
+
+Watchdog commands:
+
+```powershell
+npm run nixtri:nodes -- watchdog-start -IntervalSeconds 30
+npm run nixtri:nodes -- watchdog-status
+npm run nixtri:nodes -- watchdog-stop
+```
+
+When the watchdog is running, it checks the selected node PID files every
+interval and starts any stopped bot process again.

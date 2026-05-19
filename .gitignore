@@ -24,6 +24,7 @@ local-nixtri-nodes/**/nbt/
 local-nixtri-nodes/**/sync/
 local-nixtri-nodes/**/*.pid
 local-nixtri-nodes/**/runtime-config.json
+local-nixtri-nodes/**/watchdog-state.json
 local-nixtri-nodes/**/stdout-*.log
 local-nixtri-nodes/**/stderr-*.log
 nerv-printer-config/duper-group-state.json

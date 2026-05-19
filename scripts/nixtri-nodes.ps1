@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('prepare', 'start', 'stop', 'restart', 'status')]
+  [ValidateSet('prepare', 'start', 'stop', 'restart', 'status', 'watchdog-start', 'watchdog-stop', 'watchdog-status', 'watchdog-run')]
   [string]$Action = 'start',
 
   [string]$Node = 'all',
@@ -26,6 +26,9 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $NodesRoot = Join-Path $RepoRoot 'local-nixtri-nodes'
 $BaseConfigPath = Join-Path $RepoRoot 'nerv-printer-config\_configs\nerv-printer-config-premium-1.json'
+$WatchdogRoot = Join-Path $NodesRoot 'watchdog'
+$WatchdogPidPath = Join-Path $WatchdogRoot 'watchdog.pid'
+$WatchdogStatePath = Join-Path $WatchdogRoot 'watchdog-state.json'
 
 $NodeDefinitions = @(
   [pscustomobject]@{
@@ -87,6 +90,10 @@ function Write-Utf8NoBomFile {
   [System.IO.File]::WriteAllText($Path, $Content, $encoding)
 }
 
+function Get-AliveWatchdogProcess {
+  return Get-AliveProcessFromPidPath $WatchdogPidPath
+}
+
 function Get-SelectedNodes {
   if ($Node -eq 'all') {
     return $NodeDefinitions
@@ -136,6 +143,19 @@ function Get-AliveProcessFromPidPath {
     Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
     return $null
   }
+}
+
+function Stop-Watchdog {
+  $process = Get-AliveWatchdogProcess
+  if (-not $process) {
+    Write-Host 'watchdog not running'
+    return
+  }
+
+  Stop-Process -Id $process.Id -Force
+  Remove-Item -LiteralPath $WatchdogPidPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $WatchdogStatePath -Force -ErrorAction SilentlyContinue
+  Write-Host "watchdog stopped pid=$($process.Id)"
 }
 
 function Ensure-NodeConfig {
@@ -293,10 +313,153 @@ function Show-NodeStatus {
   }
 }
 
+function Show-WatchdogStatus {
+  $process = Get-AliveWatchdogProcess
+  if ($process) {
+    $state = readOptionalJson $WatchdogStatePath
+    $stateInterval = if ($null -ne $state -and $null -ne $state.intervalSeconds) { $state.intervalSeconds } else { $IntervalSeconds }
+    $stateNode = if ($null -ne $state -and $state.node) { $state.node } else { $Node }
+    Write-Host "watchdog: running pid=$($process.Id) interval=${stateInterval}s node=$stateNode"
+  } else {
+    Write-Host "watchdog: stopped interval=${IntervalSeconds}s node=$Node"
+  }
+}
+
+function readOptionalJson {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return $null
+  }
+
+  try {
+    return Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+function Write-WatchdogState {
+  param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+  Ensure-Directory $WatchdogRoot
+  $state = [pscustomobject]@{
+    pid = $ProcessId
+    node = $Node
+    intervalSeconds = [Math]::Max(5, $IntervalSeconds)
+    dashboardUrl = $DashboardUrl
+    connectionProfile = $ConnectionProfile
+    serverHost = $ServerHost
+    serverPort = $ServerPort
+    serverVersion = $ServerVersion
+    reconnectDelayMs = $ReconnectDelayMs
+    startedAt = (Get-Date).ToUniversalTime().ToString('o')
+  }
+  Write-Utf8NoBomFile $WatchdogStatePath ($state | ConvertTo-Json -Depth 8)
+}
+
+function Start-Watchdog {
+  Ensure-Directory $WatchdogRoot
+
+  $existing = Get-AliveWatchdogProcess
+  if ($existing) {
+    Write-Host "watchdog already running pid=$($existing.Id)"
+    return
+  }
+
+  $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $stdout = Join-Path $WatchdogRoot "stdout-$timestamp.log"
+  $stderr = Join-Path $WatchdogRoot "stderr-$timestamp.log"
+  $args = @(
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    $PSCommandPath,
+    'watchdog-run',
+    '-Node',
+    $Node,
+    '-IntervalSeconds',
+    [string][Math]::Max(5, $IntervalSeconds),
+    '-DashboardUrl',
+    $DashboardUrl,
+    '-ConnectionProfile',
+    $ConnectionProfile,
+    '-ServerHost',
+    $ServerHost,
+    '-ServerPort',
+    [string]$ServerPort,
+    '-ServerVersion',
+    $ServerVersion,
+    '-ReconnectDelayMs',
+    [string]$ReconnectDelayMs
+  )
+  if ($RunImmediately.IsPresent) {
+    $args += '-RunImmediately'
+  }
+
+  $process = Start-Process `
+    -FilePath 'powershell' `
+    -ArgumentList $args `
+    -WorkingDirectory $RepoRoot `
+    -RedirectStandardOutput $stdout `
+    -RedirectStandardError $stderr `
+    -WindowStyle Hidden `
+    -PassThru
+
+  Set-Content -LiteralPath $WatchdogPidPath -Value $process.Id -Encoding ASCII
+  Write-WatchdogState $process.Id
+  Write-Host "watchdog started pid=$($process.Id) interval=$([Math]::Max(5, $IntervalSeconds))s node=$Node"
+}
+
+function Run-Watchdog {
+  Ensure-Directory $WatchdogRoot
+  Set-Content -LiteralPath $WatchdogPidPath -Value $PID -Encoding ASCII
+  Write-WatchdogState $PID
+  Write-Host "watchdog loop active pid=$PID interval=$([Math]::Max(5, $IntervalSeconds))s node=$Node"
+
+  while ($true) {
+    for ($i = 0; $i -lt $selectedNodes.Count; $i++) {
+      $definition = $selectedNodes[$i]
+      $pidPath = Get-PidPath $definition
+      $process = Get-AliveProcessFromPidPath $pidPath
+      if ($process) {
+        Write-Host "$(Get-Date -Format o) $($definition.Name) alive pid=$($process.Id)"
+        continue
+      }
+
+      Write-Host "$(Get-Date -Format o) $($definition.Name) down; starting"
+      try {
+        Start-Node $definition
+        if ($i -lt ($selectedNodes.Count - 1) -and $IntervalSeconds -gt 0) {
+          Write-Host "$(Get-Date -Format o) waiting $IntervalSeconds seconds before checking next node"
+          Start-Sleep -Seconds $IntervalSeconds
+        }
+      } catch {
+        Write-Host "$(Get-Date -Format o) $($definition.Name) start failed: $($_.Exception.Message)"
+      }
+    }
+
+    Start-Sleep -Seconds ([Math]::Max(5, $IntervalSeconds))
+  }
+}
+
 $selectedNodes = @(Get-SelectedNodes)
 $IntervalSeconds = [Math]::Max(0, $IntervalSeconds)
 
 switch ($Action) {
+  'watchdog-start' {
+    Start-Watchdog
+  }
+  'watchdog-stop' {
+    Stop-Watchdog
+  }
+  'watchdog-status' {
+    Show-WatchdogStatus
+  }
+  'watchdog-run' {
+    Run-Watchdog
+  }
   'prepare' {
     foreach ($definition in $selectedNodes) {
       $configPath = Ensure-NodeConfig $definition
@@ -313,6 +476,7 @@ switch ($Action) {
     }
   }
   'stop' {
+    Stop-Watchdog
     foreach ($definition in $selectedNodes) {
       Stop-Node $definition
     }
