@@ -10,6 +10,14 @@ param(
 
   [string]$ConnectionProfile = 'premium-1',
 
+  [string]$ServerHost = 'premium-1.nytrixcloud.fun',
+
+  [int]$ServerPort = 19105,
+
+  [string]$ServerVersion = '1.21.11',
+
+  [int]$ReconnectDelayMs = 30000,
+
   [switch]$RunImmediately
 )
 
@@ -67,6 +75,16 @@ function Ensure-Directory {
   if (-not (Test-Path -LiteralPath $Path)) {
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
   }
+}
+
+function Write-Utf8NoBomFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Content
+  )
+
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Content, $encoding)
 }
 
 function Get-SelectedNodes {
@@ -164,8 +182,13 @@ function Ensure-NodeConfig {
   if ($null -eq $profile.bot) { Set-JsonProperty $profile 'bot' ([pscustomobject]@{}) }
 
   $authCache = Get-RelativePathForConfig (Join-Path $nodeRoot 'auth-cache')
+  Set-JsonProperty $profile.bot 'host' $ServerHost
+  Set-JsonProperty $profile.bot 'port' $ServerPort
+  Set-JsonProperty $profile.bot 'version' $ServerVersion
   Set-JsonProperty $profile.bot 'auth' 'offline'
   Set-JsonProperty $profile.bot 'profilesFolder' $authCache
+  if ($null -eq $profile.bot.reconnect) { Set-JsonProperty $profile.bot 'reconnect' ([pscustomobject]@{}) }
+  Set-JsonProperty $profile.bot.reconnect 'delayMs' $ReconnectDelayMs
 
   Set-JsonProperty $config.bot 'username' $Definition.BotName
   Set-JsonProperty -Object $config.bot -Name 'usernames' -Value @([pscustomobject]@{
@@ -175,6 +198,9 @@ function Ensure-NodeConfig {
   })
   Set-JsonProperty $config.bot 'auth' 'offline'
   Set-JsonProperty $config.bot 'profilesFolder' $authCache
+  Set-JsonProperty $config.bot 'version' $ServerVersion
+  if ($null -eq $config.bot.reconnect) { Set-JsonProperty $config.bot 'reconnect' ([pscustomobject]@{}) }
+  Set-JsonProperty $config.bot.reconnect 'delayMs' $ReconnectDelayMs
 
   Set-JsonProperty $config.files 'nbtFolder' (Get-RelativePathForConfig (Join-Path $nodeRoot 'nbt'))
   Set-JsonProperty $config.files 'progressFile' (Get-RelativePathForConfig (Join-Path $nodeRoot 'logs\printer-progress.json'))
@@ -198,7 +224,7 @@ function Ensure-NodeConfig {
   Set-JsonProperty $config.printer 'startOnSpawn' $RunImmediately.IsPresent
 
   $configPath = Join-Path $nodeRoot 'runtime-config.json'
-  $config | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $configPath -Encoding UTF8
+  Write-Utf8NoBomFile $configPath ($config | ConvertTo-Json -Depth 100)
   return $configPath
 }
 
