@@ -16,6 +16,17 @@ graphify-out/
 # Dashboard service runtime data
 dashboard-service/data/
 
+# Local Nixtri test node runtime data
+local-nixtri-nodes/**/auth-cache/
+local-nixtri-nodes/**/finished-maps/
+local-nixtri-nodes/**/logs/
+local-nixtri-nodes/**/nbt/
+local-nixtri-nodes/**/sync/
+local-nixtri-nodes/**/*.pid
+local-nixtri-nodes/**/runtime-config.json
+local-nixtri-nodes/**/stdout-*.log
+local-nixtri-nodes/**/stderr-*.log
+
 # Generated finished map outputs
 finished-maps/
 
