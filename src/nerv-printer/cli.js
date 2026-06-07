@@ -3836,7 +3836,22 @@ function createDefaultConfig() {
               lobbyRegions: [
                 { name: 'lobby-1', type: 'disk', action: 'wait-transfer', centerX: 500, centerZ: 500, radius: 192 },
                 { name: 'lobby-2', type: 'disk', action: 'portal', centerX: 1000, centerZ: 1000, radius: 192 },
-                { name: 'login-portal-999', type: 'box', action: 'login-portal', x: 1000, y: 100, z: 1000, radius: 16 }
+                { name: 'login-portal-999', type: 'box', action: 'login-portal', x: 1000, y: 100, z: 1000, radius: 16 },
+                {
+                  name: 'observed-2026-06-new-lobby',
+                  type: 'sphere',
+                  action: 'spawn-portal',
+                  center: { x: 319, y: 163, z: 425 },
+                  radius: 16,
+                  yTolerance: 4,
+                  portal: {
+                    enabled: true,
+                    targetBlock: { x: 311, y: 163, z: 424 },
+                    approach: { x: 313, y: 163, z: 424 },
+                    goalRange: 2,
+                    facing: 'west'
+                  }
+                }
               ],
               spawnDisk: {
                 enabled: false,
@@ -17051,6 +17066,20 @@ function blockPosFromConfig(value) {
   }
 }
 
+function getLobbyRegionCenter(region, fallbackY = null) {
+  const center = region?.center && typeof region.center === 'object' ? region.center : {}
+  const x = toNumber(center.x, toNumber(region?.x, region?.centerX))
+  const y = toNumber(center.y, toNumber(region?.y, fallbackY))
+  const z = toNumber(center.z, toNumber(region?.z, region?.centerZ))
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return null
+  return { x, y, z }
+}
+
+function copyLobbyRegionPortalConfig(region) {
+  const portal = region?.portal
+  return portal && typeof portal === 'object' ? { ...portal } : null
+}
+
 function distance2d(a, x, z) {
   if (!a || !Number.isFinite(a.x) || !Number.isFinite(a.z)) return Number.POSITIVE_INFINITY
   const dx = Number(a.x) - Number(x)
@@ -17256,24 +17285,43 @@ function getMatchedLobbyRegion(pos, portalConfig) {
     const name = String(region.name || `lobby-${i + 1}`)
     const type = String(region.type || 'disk').toLowerCase()
     const radius = Math.max(1, toNumber(region.radius, 128))
+    const action = String(region.action || '').toLowerCase()
+    const portal = copyLobbyRegionPortalConfig(region)
     if (type === 'box') {
-      const x = toNumber(region.x, region.centerX)
-      const y = toNumber(region.y, pos.y)
-      const z = toNumber(region.z, region.centerZ)
-      if (chebyshevDistance3d(pos, x, y, z) <= radius) {
-        return { name, type, action: String(region.action || '').toLowerCase(), x, y, z, radius }
+      const center = getLobbyRegionCenter(region, pos.y)
+      if (!center) continue
+      if (chebyshevDistance3d(pos, center.x, center.y, center.z) <= radius) {
+        return { name, type, action, x: center.x, y: center.y, z: center.z, radius, portal }
       }
       continue
     }
 
-    const centerX = toNumber(region.centerX, region.x)
-    const centerZ = toNumber(region.centerZ, region.z)
-    if (!Number.isFinite(centerX) || !Number.isFinite(centerZ)) continue
-    if (distance2d(pos, centerX, centerZ) <= radius) {
-      return { name, type: 'disk', action: String(region.action || '').toLowerCase(), centerX, centerZ, radius }
+    if (type === 'sphere') {
+      const center = getLobbyRegionCenter(region, pos.y)
+      if (!center) continue
+      const hasBothY = Number.isFinite(Number(pos.y)) && Number.isFinite(center.y)
+      const yTolerance = Math.max(0, toNumber(region.yTolerance, radius))
+      const withinVertical = hasBothY ? Math.abs(Number(pos.y) - center.y) <= yTolerance : !Number.isFinite(center.y)
+      const distance = hasBothY ? distanceToPoint(pos, center) : distance2d(pos, center.x, center.z)
+      if (withinVertical && distance <= radius) {
+        return { name, type, action, x: center.x, y: center.y, z: center.z, radius, yTolerance, portal }
+      }
+      continue
+    }
+
+    const center = getLobbyRegionCenter(region)
+    if (!center) continue
+    if (distance2d(pos, center.x, center.z) <= radius) {
+      return { name, type: 'disk', action, centerX: center.x, centerZ: center.z, radius, portal }
     }
   }
   return null
+}
+
+function formatLobbyRegionCenter(region) {
+  const rounded = (value) => Number.isFinite(Number(value)) ? String(Math.round(Number(value))) : '*'
+  if (region?.type === 'disk') return `${rounded(region.centerX)},*,${rounded(region.centerZ)}`
+  return `${rounded(region?.x)},${rounded(region?.y)},${rounded(region?.z)}`
 }
 
 function logLobbyRegionIfMatched(bot, config, reason = 'startup') {
@@ -17287,9 +17335,7 @@ function logLobbyRegionIfMatched(bot, config, reason = 'startup') {
   }
 
   const now = Date.now()
-  const centerText = region.type === 'box'
-    ? `${Math.round(region.x)},${Math.round(region.y)},${Math.round(region.z)}`
-    : `${Math.round(region.centerX)},*,${Math.round(region.centerZ)}`
+  const centerText = formatLobbyRegionCenter(region)
   const key = `${region.name}|${centerText}`
   const lastAt = bot.__nervLastLobbyRegionLogAt || 0
   if (bot.__nervLastLobbyRegionKey !== key || now - lastAt >= 15000) {
@@ -18185,6 +18231,58 @@ async function gotoLobbyPortalPoint(bot, config, point, label, timeoutMs, defaul
   return true
 }
 
+function getLobbyRegionPortalRoute(region) {
+  const portal = region?.portal
+  if (!portal || portal.enabled === false) return null
+  const approach = blockPosFromConfig(portal.approach)
+  const targetBlock = blockPosFromConfig(portal.targetBlock || portal.target)
+  const directPortalPoint = !targetBlock && !approach ? blockPosFromConfig(portal) : null
+  const target = targetBlock || directPortalPoint
+  if (!approach && !target) return null
+  return {
+    approach,
+    target,
+    goalRange: Math.max(0.5, toNumber(portal.goalRange, toNumber(region?.goalRange, 2))),
+    entryMs: Number.isFinite(Number(portal.entryMs)) ? Math.max(0, Number(portal.entryMs)) : null,
+    waitAfterPortalMs: Number.isFinite(Number(portal.waitAfterPortalMs)) ? Math.max(0, Number(portal.waitAfterPortalMs)) : null,
+    facing: String(portal.facing || '').trim().toLowerCase() || null
+  }
+}
+
+function getFacingLookTargetFromPoint(point, facing) {
+  if (!point || !facing) return null
+  if (facing === 'west') return { x: Number(point.x) - 2, y: Number(point.y) + 1, z: Number(point.z) }
+  if (facing === 'east') return { x: Number(point.x) + 2, y: Number(point.y) + 1, z: Number(point.z) }
+  if (facing === 'north') return { x: Number(point.x), y: Number(point.y) + 1, z: Number(point.z) - 2 }
+  if (facing === 'south') return { x: Number(point.x), y: Number(point.y) + 1, z: Number(point.z) + 2 }
+  return null
+}
+
+async function lookAtLobbyPortalRoute(bot, route) {
+  const target = route?.target || getFacingLookTargetFromPoint(route?.approach, route?.facing)
+  const Vec3 = bot?.entity?.position?.constructor
+  if (!target || typeof Vec3 !== 'function') return
+  try {
+    await bot.lookAt(new Vec3(Number(target.x) + 0.5, Number(target.y) + 0.5, Number(target.z) + 0.5), true)
+  } catch { }
+}
+
+async function runLobbyRegionPortalRoute(bot, config, region, timeoutMs, defaultEntryMs, defaultWaitAfterMs) {
+  const route = getLobbyRegionPortalRoute(region)
+  if (!route) return false
+  console.log(`[LOBBY-PORTAL] Using region portal route ${region.name}: approach=${formatCoordTriplet(route.approach)} target=${formatCoordTriplet(route.target)} range=${route.goalRange}${route.facing ? ` facing=${route.facing}` : ''}`)
+  if (route.approach) {
+    await gotoLobbyPortalPoint(bot, config, { ...route.approach, range: route.goalRange }, `${region.name} portal approach`, timeoutMs, route.goalRange)
+  }
+  if (route.target) {
+    await gotoLobbyPortalPoint(bot, config, { ...route.target, range: route.goalRange }, `${region.name} portal target`, timeoutMs, route.goalRange)
+  }
+  await lookAtLobbyPortalRoute(bot, route)
+  await holdForwardIntoPortal(bot, config, route.entryMs ?? defaultEntryMs)
+  await delay(route.waitAfterPortalMs ?? defaultWaitAfterMs)
+  return true
+}
+
 async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
   ensureUsableEntityState(bot, config, `lobby-portal-leg-${legIndex}`, { allowPlatformSeed: false, log: false })
   const pos = getSpatialReferencePosition(bot, config, `lobby-portal-leg-${legIndex}`)
@@ -18247,6 +18345,11 @@ async function runLobbyPortalLeg(bot, config, portalConfig, legIndex) {
     if (!stillInsideSpawnRegion && !isInsideLobbySpawnDisk(bot?.entity?.position, portalConfig) && !stillInsideForcedRoute && sceneAction !== 'spawn-portal') {
       console.log(`[LOBBY-PORTAL] Leg ${legIndex}: left configured spawn disk before search; skipping portal movement.`)
       return false
+    }
+
+    const regionPortal = getLobbyRegionPortalRoute(currentSpawnRegion) ? currentSpawnRegion : (getLobbyRegionPortalRoute(matchedSpawnRegion) ? matchedSpawnRegion : null)
+    if (regionPortal && await runLobbyRegionPortalRoute(bot, config, regionPortal, timeoutMs, entryMs, waitAfterMs)) {
+      return true
     }
 
     if (await runForcedStraightSpawnRoute(bot, config, spawn, timeoutMs, entryMs, waitAfterMs, { alwaysUse: true })) {
@@ -18620,9 +18723,14 @@ function logConfiguredCoordinateSummary(config) {
       for (const region of regions) {
         const type = String(region.type || 'disk').toLowerCase()
         if (type === 'box') {
-          console.log(`[COORDS] lobby region ${region.name || 'unnamed'} type=box action=${String(region.action || 'none').toLowerCase()} center=${toNumber(region.x, region.centerX)},${toNumber(region.y, 0)},${toNumber(region.z, region.centerZ)} radius=${toNumber(region.radius, 0)}`)
+          const center = getLobbyRegionCenter(region, 0) || {}
+          console.log(`[COORDS] lobby region ${region.name || 'unnamed'} type=box action=${String(region.action || 'none').toLowerCase()} center=${toNumber(center.x, 0)},${toNumber(center.y, 0)},${toNumber(center.z, 0)} radius=${toNumber(region.radius, 0)}`)
+        } else if (type === 'sphere') {
+          const center = getLobbyRegionCenter(region, 0) || {}
+          console.log(`[COORDS] lobby region ${region.name || 'unnamed'} type=sphere action=${String(region.action || 'none').toLowerCase()} center=${toNumber(center.x, 0)},${toNumber(center.y, 0)},${toNumber(center.z, 0)} radius=${toNumber(region.radius, 0)} yTolerance=${toNumber(region.yTolerance, toNumber(region.radius, 0))}`)
         } else {
-          console.log(`[COORDS] lobby region ${region.name || 'unnamed'} type=disk action=${String(region.action || 'none').toLowerCase()} center=${toNumber(region.centerX, region.x)},*,${toNumber(region.centerZ, region.z)} radius=${toNumber(region.radius, 0)}`)
+          const center = getLobbyRegionCenter(region) || {}
+          console.log(`[COORDS] lobby region ${region.name || 'unnamed'} type=disk action=${String(region.action || 'none').toLowerCase()} center=${toNumber(center.x, 0)},*,${toNumber(center.z, 0)} radius=${toNumber(region.radius, 0)}`)
         }
       }
     }
