@@ -46,7 +46,19 @@ function uniqueBy(items, keyFn) {
   return result
 }
 
-function addFileNode(nodes, relPath, extra = {}) {
+function findExistingFileNode(nodes, relPath) {
+  const normalized = relPath.replace(/\\/g, '/').toLowerCase()
+  return nodes.find(node => {
+    const sourceFile = String(node.source_file || '').replace(/\\/g, '/').toLowerCase()
+    const label = String(node.label || '').replace(/\\/g, '/').toLowerCase()
+    return sourceFile === normalized || label === normalized
+  })
+}
+
+function addFileNode(nodes, relPath, extra = {}, existingNodes = []) {
+  const existing = findExistingFileNode(existingNodes, relPath)
+  if (existing?.id) return existing.id
+
   const id = fileId(relPath)
   nodes.push({
     id,
@@ -100,6 +112,7 @@ function main() {
 
   const addedNodes = []
   const addedLinks = []
+  const addContextFileNode = (relPath, extra = {}) => addFileNode(addedNodes, relPath, extra, preservedNodes)
 
   const runtimeCode = {
     nervWrapper: 'nerv_printer_js',
@@ -117,30 +130,30 @@ function main() {
   }
 
   const fileNodes = {
-    readme: addFileNode(addedNodes, 'README.md'),
-    rootPackage: addFileNode(addedNodes, 'package.json'),
-    configTest: addFileNode(addedNodes, 'config.test.json'),
-    graphifySetup: addFileNode(addedNodes, 'docs/GRAPHIFY-SETUP.md'),
-    graphifyContext: addFileNode(addedNodes, 'docs/GRAPHIFY-CONTEXT.md'),
-    dashboardSetup: addFileNode(addedNodes, 'docs/DESKTOP-DASHBOARD-SETUP.md'),
-    sixb6tDoc: addFileNode(addedNodes, 'docs/6b6t.txt'),
-    anchorDoc: addFileNode(addedNodes, 'docs/anchorinformation.txt'),
-    ec2Doc: addFileNode(addedNodes, 'docs/EC2-DEPLOY.md'),
-    serviceExample: addFileNode(addedNodes, 'docs/nerv-printer.service.example'),
-    dashPackage: addFileNode(addedNodes, 'dashboard-service/package.json'),
-    dashIndex: addFileNode(addedNodes, 'dashboard-service/public/index.html'),
-    dashStyles: addFileNode(addedNodes, 'dashboard-service/public/assets/styles.css'),
-    operators: addFileNode(addedNodes, 'dashboard-service/data/operators.json'),
-    printerConfig: addFileNode(addedNodes, 'nerv-printer-config/_configs/nerv-printer-config.json'),
-    printerConfigPremium: addFileNode(addedNodes, 'nerv-printer-config/_configs/nerv-printer-config-premium-1.json'),
-    carpetConfig: addFileNode(addedNodes, 'nerv-printer-config/_configs/carpet-printer-config.json'),
-    legacyCarpetConfig: addFileNode(addedNodes, 'nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json'),
-    marioNbt: addFileNode(addedNodes, 'nerv-printer-config/mario.nbt'),
-    strawberryNbt: addFileNode(addedNodes, 'nerv-printer-config/strawberry.nbt'),
-    spatialAwareness: addFileNode(addedNodes, 'spatial-awareness/6b6t-ComicSquid007.json'),
-    meteorJar: addFileNode(addedNodes, 'assets/MeteorSpatialFileGenerator.jar'),
-    legacySchematic: addFileNode(addedNodes, 'assets/schematics/legacy-nerv-printer-carpet-platform.litematic'),
-    carpetSchematic: addFileNode(addedNodes, 'assets/schematics/carpetPrinterSchematicV2.litematic')
+    readme: addContextFileNode('README.md'),
+    rootPackage: addContextFileNode('package.json'),
+    configTest: addContextFileNode('config.test.json'),
+    graphifySetup: addContextFileNode('docs/GRAPHIFY-SETUP.md'),
+    graphifyContext: addContextFileNode('docs/GRAPHIFY-CONTEXT.md'),
+    dashboardSetup: addContextFileNode('docs/DESKTOP-DASHBOARD-SETUP.md'),
+    sixb6tDoc: addContextFileNode('docs/6b6t.txt'),
+    anchorDoc: addContextFileNode('docs/anchorinformation.txt'),
+    ec2Doc: addContextFileNode('docs/EC2-DEPLOY.md'),
+    serviceExample: addContextFileNode('docs/nerv-printer.service.example'),
+    dashPackage: addContextFileNode('dashboard-service/package.json'),
+    dashIndex: addContextFileNode('dashboard-service/public/index.html'),
+    dashStyles: addContextFileNode('dashboard-service/public/assets/styles.css'),
+    operators: addContextFileNode('dashboard-service/data/operators.json'),
+    printerConfig: addContextFileNode('nerv-printer-config/_configs/nerv-printer-config.json'),
+    printerConfigPremium: addContextFileNode('nerv-printer-config/_configs/nerv-printer-config-premium-1.json'),
+    carpetConfig: addContextFileNode('nerv-printer-config/_configs/carpet-printer-config.json'),
+    legacyCarpetConfig: addContextFileNode('nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json'),
+    marioNbt: addContextFileNode('nerv-printer-config/mario.nbt'),
+    strawberryNbt: addContextFileNode('nerv-printer-config/strawberry.nbt'),
+    spatialAwareness: addContextFileNode('spatial-awareness/6b6t-ComicSquid007.json'),
+    meteorJar: addContextFileNode('assets/MeteorSpatialFileGenerator.jar'),
+    legacySchematic: addContextFileNode('assets/schematics/legacy-nerv-printer-carpet-platform.litematic'),
+    carpetSchematic: addContextFileNode('assets/schematics/carpetPrinterSchematicV2.litematic')
   }
 
   const concepts = {
