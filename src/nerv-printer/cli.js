@@ -32,6 +32,7 @@ const mineflayer = require('mineflayer')
 const nbt = require('prismarine-nbt')
 const { pathfinder, Movements, goals: { GoalNear, GoalBlock } } = require('mineflayer-pathfinder')
 const { createPlacementWorkload } = require('./placement/workload')
+const { applyProxyToOptions, formatProxyForLog } = require('../shared/proxy-connect')
 
 const placementWorkload = createPlacementWorkload({
   toNumber,
@@ -13750,9 +13751,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
 function createBot(config) {
   const botCfg = config.bot || {}
   const username = botCfg.username || 'MapartBot'
-  console.log(`[BOT] username=${username} target=${botCfg.host || '127.0.0.1'}:${toNumber(botCfg.port, 25565)} auth=${botCfg.auth || 'offline'} version=${botCfg.version || 'auto'}`)
-
-  const bot = mineflayer.createBot({
+  const options = {
     host: botCfg.host || '127.0.0.1',
     port: toNumber(botCfg.port, 25565),
     username,
@@ -13767,7 +13766,15 @@ function createBot(config) {
       console.log(`[MICROSOFT-AUTH] ${username} -> ${code || 'code-unavailable'}`)
       console.log(`[MICROSOFT-AUTH] Open ${url}${code ? ` and enter code ${code}` : ''}. The bot will continue automatically after browser verification.`)
     }
+  }
+
+  const proxy = applyProxyToOptions(options, botCfg, {
+    timeoutMs: botCfg.proxyConnectTimeoutMs
   })
+  const proxyText = proxy ? ` proxy=${formatProxyForLog(proxy)}` : ''
+  console.log(`[BOT] username=${username} target=${options.host}:${options.port} auth=${botCfg.auth || 'offline'} version=${botCfg.version || 'auto'}${proxyText}`)
+
+  const bot = mineflayer.createBot(options)
 
   installAdaptiveLatencyGuard(bot, config)
   applyAntiHunger(bot, config)
@@ -14173,7 +14180,16 @@ function getAccountBotOverrides(entry) {
     'profilesFolder',
     'loginPassword',
     'password',
-    'chatLoginPassword'
+    'chatLoginPassword',
+    'proxy',
+    'proxyId',
+    'proxyType',
+    'proxyHost',
+    'proxyPort',
+    'proxyUsername',
+    'proxyPassword',
+    'proxyConnectTimeoutMs',
+    'proxyEnabled'
   ]
   const overrides = {}
   for (const key of allowedKeys) {
@@ -14183,7 +14199,7 @@ function getAccountBotOverrides(entry) {
 }
 
 function mergeBotOverrides(baseBot, overrides = {}) {
-  return {
+  const merged = {
     ...(baseBot || {}),
     ...overrides,
     reconnect: {
@@ -14191,6 +14207,17 @@ function mergeBotOverrides(baseBot, overrides = {}) {
       ...(overrides.reconnect || {})
     }
   }
+
+  if (overrides.proxy === false) {
+    merged.proxy = false
+  } else if (baseBot?.proxy || overrides.proxy) {
+    merged.proxy = {
+      ...(baseBot?.proxy || {}),
+      ...(overrides.proxy || {})
+    }
+  }
+
+  return merged
 }
 
 function normalizeSimpleBotEntry(entry, index, multi) {

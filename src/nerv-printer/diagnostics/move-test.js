@@ -2,6 +2,7 @@ const fs = require('fs')
 const path = require('path')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder')
+const { applyProxyToOptions, formatProxyForLog } = require('../../shared/proxy-connect')
 
 const CONFIG_FILE = path.resolve(process.cwd(), 'nerv-printer-config', '_configs', 'nerv-printer-config.json')
 
@@ -122,9 +123,14 @@ async function main() {
     viewDistance: botConfig.viewDistance || 'tiny',
     checkTimeoutInterval: toNumber(botConfig.checkTimeoutInterval, 60000)
   }
+  const proxySource = { ...botConfig, ...account }
+  const proxy = applyProxyToOptions(options, proxySource, {
+    timeoutMs: proxySource.proxyConnectTimeoutMs
+  })
 
   console.log(`[MOVE-TEST] Connection=${selected} account=${options.username} auth=${options.auth}`)
   console.log(`[MOVE-TEST] Target=${options.host}:${options.port} direction=${direction.name} blocks=5`)
+  if (proxy) console.log(`[MOVE-TEST] Proxy=${formatProxyForLog(proxy)}`)
 
   const bot = mineflayer.createBot(options)
   bot.loadPlugin(pathfinder)

@@ -55,6 +55,7 @@
   },
   "dependencies": {
     "mineflayer": "^4.37.0",
-    "mineflayer-pathfinder": "^2.4.5"
+    "mineflayer-pathfinder": "^2.4.5",
+    "socks": "^2.8.6"
   }
 }

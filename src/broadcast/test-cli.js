@@ -1,5 +1,6 @@
 const mineflayer = require('mineflayer')
 const { randomInt } = require('crypto')
+const { applyProxyToOptions, formatProxyForLog } = require('../shared/proxy-connect')
 
 function loadAppConfig () {
   const candidates = ['../../config.test.json', '../../config.json']
@@ -87,6 +88,15 @@ function normalizeBotConfig (rawBotConfig, globalConfig) {
     profilesFolder: rawBotConfig.profilesFolder || './auth-cache',
     viewDistance: rawBotConfig.viewDistance || 'tiny',
     checkTimeoutInterval: toNumber(rawBotConfig.checkTimeoutInterval, 60000),
+    proxy: rawBotConfig.proxy,
+    proxyId: rawBotConfig.proxyId,
+    proxyType: rawBotConfig.proxyType,
+    proxyHost: rawBotConfig.proxyHost,
+    proxyPort: rawBotConfig.proxyPort,
+    proxyUsername: rawBotConfig.proxyUsername,
+    proxyPassword: rawBotConfig.proxyPassword,
+    proxyConnectTimeoutMs: toNumber(rawBotConfig.proxyConnectTimeoutMs, 30000),
+    proxyEnabled: rawBotConfig.proxyEnabled,
     reconnectDelay: toNumber(rawBotConfig.reconnectDelay, 5500),
     enableReconnect: rawBotConfig.enableReconnect !== false,
     skipReconnectOnModdedKick: rawBotConfig.skipReconnectOnModdedKick !== false,
@@ -119,7 +129,7 @@ class ConfiguredBot {
   }
 
   createOptions () {
-    return {
+    const options = {
       host: this.botConfig.host,
       port: this.botConfig.port,
       username: this.botConfig.username,
@@ -129,6 +139,11 @@ class ConfiguredBot {
       viewDistance: this.botConfig.viewDistance,
       checkTimeoutInterval: this.botConfig.checkTimeoutInterval
     }
+
+    applyProxyToOptions(options, this.botConfig, {
+      timeoutMs: this.botConfig.proxyConnectTimeoutMs
+    })
+    return options
   }
 
   connect () {
@@ -137,6 +152,7 @@ class ConfiguredBot {
     console.log(`[BOOT] Starting ${this.botConfig.label}...`)
     console.log(`[BOOT] Target: ${options.host}:${options.port} | Version: ${options.version || 'auto'}`)
     console.log(`[BOOT] Account: ${options.username}`)
+    if (options.connect) console.log(`[BOOT] Proxy: ${formatProxyForLog(this.botConfig)}`)
 
     this.bot = mineflayer.createBot(options)
     this.registerEvents()
