@@ -4,25 +4,53 @@
       {
         "name": "ComicSquid007",
         "enabled": false,
-        "auth": "microsoft"
+        "auth": "microsoft",
+        "proxyEnabled": false,
+        "proxyId": "",
+        "proxyType": "socks5",
+        "proxyHost": "",
+        "proxyPort": 1080,
+        "proxyUsername": "",
+        "proxyPassword": ""
       },
       {
             "name": "ComicBot001",
             "enabled": false,
             "auth": "offline",
-            "loginPassword": "zKoUufW3hb71u"
+            "loginPassword": "zKoUufW3hb71u",
+            "proxyEnabled": false,
+            "proxyId": "",
+            "proxyType": "socks5",
+            "proxyHost": "",
+            "proxyPort": 1080,
+            "proxyUsername": "",
+            "proxyPassword": ""
           },
           {
             "name": "ComicBot002",
             "enabled": false,
             "auth": "offline",
-            "loginPassword": "gjZq56kCumgKp"
+            "loginPassword": "gjZq56kCumgKp",
+            "proxyEnabled": false,
+            "proxyId": "",
+            "proxyType": "socks5",
+            "proxyHost": "",
+            "proxyPort": 1080,
+            "proxyUsername": "",
+            "proxyPassword": ""
           },
           {
             "name": "ComicBot003",
             "enabled": false,
             "auth": "offline",
-            "loginPassword": "hGMsqs8vPt6w3"
+            "loginPassword": "hGMsqs8vPt6w3",
+            "proxyEnabled": false,
+            "proxyId": "",
+            "proxyType": "socks5",
+            "proxyHost": "",
+            "proxyPort": 1080,
+            "proxyUsername": "",
+            "proxyPassword": ""
           }
 
     ],
