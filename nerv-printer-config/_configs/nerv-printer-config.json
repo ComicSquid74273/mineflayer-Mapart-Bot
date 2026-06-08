@@ -149,6 +149,33 @@
             "portalSearchRadius": 96,
             "lobbyRegions": [
               {
+                "name": "observed-2026-06-new-lobby",
+                "type": "sphere",
+                "action": "spawn-portal",
+                "center": {
+                  "x": 319,
+                  "y": 163,
+                  "z": 425
+                },
+                "radius": 16,
+                "yTolerance": 4,
+                "portal": {
+                  "enabled": true,
+                  "targetBlock": {
+                    "x": 311,
+                    "y": 163,
+                    "z": 424
+                  },
+                  "approach": {
+                    "x": 313,
+                    "y": 163,
+                    "z": 424
+                  },
+                  "goalRange": 2,
+                  "facing": "west"
+                }
+              },
+              {
                 "name": "lobby-1",
                 "type": "disk",
                 "action": "wait-transfer",
@@ -181,33 +208,6 @@
                 "y": 20,
                 "z": 4,
                 "radius": 100
-              },
-              {
-                "name": "observed-2026-06-new-lobby",
-                "type": "sphere",
-                "action": "spawn-portal",
-                "center": {
-                  "x": 319,
-                  "y": 163,
-                  "z": 425
-                },
-                "radius": 16,
-                "yTolerance": 4,
-                "portal": {
-                  "enabled": true,
-                  "targetBlock": {
-                    "x": 311,
-                    "y": 163,
-                    "z": 424
-                  },
-                  "approach": {
-                    "x": 313,
-                    "y": 163,
-                    "z": 424
-                  },
-                  "goalRange": 2,
-                  "facing": "west"
-                }
               }
             ],
             "spawnDisk": {
