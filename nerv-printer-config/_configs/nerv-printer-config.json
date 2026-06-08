@@ -181,7 +181,7 @@
                 "action": "wait-transfer",
                 "centerX": 500,
                 "centerZ": 500,
-                "radius": 192
+                "radius": 30
               },
               {
                 "name": "lobby-2",
@@ -189,7 +189,7 @@
                 "action": "wait-transfer",
                 "centerX": 1000,
                 "centerZ": 1000,
-                "radius": 192
+                "radius": 30
               },
               {
                 "name": "login-portal-neg999",
