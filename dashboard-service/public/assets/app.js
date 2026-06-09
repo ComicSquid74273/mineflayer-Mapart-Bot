@@ -590,6 +590,10 @@ function setManagedOperatorDefaults(role) {
 }
 
 function renderAuthState() {
+  for (const element of document.querySelectorAll('[data-permission-needed]')) {
+    element.disabled = !hasPermission(element.dataset.permissionNeeded || '')
+  }
+
   const authSignature = JSON.stringify({
     operator: state.auth.operator,
     verified: state.auth.verified,
@@ -604,10 +608,6 @@ function renderAuthState() {
   elements.authStatus.textContent = state.auth.verified && state.auth.operator
     ? `${state.auth.role}: ${state.auth.operator}`
     : 'Viewer mode'
-
-  for (const element of document.querySelectorAll('[data-permission-needed]')) {
-    element.disabled = !hasPermission(element.dataset.permissionNeeded || '')
-  }
 
   const canOperate = hasPermission('canOperate')
   if (elements.uploadForm) elements.uploadForm.style.display = canOperate ? '' : 'none'
