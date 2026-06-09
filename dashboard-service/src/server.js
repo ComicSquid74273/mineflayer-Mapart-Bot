@@ -1941,11 +1941,13 @@ function buildDashboardSnapshot(actor = null, options = {}) {
   const canViewNodeFiles = actorHasPermission(actor, 'canViewNodeFiles')
   const canViewOperatorLog = actorHasPermission(actor, 'canViewOperatorLog')
   const canOperate = actorHasPermission(actor, 'canOperate')
+  const canControlBots = actorHasPermission(actor, 'canControlBots')
   const canViewLogs = actorHasPermission(actor, 'canViewLogs')
+  const canViewQueue = canOperate || canControlBots
   const includeNodeInventory = options.includeNodeInventory === true && canViewNodeFiles
   const includeEvents = options.includeEvents === true && canViewOperatorLog
   const includeBotIps = actorCanViewBotIps(actor)
-  const cacheKey = `${canOperate ? 'operate' : 'no-operate'}:${canViewNodeFiles ? 'node-files' : 'no-node-files'}:${canViewOperatorLog ? 'operator-log' : 'no-operator-log'}:${canViewLogs ? 'logs' : 'no-logs'}:${includeNodeInventory ? 'node-inventory' : 'summary'}:${includeEvents ? 'events' : 'no-events'}:${includeBotIps ? 'bot-ips' : 'no-bot-ips'}`
+  const cacheKey = `${canOperate ? 'operate' : 'no-operate'}:${canControlBots ? 'ctrl' : 'no-ctrl'}:${canViewNodeFiles ? 'node-files' : 'no-node-files'}:${canViewOperatorLog ? 'operator-log' : 'no-operator-log'}:${canViewLogs ? 'logs' : 'no-logs'}:${includeNodeInventory ? 'node-inventory' : 'summary'}:${includeEvents ? 'events' : 'no-events'}:${includeBotIps ? 'bot-ips' : 'no-bot-ips'}`
   if (snapshotCache.payload?.cacheKey === cacheKey && snapshotCache.expiresAt > now) {
     return snapshotCache.payload.body
   }
@@ -1961,10 +1963,10 @@ function buildDashboardSnapshot(actor = null, options = {}) {
   const nodes = timed('nodes', () => fleet.nodes.map((node) => summarizeNode(node, { includeInventory: includeNodeInventory, includeLogs: canViewLogs })))
   const eventPage = includeEvents ? timed('events', () => store.listEventPage(24)) : { items: undefined, total: 0, hasMore: false, limit: 24 }
   const queueStats = timed('queueStats', () => buildQueueSummaryFast(nodes, bots))
-  const assignmentPage = canOperate
+  const assignmentPage = canViewQueue
     ? timed('assignmentPage', () => listUploadAssignmentPage(10))
     : { items: [], total: 0, hasMore: false, limit: 10 }
-  const uploadHistoryPage = canOperate ? timed('uploadHistory', () => listUploadHistory(10)) : { items: [], total: 0, hasMore: false, limit: 10 }
+  const uploadHistoryPage = canViewQueue ? timed('uploadHistory', () => listUploadHistory(10)) : { items: [], total: 0, hasMore: false, limit: 10 }
   const queueSummary = queueStats.summary
   const alerts = timed('alerts', () => buildDashboardAlerts(bots, nodes, [], queueStats))
   const body = {
