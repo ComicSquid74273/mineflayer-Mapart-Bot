@@ -82,7 +82,7 @@ const ROLE_DEFAULT_PERMISSIONS = {
   'bot-operator': {
     canViewLogs: true,
     canControlBots: true,
-    canOperate: true,
+    canOperate: false,
     canViewNodeFiles: true,
     canViewBotInventory: true,
     canViewOperatorLog: true,
@@ -310,6 +310,7 @@ function getAuthRequirement(pathname, method) {
   if (reqIsNodeFileReadPath(pathname, method)) return 'canViewNodeFiles'
   if (reqIsLogPath(pathname, method)) return 'canViewLogs'
   if (reqIsLogDeletePath(pathname, method)) return 'canManageOperators'
+  if (method === 'GET' && pathname === '/api/dashboard/upload-assignments') return 'canOperate'
   if (reqIsDashboardFileReadPath(pathname, method)) return 'canControlBots'
   if (reqIsOperatorManagementPath(pathname)) return 'canManageOperators'
   if (reqIsAdminOnlyPath(pathname, method)) return 'admin'

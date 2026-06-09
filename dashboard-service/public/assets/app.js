@@ -226,7 +226,7 @@ function roleDefaults(role) {
       return {
         canViewLogs: true,
         canControlBots: true,
-        canOperate: true,
+        canOperate: false,
         canViewNodeFiles: true,
         canViewBotInventory: true,
         canViewOperatorLog: true,
@@ -1618,7 +1618,6 @@ function renderUploadAssignments() {
   if (!elements.uploadAssignmentsList) return
   const sig = JSON.stringify({
     canOperate: hasPermission('canOperate'),
-    canControlBots: hasPermission('canControlBots'),
     assignments: state.uploadAssignments,
     limit: state.uploadAssignmentsLimit,
     total: state.uploadAssignmentsTotal,
@@ -1628,7 +1627,7 @@ function renderUploadAssignments() {
   if (state.renderCache.uploadAssignments === sig) return
   state.renderCache.uploadAssignments = sig
 
-  if (!hasPermission('canOperate') && !hasPermission('canControlBots')) {
+  if (!hasPermission('canOperate')) {
     elements.uploadAssignmentsList.innerHTML = `
       <article class="empty-card">
         <h3>Assignments hidden</h3>
@@ -1675,7 +1674,7 @@ function renderUploadAssignments() {
   const shown = Math.min(state.uploadAssignments.length, state.uploadAssignmentsLimit)
   const total = Math.max(Number(state.uploadAssignmentsTotal || 0), state.uploadAssignments.length)
   const showMore = state.uploadAssignmentsHasMore ? `
-    <button class="ghost-button small-button upload-assignments-more" type="button" data-action="upload-assignments-more" data-permission-needed="canControlBots" ${state.uploadAssignmentsLoading ? 'disabled' : ''}>
+    <button class="ghost-button small-button upload-assignments-more" type="button" data-action="upload-assignments-more" data-permission-needed="canOperate" ${state.uploadAssignmentsLoading ? 'disabled' : ''}>
       ${state.uploadAssignmentsLoading ? 'Loading...' : `Show More (${escapeHtml(shown)}/${escapeHtml(total)})`}
     </button>
   ` : ''
