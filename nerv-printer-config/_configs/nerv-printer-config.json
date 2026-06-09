@@ -365,7 +365,7 @@
     "inventoryPlanUseWorldState": false,
     "autoEatEnabled": true,
     "autoEatMinHunger": 12,
-    "autoEatFoodItem": "golden_apple",
+    "autoEatFoodItem": "enchanted_golden_apple",
     "autoEatReturnUnusedFood": true,
     "anvilPillarMinCount": 3,
     "anvilPillarScanLimit": 16,
