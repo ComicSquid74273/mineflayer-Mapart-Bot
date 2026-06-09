@@ -222,6 +222,19 @@ function roleDefaults(role) {
         canDeleteNodeFiles: false,
         canManageOperators: false
       }
+    case 'bot-operator':
+      return {
+        canViewLogs: true,
+        canControlBots: true,
+        canOperate: true,
+        canViewNodeFiles: true,
+        canViewBotInventory: true,
+        canViewOperatorLog: true,
+        canViewVmMetrics: true,
+        canViewTeleportWhitelist: true,
+        canDeleteNodeFiles: false,
+        canManageOperators: false
+      }
     case 'operator':
       return {
         canViewLogs: true,
@@ -1605,6 +1618,7 @@ function renderUploadAssignments() {
   if (!elements.uploadAssignmentsList) return
   const sig = JSON.stringify({
     canOperate: hasPermission('canOperate'),
+    canControlBots: hasPermission('canControlBots'),
     assignments: state.uploadAssignments,
     limit: state.uploadAssignmentsLimit,
     total: state.uploadAssignmentsTotal,
@@ -1614,7 +1628,7 @@ function renderUploadAssignments() {
   if (state.renderCache.uploadAssignments === sig) return
   state.renderCache.uploadAssignments = sig
 
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canOperate') && !hasPermission('canControlBots')) {
     elements.uploadAssignmentsList.innerHTML = `
       <article class="empty-card">
         <h3>Assignments hidden</h3>
@@ -1661,7 +1675,7 @@ function renderUploadAssignments() {
   const shown = Math.min(state.uploadAssignments.length, state.uploadAssignmentsLimit)
   const total = Math.max(Number(state.uploadAssignmentsTotal || 0), state.uploadAssignments.length)
   const showMore = state.uploadAssignmentsHasMore ? `
-    <button class="ghost-button small-button upload-assignments-more" type="button" data-action="upload-assignments-more" data-permission-needed="canOperate" ${state.uploadAssignmentsLoading ? 'disabled' : ''}>
+    <button class="ghost-button small-button upload-assignments-more" type="button" data-action="upload-assignments-more" data-permission-needed="canControlBots" ${state.uploadAssignmentsLoading ? 'disabled' : ''}>
       ${state.uploadAssignmentsLoading ? 'Loading...' : `Show More (${escapeHtml(shown)}/${escapeHtml(total)})`}
     </button>
   ` : ''
@@ -1693,6 +1707,7 @@ function renderUploadHistory() {
   if (!elements.uploadHistoryList) return
   const sig = JSON.stringify({
     canOperate: hasPermission('canOperate'),
+    canControlBots: hasPermission('canControlBots'),
     history: state.uploadHistory,
     limit: state.uploadHistoryLimit,
     total: state.uploadHistoryTotal,
@@ -1702,7 +1717,7 @@ function renderUploadHistory() {
   if (state.renderCache.uploadHistory === sig) return
   state.renderCache.uploadHistory = sig
 
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canOperate') && !hasPermission('canControlBots')) {
     elements.uploadHistoryList.innerHTML = `
       <article class="empty-card">
         <h3>Upload history hidden</h3>
@@ -1783,7 +1798,7 @@ function renderUploadHistory() {
   const shown = Math.min(state.uploadHistory.length, state.uploadHistoryLimit)
   const total = Math.max(Number(state.uploadHistoryTotal || 0), state.uploadHistory.length)
   const showMore = state.uploadHistoryHasMore ? `
-    <button class="ghost-button small-button upload-history-more" type="button" data-action="upload-history-more" data-permission-needed="canOperate" ${state.uploadHistoryLoading ? 'disabled' : ''}>
+    <button class="ghost-button small-button upload-history-more" type="button" data-action="upload-history-more" data-permission-needed="canControlBots" ${state.uploadHistoryLoading ? 'disabled' : ''}>
       ${state.uploadHistoryLoading ? 'Loading...' : `Show More (${escapeHtml(shown)}/${escapeHtml(total)})`}
     </button>
   ` : ''
@@ -1820,6 +1835,7 @@ function renderFailedQueueRetries() {
   const totalFailed = Math.max(Number(state.queueSummary?.retrying || 0), failedItems.length)
   const sig = JSON.stringify({
     canOperate: hasPermission('canOperate'),
+    canControlBots: hasPermission('canControlBots'),
     failedItems,
     totalFailed
   })
@@ -1831,7 +1847,7 @@ function renderFailedQueueRetries() {
     elements.retryAllFailedButton.disabled = !hasPermission('canOperate') || totalFailed === 0
   }
 
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canOperate') && !hasPermission('canControlBots')) {
     elements.failedQueueList.innerHTML = `
       <article class="empty-card">
         <h3>Retries hidden</h3>

@@ -79,6 +79,18 @@ const ROLE_DEFAULT_PERMISSIONS = {
     canDeleteNodeFiles: false,
     canManageOperators: false
   },
+  'bot-operator': {
+    canViewLogs: true,
+    canControlBots: true,
+    canOperate: true,
+    canViewNodeFiles: true,
+    canViewBotInventory: true,
+    canViewOperatorLog: true,
+    canViewVmMetrics: true,
+    canViewTeleportWhitelist: true,
+    canDeleteNodeFiles: false,
+    canManageOperators: false
+  },
   operator: {
     canViewLogs: true,
     canControlBots: true,
@@ -298,7 +310,7 @@ function getAuthRequirement(pathname, method) {
   if (reqIsNodeFileReadPath(pathname, method)) return 'canViewNodeFiles'
   if (reqIsLogPath(pathname, method)) return 'canViewLogs'
   if (reqIsLogDeletePath(pathname, method)) return 'canManageOperators'
-  if (reqIsDashboardFileReadPath(pathname, method)) return 'canOperate'
+  if (reqIsDashboardFileReadPath(pathname, method)) return 'canControlBots'
   if (reqIsOperatorManagementPath(pathname)) return 'canManageOperators'
   if (reqIsAdminOnlyPath(pathname, method)) return 'admin'
   if (reqIsDataManagementPath(pathname)) return 'canManageOperators'
