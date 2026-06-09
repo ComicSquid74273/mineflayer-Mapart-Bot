@@ -41,22 +41,65 @@ const processMetricsState = {
   sampledAtMs: Date.now(),
   cpuUsage: process.cpuUsage()
 }
+const OPERATOR_PERMISSION_KEYS = [
+  'canViewLogs',
+  'canControlBots',
+  'canOperate',
+  'canViewNodeFiles',
+  'canViewBotInventory',
+  'canViewOperatorLog',
+  'canViewVmMetrics',
+  'canViewTeleportWhitelist',
+  'canDeleteNodeFiles',
+  'canManageOperators'
+]
+
 const ROLE_DEFAULT_PERMISSIONS = {
   viewer: {
     canViewLogs: true,
+    canControlBots: false,
     canOperate: false,
+    canViewNodeFiles: false,
+    canViewBotInventory: false,
+    canViewOperatorLog: false,
+    canViewVmMetrics: false,
+    canViewTeleportWhitelist: false,
+    canDeleteNodeFiles: false,
+    canManageOperators: false
+  },
+  'bot-controller': {
+    canViewLogs: false,
+    canControlBots: true,
+    canOperate: false,
+    canViewNodeFiles: true,
+    canViewBotInventory: true,
+    canViewOperatorLog: true,
+    canViewVmMetrics: true,
+    canViewTeleportWhitelist: true,
     canDeleteNodeFiles: false,
     canManageOperators: false
   },
   operator: {
     canViewLogs: true,
+    canControlBots: true,
     canOperate: true,
+    canViewNodeFiles: true,
+    canViewBotInventory: true,
+    canViewOperatorLog: true,
+    canViewVmMetrics: true,
+    canViewTeleportWhitelist: true,
     canDeleteNodeFiles: false,
     canManageOperators: false
   },
   admin: {
     canViewLogs: true,
+    canControlBots: true,
     canOperate: true,
+    canViewNodeFiles: true,
+    canViewBotInventory: true,
+    canViewOperatorLog: true,
+    canViewVmMetrics: true,
+    canViewTeleportWhitelist: true,
     canDeleteNodeFiles: true,
     canManageOperators: true
   }
@@ -208,7 +251,7 @@ function normalizeRole(role, fallback = 'viewer') {
 function sanitizePermissionOverrides(input) {
   const source = input && typeof input === 'object' ? input : {}
   const permissions = {}
-  for (const key of ['canViewLogs', 'canOperate', 'canDeleteNodeFiles', 'canManageOperators']) {
+  for (const key of OPERATOR_PERMISSION_KEYS) {
     if (typeof source[key] === 'boolean') permissions[key] = source[key]
   }
   return permissions
@@ -236,6 +279,8 @@ function summarizeOperatorAccount(account) {
 function actorHasPermission(actor, requiredPermission) {
   if (requiredPermission === 'authenticated') return Boolean(actor)
   if (requiredPermission === 'admin') return normalizeRole(actor?.role, '') === 'admin'
+  if (requiredPermission === 'canControlBots' && actor?.permissions?.canOperate === true) return true
+  if (requiredPermission === 'canViewNodeFiles' && actor?.permissions?.canOperate === true) return true
   return Boolean(actor?.permissions?.[requiredPermission])
 }
 
@@ -246,6 +291,11 @@ function actorCanViewBotIps(actor) {
 function getAuthRequirement(pathname, method) {
   if (pathname === '/api/dashboard/auth/login' || pathname === '/api/dashboard/auth/logout') return null
   if (pathname === '/api/dashboard/auth/me') return 'authenticated'
+  if (reqIsResourceMetricsPath(pathname, method)) return 'canViewVmMetrics'
+  if (reqIsOperatorLogPath(pathname, method)) return 'canViewOperatorLog'
+  if (reqIsTeleportWhitelistReadPath(pathname, method)) return 'canViewTeleportWhitelist'
+  if (reqIsBotInventoryAccessPath(pathname, method)) return 'canViewBotInventory'
+  if (reqIsNodeFileReadPath(pathname, method)) return 'canViewNodeFiles'
   if (reqIsLogPath(pathname, method)) return 'canViewLogs'
   if (reqIsLogDeletePath(pathname, method)) return 'canManageOperators'
   if (reqIsDashboardFileReadPath(pathname, method)) return 'canOperate'
@@ -255,6 +305,7 @@ function getAuthRequirement(pathname, method) {
   if (reqIsConfigManagementPath(pathname)) return 'canManageOperators'
   if (reqIsFinishedMapDeletePath(pathname, method)) return 'canManageOperators'
   if (reqIsNodeDeletePath(pathname, method)) return 'canDeleteNodeFiles'
+  if (reqIsBotControlPath(pathname, method)) return 'canControlBots'
   if (reqIsDashboardOperationPath(pathname, method)) return 'canOperate'
   return null
 }
@@ -337,8 +388,41 @@ function reqIsLogPath(pathname, method) {
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/logs/:fileName/download'))
 }
 
+function reqIsResourceMetricsPath(pathname, method) {
+  return method === 'GET' && pathname === '/api/dashboard/resource-metrics'
+}
+
+function reqIsOperatorLogPath(pathname, method) {
+  return method === 'GET' && pathname === '/api/dashboard/events'
+}
+
+function reqIsTeleportWhitelistReadPath(pathname, method) {
+  return method === 'GET' && pathname === '/api/dashboard/teleport-whitelist'
+}
+
+function reqIsTeleportWhitelistManagementPath(pathname, method) {
+  if (pathname === '/api/dashboard/teleport-whitelist') return method !== 'GET'
+  return Boolean(matchPath(pathname, '/api/dashboard/teleport-whitelist/:username/delete'))
+}
+
+function reqIsBotInventoryAccessPath(pathname, method) {
+  if (method === 'GET') {
+    return pathname === '/api/dashboard/bot-inventory'
+      || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/inventory'))
+  }
+  if (method === 'POST') {
+    return pathname === '/api/dashboard/bot-inventory/refresh'
+      || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/inventory-refresh'))
+  }
+  return false
+}
+
 function reqIsNodeDeletePath(pathname, method) {
   return method === 'POST' && Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/files/:fileName/delete'))
+}
+
+function reqIsNodeFileReadPath(pathname, method) {
+  return method === 'GET' && Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/files'))
 }
 
 function reqIsFinishedMapDeletePath(pathname, method) {
@@ -349,15 +433,10 @@ function reqIsFinishedMapDeletePath(pathname, method) {
 }
 
 function reqIsAdminOnlyPath(pathname, method) {
-  if (pathname === '/api/dashboard/teleport-whitelist'
-    || Boolean(matchPath(pathname, '/api/dashboard/teleport-whitelist/:username/delete'))) {
+  if (reqIsTeleportWhitelistManagementPath(pathname, method)) {
     return true
   }
-  if (pathname === '/api/dashboard/bot-inventory'
-    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/inventory'))
-    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/inventory-refresh'))
-    || Boolean(matchPath(pathname, '/api/dashboard/bot-inventory/refresh'))
-    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/dump-inventory'))) {
+  if (Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/dump-inventory'))) {
     return true
   }
   return method === 'POST' && (
@@ -398,25 +477,29 @@ function reqIsConfigManagementPath(pathname) {
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/config/:fileName/download'))
 }
 
-function reqIsDashboardOperationPath(pathname, method) {
+function reqIsBotControlPath(pathname, method) {
   if (method !== 'POST') return false
   return pathname === '/api/dashboard/commands/start-all'
     || pathname === '/api/dashboard/commands/stop-all'
-    || pathname === '/api/dashboard/files'
-    || pathname === '/api/dashboard/uploads'
-    || pathname === '/api/dashboard/reset-everything'
-    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/stop'))
     || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/chat'))
-    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/reset-current-nbt'))
-    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/reprint'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/stop'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/verify'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/chat'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/disconnect'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/reconnect'))
+}
+
+function reqIsDashboardOperationPath(pathname, method) {
+  if (method !== 'POST') return false
+  return pathname === '/api/dashboard/files'
+    || pathname === '/api/dashboard/uploads'
+    || pathname === '/api/dashboard/reset-everything'
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/commands/reset-current-nbt'))
+    || Boolean(matchPath(pathname, '/api/dashboard/nodes/:hostLabel/finished-maps/:fileName/reprint'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/reset-current-nbt'))
     || Boolean(matchPath(pathname, '/api/dashboard/files/:fileId/assign'))
     || Boolean(matchPath(pathname, '/api/dashboard/queue/:fileId/release'))
@@ -1003,6 +1086,7 @@ function createInventorySnapshotCommand(botName, requestedBy) {
 
 function summarizeNode(node, options = {}) {
   const includeInventory = options.includeInventory === true
+  const includeLogs = options.includeLogs === true
   return {
     hostLabel: node.hostLabel,
     botCount: node.botCount,
@@ -1011,7 +1095,7 @@ function summarizeNode(node, options = {}) {
     configFiles: Array.isArray(node.configFiles) ? node.configFiles : [],
     lastStatusAt: node.lastStatusAt,
     nodeFiles: includeInventory && Array.isArray(node.nodeFiles) ? node.nodeFiles : [],
-    nodeLogs: Array.isArray(node.nodeLogs) ? node.nodeLogs : [],
+    nodeLogs: includeLogs && Array.isArray(node.nodeLogs) ? node.nodeLogs : [],
     finishedMapCount: Number.isFinite(Number(node.finishedMapCount)) ? Number(node.finishedMapCount) : 0,
     finishedMapFiles: includeInventory && Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : [],
     nodeInventoryIncluded: includeInventory,
@@ -1842,10 +1926,14 @@ function invalidateSnapshotCache() {
 
 function buildDashboardSnapshot(actor = null, options = {}) {
   const now = Date.now()
-  const includeNodeInventory = options.includeNodeInventory === true && actor?.permissions?.canOperate === true
-  const includeEvents = options.includeEvents === true
+  const canViewNodeFiles = actorHasPermission(actor, 'canViewNodeFiles')
+  const canViewOperatorLog = actorHasPermission(actor, 'canViewOperatorLog')
+  const canOperate = actorHasPermission(actor, 'canOperate')
+  const canViewLogs = actorHasPermission(actor, 'canViewLogs')
+  const includeNodeInventory = options.includeNodeInventory === true && canViewNodeFiles
+  const includeEvents = options.includeEvents === true && canViewOperatorLog
   const includeBotIps = actorCanViewBotIps(actor)
-  const cacheKey = `${actor?.permissions?.canOperate === true ? 'operate' : 'public'}:${includeNodeInventory ? 'node-inventory' : 'summary'}:${includeEvents ? 'events' : 'no-events'}:${includeBotIps ? 'bot-ips' : 'no-bot-ips'}`
+  const cacheKey = `${canOperate ? 'operate' : 'no-operate'}:${canViewNodeFiles ? 'node-files' : 'no-node-files'}:${canViewOperatorLog ? 'operator-log' : 'no-operator-log'}:${canViewLogs ? 'logs' : 'no-logs'}:${includeNodeInventory ? 'node-inventory' : 'summary'}:${includeEvents ? 'events' : 'no-events'}:${includeBotIps ? 'bot-ips' : 'no-bot-ips'}`
   if (snapshotCache.payload?.cacheKey === cacheKey && snapshotCache.expiresAt > now) {
     return snapshotCache.payload.body
   }
@@ -1858,13 +1946,13 @@ function buildDashboardSnapshot(actor = null, options = {}) {
   }
   const fleet = timed('fleet', () => store.listFleet())
   const bots = timed('bots', () => fleet.bots.map((bot) => summarizeBot(bot, store.getBotPauseState(bot.botName), { includeBotIp: includeBotIps })))
-  const nodes = timed('nodes', () => fleet.nodes.map((node) => summarizeNode(node, { includeInventory: includeNodeInventory })))
+  const nodes = timed('nodes', () => fleet.nodes.map((node) => summarizeNode(node, { includeInventory: includeNodeInventory, includeLogs: canViewLogs })))
   const eventPage = includeEvents ? timed('events', () => store.listEventPage(24)) : { items: undefined, total: 0, hasMore: false, limit: 24 }
   const queueStats = timed('queueStats', () => buildQueueSummaryFast(nodes, bots))
-  const assignmentPage = actor?.permissions?.canOperate
+  const assignmentPage = canOperate
     ? timed('assignmentPage', () => listUploadAssignmentPage(10))
     : { items: [], total: 0, hasMore: false, limit: 10 }
-  const uploadHistoryPage = actor?.permissions?.canOperate ? timed('uploadHistory', () => listUploadHistory(10)) : { items: [], total: 0, hasMore: false, limit: 10 }
+  const uploadHistoryPage = canOperate ? timed('uploadHistory', () => listUploadHistory(10)) : { items: [], total: 0, hasMore: false, limit: 10 }
   const queueSummary = queueStats.summary
   const alerts = timed('alerts', () => buildDashboardAlerts(bots, nodes, [], queueStats))
   const body = {
@@ -2702,7 +2790,8 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/nodes') {
-    return sendJson(res, 200, { items: store.listNodes().map(summarizeNode) })
+    const includeLogs = actorHasPermission(actor, 'canViewLogs')
+    return sendJson(res, 200, { items: store.listNodes().map((node) => summarizeNode(node, { includeLogs })) })
   }
 
   params = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/files')

@@ -58,8 +58,8 @@
           </select>
         </label>
         <button id="refreshButton" class="ghost-button" type="button">Refresh</button>
-        <button id="startAllButton" class="accent-button" type="button" data-permission-needed="canOperate">Start Printing All</button>
-        <button id="stopAllButton" class="danger-button" type="button" data-permission-needed="canOperate">Pause Printing All</button>
+        <button id="startAllButton" class="accent-button" type="button" data-permission-needed="canControlBots">Start Printing All</button>
+        <button id="stopAllButton" class="danger-button" type="button" data-permission-needed="canControlBots">Pause Printing All</button>
         <button class="danger-button" type="button" data-action="delete-all-finished-maps" data-permission-needed="admin">CLEANFINISHEDNBT</button>
         <button class="danger-button" type="button" data-action="reset-everything" data-permission-needed="admin">RESETEVERYTHING</button>
       </div>
@@ -179,13 +179,20 @@
             <span>Role</span>
             <select id="managedRole">
               <option value="viewer">viewer</option>
+              <option value="bot-controller">bot-controller</option>
               <option value="operator">operator</option>
               <option value="admin">admin</option>
             </select>
           </label>
           <div class="checkbox-grid">
             <label class="checkbox-row"><input id="permViewLogs" type="checkbox"> <span>Allow log downloads</span></label>
-            <label class="checkbox-row"><input id="permOperate" type="checkbox"> <span>Allow bot and file operations</span></label>
+            <label class="checkbox-row"><input id="permControlBots" type="checkbox"> <span>Allow bot controls</span></label>
+            <label class="checkbox-row"><input id="permOperate" type="checkbox"> <span>Allow NBT uploads and queue operations</span></label>
+            <label class="checkbox-row"><input id="permViewNodeFiles" type="checkbox"> <span>Allow node NBT file view</span></label>
+            <label class="checkbox-row"><input id="permViewBotInventory" type="checkbox"> <span>Allow bot inventory view and refresh</span></label>
+            <label class="checkbox-row"><input id="permViewVmMetrics" type="checkbox"> <span>Allow VM metrics view and refresh</span></label>
+            <label class="checkbox-row"><input id="permViewOperatorLog" type="checkbox"> <span>Allow operator log view</span></label>
+            <label class="checkbox-row"><input id="permViewTeleportWhitelist" type="checkbox"> <span>Allow teleport whitelist view</span></label>
             <label class="checkbox-row"><input id="permDeleteNodeFiles" type="checkbox"> <span>Allow node file deletes</span></label>
             <label class="checkbox-row"><input id="permManageOperators" type="checkbox"> <span>Allow operator management</span></label>
           </div>
@@ -268,7 +275,7 @@
           </div>
           <div class="status-inline">
             <span id="teleportWhitelistStatus" class="timestamp">whitelisted-users.json</span>
-            <button id="teleportWhitelistToggle" class="ghost-button small-button" type="button" data-permission-needed="admin">Show</button>
+            <button id="teleportWhitelistToggle" class="ghost-button small-button" type="button" data-permission-needed="canViewTeleportWhitelist">Show</button>
           </div>
         </div>
         <div id="teleportWhitelistBody" class="teleport-whitelist-body hidden">
@@ -310,12 +317,12 @@
             <span class="ghost-button small-button summary-action"></span>
           </summary>
           <div class="inventory-toolbar collapsible-content">
-            <button class="accent-button small-button" type="button" data-action="load-bot-inventory" data-permission-needed="admin">Refresh Inventory</button>
+            <button class="accent-button small-button" type="button" data-action="load-bot-inventory" data-permission-needed="canViewBotInventory">Refresh Inventory</button>
           </div>
           <div id="botInventoryGrid" class="inventory-grid collapsible-content">
             <article class="empty-card">
-              <h3>Admin only</h3>
-              <p>Log in as admin to request inventory snapshots or dump bot inventory.</p>
+              <h3>Inventory hidden</h3>
+              <p>Log in with bot inventory access to view or refresh bot inventory.</p>
             </article>
           </div>
         </details>
@@ -331,7 +338,7 @@
             <span class="ghost-button small-button summary-action"></span>
           </summary>
           <div class="inventory-toolbar collapsible-content">
-            <button class="accent-button small-button" type="button" data-action="load-resource-metrics">View Metrics</button>
+            <button class="accent-button small-button" type="button" data-action="load-resource-metrics" data-permission-needed="canViewVmMetrics">View Metrics</button>
           </div>
           <div id="resourceMetricsGrid" class="resource-metrics-grid collapsible-content">
             <article class="empty-card">

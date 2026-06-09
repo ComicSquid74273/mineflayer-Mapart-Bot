@@ -71,6 +71,18 @@ function createStore(baseDir) {
   const NODE_TIMING_RECONCILE_MS = Math.max(1000, Number(process.env.DASHBOARD_NODE_TIMING_RECONCILE_MS || 10000))
   const QUEUE_BATCH_HIGH_WATER = Math.max(1, Number(process.env.DASHBOARD_QUEUE_BATCH_HIGH_WATER || 10))
   const QUEUE_BATCH_MAX_CLAIM = Math.max(1, Number(process.env.DASHBOARD_QUEUE_BATCH_MAX_CLAIM || 10))
+  const OPERATOR_PERMISSION_KEYS = [
+    'canViewLogs',
+    'canControlBots',
+    'canOperate',
+    'canViewNodeFiles',
+    'canViewBotInventory',
+    'canViewOperatorLog',
+    'canViewVmMetrics',
+    'canViewTeleportWhitelist',
+    'canDeleteNodeFiles',
+    'canManageOperators'
+  ]
   const COUNTED_NODE_PHASES = new Set(['printing', 'repair', 'rescan', 'post-print', 'cleanup'])
   const HOLD_NODE_PHASES = new Set(['paused'])
   const nextNodeTimingReconcileAtByHost = new Map()
@@ -103,7 +115,13 @@ function createStore(baseDir) {
         role: 'operator',
         permissions: {
           canViewLogs: true,
+          canControlBots: true,
           canOperate: true,
+          canViewNodeFiles: true,
+          canViewBotInventory: true,
+          canViewOperatorLog: true,
+          canViewVmMetrics: true,
+          canViewTeleportWhitelist: true,
           canDeleteNodeFiles: false,
           canManageOperators: false
         },
@@ -116,7 +134,13 @@ function createStore(baseDir) {
         role: 'viewer',
         permissions: {
           canViewLogs: true,
+          canControlBots: false,
           canOperate: false,
+          canViewNodeFiles: false,
+          canViewBotInventory: false,
+          canViewOperatorLog: false,
+          canViewVmMetrics: false,
+          canViewTeleportWhitelist: false,
           canDeleteNodeFiles: false,
           canManageOperators: false
         },
@@ -716,7 +740,7 @@ function createStore(baseDir) {
   function sanitizeOperatorPermissions(input) {
     const source = input && typeof input === 'object' ? input : {}
     const permissions = {}
-    for (const key of ['canViewLogs', 'canOperate', 'canDeleteNodeFiles', 'canManageOperators']) {
+    for (const key of OPERATOR_PERMISSION_KEYS) {
       if (typeof source[key] === 'boolean') permissions[key] = source[key]
     }
     return permissions

@@ -57,7 +57,8 @@ Operator model:
 - every account has a `role` plus optional explicit `permissions` overrides
 - default role presets:
   - `viewer` - log downloads only
-  - `operator` - viewer permissions plus bot start/stop and file upload/assignment
+  - `bot-controller` - bot chat/start/pause/reconnect/disconnect plus selected monitoring panels, without log downloads or NBT upload/queue operations
+  - `operator` - viewer permissions plus bot control, NBT upload/queue operations, and monitoring panels
   - `admin` - operator permissions plus node-file delete and operator management
 - explicit permission flags can override the role defaults per account
 
@@ -77,7 +78,13 @@ Example record:
   "role": "operator",
   "permissions": {
     "canViewLogs": true,
+    "canControlBots": true,
     "canOperate": true,
+    "canViewNodeFiles": true,
+    "canViewBotInventory": true,
+    "canViewOperatorLog": true,
+    "canViewVmMetrics": true,
+    "canViewTeleportWhitelist": true,
     "canDeleteNodeFiles": false,
     "canManageOperators": false
   },
@@ -128,7 +135,13 @@ Example record:
 - `GET /` - browser dashboard
 - dashboard viewing is public
 - log downloads require an account with `canViewLogs`
-- mutating actions require `canOperate`
+- chat/start/pause/reconnect/disconnect controls require `canControlBots`
+- NBT upload, queue/retry/release, current-NBT reset, and reprint operations require `canOperate`
+- Node NBT file lists require `canViewNodeFiles`
+- bot inventory view and refresh require `canViewBotInventory`; inventory dump still requires the `admin` role
+- VM metrics require `canViewVmMetrics`
+- operator activity logs require `canViewOperatorLog`
+- teleport whitelist viewing requires `canViewTeleportWhitelist`; adding/removing whitelist users still requires the `admin` role
 - dashboard log deletion, data-file deletion, data clear, config edits, and operator management require `canManageOperators`
 - destructive node-file deletes require `canDeleteNodeFiles`
 - operator management requires `canManageOperators`

@@ -89,7 +89,13 @@ const state = {
     role: 'public',
     permissions: {
       canViewLogs: false,
+      canControlBots: false,
       canOperate: false,
+      canViewNodeFiles: false,
+      canViewBotInventory: false,
+      canViewOperatorLog: false,
+      canViewVmMetrics: false,
+      canViewTeleportWhitelist: false,
       canDeleteNodeFiles: false,
       canManageOperators: false,
       canAdmin: false
@@ -129,10 +135,16 @@ const elements = {
   operatorStatus: document.getElementById('operatorStatus'),
   operatorUsername: document.getElementById('operatorUsername'),
   operatorsList: document.getElementById('operatorsList'),
+  permControlBots: document.getElementById('permControlBots'),
   permDeleteNodeFiles: document.getElementById('permDeleteNodeFiles'),
   permManageOperators: document.getElementById('permManageOperators'),
   permOperate: document.getElementById('permOperate'),
+  permViewBotInventory: document.getElementById('permViewBotInventory'),
   permViewLogs: document.getElementById('permViewLogs'),
+  permViewNodeFiles: document.getElementById('permViewNodeFiles'),
+  permViewOperatorLog: document.getElementById('permViewOperatorLog'),
+  permViewTeleportWhitelist: document.getElementById('permViewTeleportWhitelist'),
+  permViewVmMetrics: document.getElementById('permViewVmMetrics'),
   refreshButton: document.getElementById('refreshButton'),
   refreshInterval: document.getElementById('refreshInterval'),
   queueRemainingValue: document.getElementById('queueRemainingValue'),
@@ -187,21 +199,52 @@ function roleDefaults(role) {
     case 'admin':
       return {
         canViewLogs: true,
+        canControlBots: true,
         canOperate: true,
+        canViewNodeFiles: true,
+        canViewBotInventory: true,
+        canViewOperatorLog: true,
+        canViewVmMetrics: true,
+        canViewTeleportWhitelist: true,
         canDeleteNodeFiles: true,
         canManageOperators: true
+      }
+    case 'bot-controller':
+      return {
+        canViewLogs: false,
+        canControlBots: true,
+        canOperate: false,
+        canViewNodeFiles: true,
+        canViewBotInventory: true,
+        canViewOperatorLog: true,
+        canViewVmMetrics: true,
+        canViewTeleportWhitelist: true,
+        canDeleteNodeFiles: false,
+        canManageOperators: false
       }
     case 'operator':
       return {
         canViewLogs: true,
+        canControlBots: true,
         canOperate: true,
+        canViewNodeFiles: true,
+        canViewBotInventory: true,
+        canViewOperatorLog: true,
+        canViewVmMetrics: true,
+        canViewTeleportWhitelist: true,
         canDeleteNodeFiles: false,
         canManageOperators: false
       }
     default:
       return {
         canViewLogs: true,
+        canControlBots: false,
         canOperate: false,
+        canViewNodeFiles: false,
+        canViewBotInventory: false,
+        canViewOperatorLog: false,
+        canViewVmMetrics: false,
+        canViewTeleportWhitelist: false,
         canDeleteNodeFiles: false,
         canManageOperators: false
       }
@@ -503,7 +546,13 @@ function clearAuth() {
     role: 'public',
     permissions: {
       canViewLogs: false,
+      canControlBots: false,
       canOperate: false,
+      canViewNodeFiles: false,
+      canViewBotInventory: false,
+      canViewOperatorLog: false,
+      canViewVmMetrics: false,
+      canViewTeleportWhitelist: false,
       canDeleteNodeFiles: false,
       canManageOperators: false,
       canAdmin: false
@@ -516,7 +565,13 @@ function clearAuth() {
 function setManagedOperatorDefaults(role) {
   const defaults = roleDefaults(role)
   elements.permViewLogs.checked = defaults.canViewLogs
+  elements.permControlBots.checked = defaults.canControlBots
   elements.permOperate.checked = defaults.canOperate
+  elements.permViewNodeFiles.checked = defaults.canViewNodeFiles
+  elements.permViewBotInventory.checked = defaults.canViewBotInventory
+  elements.permViewOperatorLog.checked = defaults.canViewOperatorLog
+  elements.permViewVmMetrics.checked = defaults.canViewVmMetrics
+  elements.permViewTeleportWhitelist.checked = defaults.canViewTeleportWhitelist
   elements.permDeleteNodeFiles.checked = defaults.canDeleteNodeFiles
   elements.permManageOperators.checked = defaults.canManageOperators
 }
@@ -553,7 +608,13 @@ function renderAuthState() {
       elements.managedPassword,
       elements.managedRole,
       elements.permViewLogs,
+      elements.permControlBots,
       elements.permOperate,
+      elements.permViewNodeFiles,
+      elements.permViewBotInventory,
+      elements.permViewOperatorLog,
+      elements.permViewVmMetrics,
+      elements.permViewTeleportWhitelist,
       elements.permDeleteNodeFiles,
       elements.permManageOperators
     ]) {
@@ -603,7 +664,13 @@ function applyAuthResult(result) {
   state.auth.role = String(result?.role || 'viewer')
   state.auth.permissions = result?.permissions || {
     canViewLogs: false,
+    canControlBots: false,
     canOperate: false,
+    canViewNodeFiles: false,
+    canViewBotInventory: false,
+    canViewOperatorLog: false,
+    canViewVmMetrics: false,
+    canViewTeleportWhitelist: false,
     canDeleteNodeFiles: false,
     canManageOperators: false,
     canAdmin: false
@@ -623,7 +690,13 @@ async function verifyOperatorAuth() {
     state.auth.role = 'public'
     state.auth.permissions = {
       canViewLogs: false,
+      canControlBots: false,
       canOperate: false,
+      canViewNodeFiles: false,
+      canViewBotInventory: false,
+      canViewOperatorLog: false,
+      canViewVmMetrics: false,
+      canViewTeleportWhitelist: false,
       canDeleteNodeFiles: false,
       canManageOperators: false,
       canAdmin: false
@@ -1108,12 +1181,23 @@ function buildResourceMetricRow(title, metrics, meta = '', latencyMs = null) {
 function renderResourceMetrics() {
   if (!elements.resourceMetricsGrid) return
   const signature = JSON.stringify({
+    canViewVmMetrics: hasPermission('canViewVmMetrics'),
     metrics: state.resourceMetrics,
     loading: state.resourceMetricsLoading,
     loaded: state.resourceMetricsLoaded
   })
   if (state.renderCache.resourceMetrics === signature) return
   state.renderCache.resourceMetrics = signature
+
+  if (!hasPermission('canViewVmMetrics')) {
+    elements.resourceMetricsGrid.innerHTML = `
+      <article class="empty-card">
+        <h3>Metrics hidden</h3>
+        <p>Login with VM metrics access to view dashboard and node process usage.</p>
+      </article>
+    `
+    return
+  }
 
   if (state.resourceMetricsLoading) {
     elements.resourceMetricsGrid.innerHTML = `
@@ -1172,11 +1256,15 @@ function renderResourceMetrics() {
 }
 
 async function loadResourceMetrics() {
+  if (!hasPermission('canViewVmMetrics')) {
+    pushEvent('warn', 'Login with VM metrics access before loading resource metrics.')
+    return
+  }
   state.resourceMetricsLoading = true
   state.renderCache.resourceMetrics = ''
   renderResourceMetrics()
   try {
-    state.resourceMetrics = await requestJson('/api/dashboard/resource-metrics', { requireAuth: state.auth.verified })
+    state.resourceMetrics = await requestJson('/api/dashboard/resource-metrics', { requireAuth: true })
     state.resourceMetricsLoaded = true
   } finally {
     state.resourceMetricsLoading = false
@@ -1210,8 +1298,8 @@ function renderBotCard(bot) {
         </div>
       </div>
       <div class="verify-actions">
-        <button class="accent-button small-button" type="button" data-action="verify-done" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Verified</button>
-        <button class="ghost-button small-button" type="button" data-action="verify-refresh" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Resend</button>
+        <button class="accent-button small-button" type="button" data-action="verify-done" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}">Verified</button>
+        <button class="ghost-button small-button" type="button" data-action="verify-refresh" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}">Resend</button>
         <button class="ghost-button small-button" type="button" data-action="verify-close" data-bot-name="${escapeHtml(bot.botName)}" title="Dismiss banner">x</button>
       </div>
     </div>
@@ -1221,7 +1309,6 @@ function renderBotCard(bot) {
   const pauseStartedAt = getPauseStartedAt(bot)
   const pausedForText = pauseStartedAt ? formatPauseDurationFrom(pauseStartedAt) : 'n/a'
   const pauseReason = String(bot.pauseReason || '').trim()
-  const canOperate = hasPermission('canOperate')
   const warningList = Array.isArray(bot.warnings) ? bot.warnings.slice(-3) : []
   const warningsHtml = warningList.length
     ? `<div class="bot-warnings">${warningList.map((warning) => `
@@ -1265,12 +1352,12 @@ function renderBotCard(bot) {
       ${isBotPaused(bot) && pauseReason ? `<p class="hint">Pause reason: ${escapeHtml(pauseReason)}</p>` : ''}
       ${warningsHtml}
       <div class="bot-actions">
-        <button class="accent-button" type="button" data-action="start" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
-        <button class="danger-button" type="button" data-action="stop" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}">Pause Print</button>
-        <button class="ghost-button small-button" type="button" data-action="home-platform-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Send /home platform">Home Platform</button>
+        <button class="accent-button" type="button" data-action="start" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
+        <button class="danger-button" type="button" data-action="stop" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}">Pause Print</button>
+        <button class="ghost-button small-button" type="button" data-action="home-platform-bot" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}" title="Send /home platform">Home Platform</button>
         ${resettableCurrentNbt ? `<button class="danger-button small-button" type="button" data-action="reset-current-nbt" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-current-nbt="${escapeHtml(bot.currentNbt || '')}" title="Reset platform and restart this NBT from target 0">Reset NBT</button>` : ''}
-        <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect from server (no auto-reconnect)">Disconnect</button>
-        <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" title="Reconnect to server">Reconnect</button>
+        <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect from server (no auto-reconnect)">Disconnect</button>
+        <button class="ghost-button small-button" type="button" data-action="reconnect-bot" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}" title="Reconnect to server">Reconnect</button>
       </div>
       <div class="chat-panel">
         <div class="chat-messages" id="chat-${escapeHtml(bot.botName)}">
@@ -1285,10 +1372,10 @@ function renderBotCard(bot) {
         <div class="chat-input-row">
           <input class="chat-input" type="text" placeholder="Send chat message..." maxlength="256"
             data-chat-bot="${escapeHtml(bot.botName)}"
-            data-permission-needed="canOperate" />
+            data-permission-needed="canControlBots" />
           <button class="accent-button small-button" type="button"
             data-action="chat-send"
-            data-permission-needed="canOperate"
+            data-permission-needed="canControlBots"
             data-bot-name="${escapeHtml(bot.botName)}">Send</button>
         </div>
       </div>
@@ -1334,9 +1421,9 @@ function renderBots() {
           </div>
           <div class="fleet-node-controls">
             <span class="tag ${node.onlineCount > 0 ? 'status-online' : 'status-offline'}">${node.onlineCount > 0 ? 'reachable' : 'offline'}</span>
-            <button class="accent-button small-button" type="button" data-action="start-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Start Node</button>
-            <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Pause Node</button>
-            <button class="ghost-button small-button" type="button" data-action="home-platform-node" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}" title="Send /home platform to every bot on this node">Home Platform</button>
+            <button class="accent-button small-button" type="button" data-action="start-node" data-permission-needed="canControlBots" data-host-label="${escapeHtml(node.hostLabel)}">Start Node</button>
+            <button class="danger-button small-button" type="button" data-action="stop-node" data-permission-needed="canControlBots" data-host-label="${escapeHtml(node.hostLabel)}">Pause Node</button>
+            <button class="ghost-button small-button" type="button" data-action="home-platform-node" data-permission-needed="canControlBots" data-host-label="${escapeHtml(node.hostLabel)}" title="Send /home platform to every bot on this node">Home Platform</button>
             ${nodeHasActiveNbt ? `<button class="danger-button small-button" type="button" data-action="reset-node-current-nbt" data-permission-needed="canOperate" data-host-label="${escapeHtml(node.hostLabel)}">Reset Node NBT</button>` : ''}
           </div>
         </div>
@@ -1379,10 +1466,11 @@ function renderBotInventory() {
   if (!elements.botInventoryGrid) return
   const refreshButton = document.querySelector('button[data-action="load-bot-inventory"]')
   if (refreshButton) {
-    refreshButton.disabled = !hasPermission('admin') || state.botInventoryLoading || !elements.botInventoryDetails?.open
+    refreshButton.disabled = !hasPermission('canViewBotInventory') || state.botInventoryLoading || !elements.botInventoryDetails?.open
     refreshButton.textContent = state.botInventoryLoading ? 'Refreshing...' : 'Refresh Inventory'
   }
   const sig = JSON.stringify({
+    canViewBotInventory: hasPermission('canViewBotInventory'),
     isAdmin: hasPermission('admin'),
     loaded: state.botInventoryLoaded,
     loading: state.botInventoryLoading,
@@ -1392,11 +1480,11 @@ function renderBotInventory() {
   if (state.renderCache.botInventory === sig) return
   state.renderCache.botInventory = sig
 
-  if (!hasPermission('admin')) {
+  if (!hasPermission('canViewBotInventory')) {
     elements.botInventoryGrid.innerHTML = `
       <article class="empty-card">
-        <h3>Admin only</h3>
-        <p>Log in as admin to request inventory snapshots or dump bot inventory.</p>
+        <h3>Inventory hidden</h3>
+        <p>Login with bot inventory access to view and refresh bot inventories.</p>
       </article>
     `
     return
@@ -1429,7 +1517,7 @@ function renderBotInventory() {
       const totalCount = Number.isFinite(rawTotalCount) ? Math.max(0, rawTotalCount) : fallbackTotal
       const hasInventoryTimestamp = Boolean(inventory.updatedAt || inventory.serverStatusAt)
       const canDump = hasPermission('admin') && bot.online && items.length > 0
-      const canRefresh = hasPermission('admin') && bot.online && !state.botInventoryLoading
+      const canRefresh = hasPermission('canViewBotInventory') && bot.online && !state.botInventoryLoading
       const itemHtml = items.length
         ? items.map((item) => `
           <div class="inventory-item" title="${escapeHtml(item.name || '')}">
@@ -1447,7 +1535,7 @@ function renderBotInventory() {
               <p class="file-meta">${escapeHtml(bot.hostLabel || 'unknown-host')} | ${bot.online ? 'online' : 'offline'} | ${escapeHtml(stackCount)} stack(s), ${escapeHtml(totalCount)} item(s) | updated ${escapeHtml(formatTime(inventory.updatedAt))}</p>
             </div>
             <div class="file-actions">
-              <button class="ghost-button small-button" type="button" data-action="refresh-bot-inventory" data-permission-needed="admin" data-bot-name="${escapeHtml(bot.botName)}" ${canRefresh ? '' : 'disabled'}>Refresh</button>
+              <button class="ghost-button small-button" type="button" data-action="refresh-bot-inventory" data-permission-needed="canViewBotInventory" data-bot-name="${escapeHtml(bot.botName)}" ${canRefresh ? '' : 'disabled'}>Refresh</button>
               <button class="danger-button small-button" type="button" data-action="dump-inventory" data-permission-needed="admin" data-bot-name="${escapeHtml(bot.botName)}" ${canDump ? '' : 'disabled'}>Dump</button>
             </div>
           </div>
@@ -1827,9 +1915,19 @@ function renderQueueSummary() {
 }
 
 function renderNodes() {
-  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch, role: state.auth.role, isAdmin: isAdmin(), loaded: state.nodeInventoryLoaded, loading: state.nodeInventoryLoading })
+  const nodesSignature = JSON.stringify({ nodes: state.nodes, nbtSearch: state.nbtSearch, canViewNodeFiles: hasPermission('canViewNodeFiles'), role: state.auth.role, isAdmin: isAdmin(), loaded: state.nodeInventoryLoaded, loading: state.nodeInventoryLoading })
   if (state.renderCache.nodes === nodesSignature) return
   state.renderCache.nodes = nodesSignature
+
+  if (!hasPermission('canViewNodeFiles')) {
+    elements.nodesGrid.innerHTML = `
+      <article class="empty-card">
+        <h3>Node NBT files hidden</h3>
+        <p>Login with node NBT file access to view shared folder and finished-map lists.</p>
+      </article>
+    `
+    return
+  }
 
   if (!state.nodeInventoryLoaded) {
     elements.nodesGrid.innerHTML = `
@@ -2121,7 +2219,7 @@ function renderOperators() {
           </div>
           <button class="danger-button small-button" type="button" data-action="delete-operator" data-permission-needed="canManageOperators" data-username="${escapeHtml(item.username)}">Delete</button>
         </div>
-        <p class="hint">Logs: ${permissions.canViewLogs ? 'yes' : 'no'} | Operate: ${permissions.canOperate ? 'yes' : 'no'} | Delete node files: ${permissions.canDeleteNodeFiles ? 'yes' : 'no'} | Manage operators: ${permissions.canManageOperators ? 'yes' : 'no'}</p>
+        <p class="hint">Logs: ${permissions.canViewLogs ? 'yes' : 'no'} | Bot control: ${permissions.canControlBots ? 'yes' : 'no'} | NBT/queue ops: ${permissions.canOperate ? 'yes' : 'no'} | Node NBT view: ${permissions.canViewNodeFiles ? 'yes' : 'no'} | Inventory: ${permissions.canViewBotInventory ? 'yes' : 'no'} | VM metrics: ${permissions.canViewVmMetrics ? 'yes' : 'no'} | Activity: ${permissions.canViewOperatorLog ? 'yes' : 'no'} | Whitelist view: ${permissions.canViewTeleportWhitelist ? 'yes' : 'no'} | Delete node files: ${permissions.canDeleteNodeFiles ? 'yes' : 'no'} | Manage operators: ${permissions.canManageOperators ? 'yes' : 'no'}</p>
       </article>
     `
   }).join('')
@@ -2241,7 +2339,7 @@ function applyTeleportWhitelistCollapsedState() {
 
 function renderTeleportWhitelist() {
   if (!elements.teleportWhitelistPanel) return
-  if (!hasPermission('admin')) {
+  if (!hasPermission('canViewTeleportWhitelist')) {
     elements.teleportWhitelistPanel.classList.add('hidden')
     state.renderCache.teleportWhitelist = ''
     return
@@ -2249,6 +2347,7 @@ function renderTeleportWhitelist() {
 
   elements.teleportWhitelistPanel.classList.remove('hidden')
   applyTeleportWhitelistCollapsedState()
+  const canAdmin = hasPermission('admin')
   const files = Array.isArray(state.teleportWhitelist.files) ? state.teleportWhitelist.files : []
   if (files.length && !files.some((file) => file.name === state.teleportWhitelist.selectedFile)) {
     state.teleportWhitelist.selectedFile = files[0].name
@@ -2263,6 +2362,13 @@ function renderTeleportWhitelist() {
       `<option value="${escapeHtml(file.name)}"${selected?.name === file.name ? ' selected' : ''}>${escapeHtml(file.name)}</option>`
     )).join('')
     elements.teleportWhitelistConfig.disabled = files.length <= 0
+  }
+  if (elements.teleportWhitelistUsername) {
+    elements.teleportWhitelistUsername.disabled = !canAdmin
+  }
+  const addButton = elements.teleportWhitelistForm?.querySelector('button[type="submit"]')
+  if (addButton) {
+    addButton.disabled = !canAdmin
   }
 
   if (!selected) {
@@ -2305,7 +2411,7 @@ function renderTeleportWhitelist() {
         <button class="danger-button small-button" type="button"
           data-action="remove-teleport-whitelist-user"
           data-permission-needed="admin"
-          data-username="${escapeHtml(username)}">Remove</button>
+          data-username="${escapeHtml(username)}" ${canAdmin ? '' : 'disabled'}>Remove</button>
       </article>
     `).join('')
   }
@@ -2458,7 +2564,7 @@ function normalizeMinecraftUsername(value) {
 }
 
 async function refreshTeleportWhitelist() {
-  if (!hasPermission('admin')) return
+  if (!hasPermission('canViewTeleportWhitelist')) return
   const previous = state.teleportWhitelist.selectedFile
   const result = await requestJson('/api/dashboard/teleport-whitelist', { requireAuth: true })
   state.teleportWhitelist.files = Array.isArray(result.files) ? result.files : []
@@ -2559,9 +2665,11 @@ async function onDeleteDataFile(fileName) {
 
 function renderEvents() {
   if (!elements.eventLog) return
+  const canViewOperatorLog = hasPermission('canViewOperatorLog')
   const eventsSignature = JSON.stringify({
+    canViewOperatorLog,
     localEvents: state.localEvents,
-    events: state.events,
+    events: canViewOperatorLog ? state.events : [],
     limit: state.eventsLimit,
     total: state.eventsTotal,
     hasMore: state.eventsHasMore,
@@ -2572,12 +2680,22 @@ function renderEvents() {
   if (state.renderCache.events === eventsSignature) return
   state.renderCache.events = eventsSignature
 
+  if (!canViewOperatorLog && !state.localEvents.length) {
+    elements.eventLog.innerHTML = `
+      <article class="empty-card">
+        <h3>Activity hidden</h3>
+        <p>Login with operator log access to view dashboard activity.</p>
+      </article>
+    `
+    return
+  }
+
   if (elements.operatorLogDetails?.open !== true && !state.localEvents.length) {
     elements.eventLog.innerHTML = ''
     return
   }
 
-  if (state.eventsLoading && !state.eventsLoaded) {
+  if (canViewOperatorLog && state.eventsLoading && !state.eventsLoaded) {
     elements.eventLog.innerHTML = `
       <article class="empty-card">
         <h3>Loading activity</h3>
@@ -2587,7 +2705,7 @@ function renderEvents() {
     return
   }
 
-  if (!state.eventsLoaded && !state.localEvents.length) {
+  if (canViewOperatorLog && !state.eventsLoaded && !state.localEvents.length) {
     elements.eventLog.innerHTML = `
       <article class="empty-card">
         <h3>Activity not loaded</h3>
@@ -2597,7 +2715,8 @@ function renderEvents() {
     return
   }
 
-  const items = [...state.localEvents, ...state.events]
+  const serverEvents = canViewOperatorLog ? state.events : []
+  const items = [...state.localEvents, ...serverEvents]
     .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
     .slice(0, state.eventsLimit)
 
@@ -2622,8 +2741,8 @@ function renderEvents() {
   `).join('')
   const shown = Math.min(state.events.length, state.eventsLimit)
   const total = Math.max(Number(state.eventsTotal || 0), state.events.length)
-  const showMore = state.eventsHasMore ? `
-    <button class="ghost-button small-button events-more" type="button" data-action="events-more" ${state.eventsLoading ? 'disabled' : ''}>
+  const showMore = canViewOperatorLog && state.eventsHasMore ? `
+    <button class="ghost-button small-button events-more" type="button" data-action="events-more" data-permission-needed="canViewOperatorLog" ${state.eventsLoading ? 'disabled' : ''}>
       ${state.eventsLoading ? 'Loading...' : `Show More (${escapeHtml(shown)}/${escapeHtml(total)})`}
     </button>
   ` : ''
@@ -2631,13 +2750,17 @@ function renderEvents() {
 }
 
 async function loadEvents(limit = state.eventsLimit) {
+  if (!hasPermission('canViewOperatorLog')) {
+    renderEvents()
+    return
+  }
   if (state.eventsLoading) return
   state.eventsLoading = true
   state.renderCache.events = ''
   renderEvents()
   try {
     const nextLimit = Math.min(500, Math.max(24, Number(limit || state.eventsLimit || 24)))
-    const result = await requestJson(`/api/dashboard/events?limit=${encodeURIComponent(nextLimit)}`, { requireAuth: state.auth.verified })
+    const result = await requestJson(`/api/dashboard/events?limit=${encodeURIComponent(nextLimit)}`, { requireAuth: true })
     state.events = Array.isArray(result.items) ? result.items : []
     state.eventsLimit = Math.max(24, Number(result.limit || nextLimit))
     state.eventsTotal = Math.max(Number(result.total || 0), state.events.length)
@@ -2656,7 +2779,7 @@ async function loadMoreEvents() {
 }
 
 async function onVerifyBot(botName, action) {
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canControlBots')) {
     pushEvent('warn', 'Login as an operator before sending verification commands.')
     return
   }
@@ -2676,8 +2799,10 @@ async function refreshData(options = {}) {
   state.busy = true
   let snapshotLoaded = false
   try {
-    const includeNodeInventory = options.includeNodeInventory === true || elements.nodeNbtDetails?.open === true || String(state.nbtSearch || '').trim().length > 0
-    const includeEvents = options.includeEvents === true || elements.operatorLogDetails?.open === true
+    const includeNodeInventory = hasPermission('canViewNodeFiles')
+      && (options.includeNodeInventory === true || elements.nodeNbtDetails?.open === true || String(state.nbtSearch || '').trim().length > 0)
+    const includeEvents = hasPermission('canViewOperatorLog')
+      && (options.includeEvents === true || elements.operatorLogDetails?.open === true)
     if (includeNodeInventory) state.nodeInventoryLoading = true
     const snapshotParams = new URLSearchParams()
     if (includeNodeInventory) snapshotParams.set('includeNodeInventory', 'true')
@@ -2729,7 +2854,7 @@ async function refreshData(options = {}) {
       state.auth.verified && hasPermission('canManageOperators')
         ? requestJson('/api/dashboard/config', { requireAuth: true })
         : Promise.resolve({ files: [] }),
-      state.auth.verified && hasPermission('admin')
+      state.auth.verified && hasPermission('canViewTeleportWhitelist')
         ? requestJson('/api/dashboard/teleport-whitelist', { requireAuth: true })
         : Promise.resolve({ files: [] })
     ])
@@ -2963,7 +3088,7 @@ async function onUpload(event) {
 
 
 async function onSendChat(botName, message) {
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canControlBots')) {
     pushEvent('warn', 'Login as an operator before sending chat.')
     return
   }
@@ -3101,7 +3226,7 @@ async function onDeleteLog(fileName) {
 }
 
 async function onDisconnectBot(botName) {
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canControlBots')) {
     pushEvent('warn', 'Login as an operator before disconnecting bots.')
     return
   }
@@ -3111,7 +3236,7 @@ async function onDisconnectBot(botName) {
 }
 
 async function onReconnectBot(botName) {
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canControlBots')) {
     pushEvent('warn', 'Login as an operator before reconnecting bots.')
     return
   }
@@ -3146,8 +3271,8 @@ async function onDumpInventory(botName) {
 }
 
 async function loadBotInventories() {
-  if (!hasPermission('admin')) {
-    pushEvent('warn', 'Login as admin before loading bot inventory.')
+  if (!hasPermission('canViewBotInventory')) {
+    pushEvent('warn', 'Login with bot inventory access before loading bot inventory.')
     return
   }
   if (!elements.botInventoryDetails?.open) return
@@ -3203,8 +3328,8 @@ async function pollBotInventoryRefresh(targetBotNames, startedAtMs) {
 }
 
 async function onRefreshAllBotInventories() {
-  if (!hasPermission('admin')) {
-    pushEvent('warn', 'Login as admin before refreshing bot inventory.')
+  if (!hasPermission('canViewBotInventory')) {
+    pushEvent('warn', 'Login with bot inventory access before refreshing bot inventory.')
     return
   }
   if (!elements.botInventoryDetails?.open) return
@@ -3227,8 +3352,8 @@ async function onRefreshAllBotInventories() {
 }
 
 async function onRefreshBotInventory(botName) {
-  if (!hasPermission('admin')) {
-    pushEvent('warn', 'Login as admin before refreshing bot inventory.')
+  if (!hasPermission('canViewBotInventory')) {
+    pushEvent('warn', 'Login with bot inventory access before refreshing bot inventory.')
     return
   }
   const startedAtMs = Date.now()
@@ -3248,7 +3373,7 @@ async function onRefreshBotInventory(botName) {
 }
 
 async function onTpaBot(botName, tpaTarget) {
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canControlBots')) {
     pushEvent('warn', 'Login as an operator before sending TPA commands.')
     return
   }
@@ -3258,7 +3383,7 @@ async function onTpaBot(botName, tpaTarget) {
 }
 
 async function onHomePlatformBot(botName) {
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canControlBots')) {
     pushEvent('warn', 'Login as an operator before sending home commands.')
     return
   }
@@ -3269,7 +3394,7 @@ async function onHomePlatformBot(botName) {
 }
 
 async function onHomePlatformNode(hostLabel) {
-  if (!hasPermission('canOperate')) {
+  if (!hasPermission('canControlBots')) {
     pushEvent('warn', 'Login as an operator before sending home commands.')
     return
   }
@@ -3280,7 +3405,8 @@ async function onHomePlatformNode(hostLabel) {
 }
 
 async function onFleetAction(action, botName = null) {
-  if (!hasPermission('canOperate')) {
+  const requiredPermission = action === 'reset-node-current-nbt' ? 'canOperate' : 'canControlBots'
+  if (!hasPermission(requiredPermission)) {
     pushEvent('warn', 'Login as an operator before running fleet actions.')
     return
   }
@@ -3328,7 +3454,13 @@ async function onSaveOperator(event) {
 
   const permissions = {
     canViewLogs: elements.permViewLogs.checked,
+    canControlBots: elements.permControlBots.checked,
     canOperate: elements.permOperate.checked,
+    canViewNodeFiles: elements.permViewNodeFiles.checked,
+    canViewBotInventory: elements.permViewBotInventory.checked,
+    canViewOperatorLog: elements.permViewOperatorLog.checked,
+    canViewVmMetrics: elements.permViewVmMetrics.checked,
+    canViewTeleportWhitelist: elements.permViewTeleportWhitelist.checked,
     canDeleteNodeFiles: elements.permDeleteNodeFiles.checked,
     canManageOperators: elements.permManageOperators.checked
   }
@@ -3688,7 +3820,7 @@ if (elements.configEditorSave) {
 
 if (elements.teleportWhitelistConfig) {
   elements.teleportWhitelistConfig.addEventListener('change', () => {
-    if (!hasPermission('admin')) return
+    if (!hasPermission('canViewTeleportWhitelist')) return
     state.teleportWhitelist.selectedFile = elements.teleportWhitelistConfig.value
     state.renderCache.teleportWhitelist = ''
     renderTeleportWhitelist()
@@ -3697,7 +3829,7 @@ if (elements.teleportWhitelistConfig) {
 
 if (elements.teleportWhitelistToggle) {
   elements.teleportWhitelistToggle.addEventListener('click', () => {
-    if (!hasPermission('admin')) return
+    if (!hasPermission('canViewTeleportWhitelist')) return
     state.teleportWhitelist.collapsed = state.teleportWhitelist.collapsed === false
     state.renderCache.teleportWhitelist = ''
     renderTeleportWhitelist()
