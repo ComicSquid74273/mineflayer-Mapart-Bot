@@ -610,6 +610,7 @@ function renderAuthState() {
   }
 
   const canOperate = hasPermission('canOperate')
+  if (elements.uploadForm) elements.uploadForm.style.display = canOperate ? '' : 'none'
   if (elements.fileInput) elements.fileInput.disabled = !canOperate
   if (elements.uploadNodeSelect) elements.uploadNodeSelect.disabled = !canOperate
   if (elements.uploadTargetType) elements.uploadTargetType.disabled = !canOperate
