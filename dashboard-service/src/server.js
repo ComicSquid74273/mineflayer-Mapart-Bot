@@ -25,6 +25,7 @@ const NODE_DOWNLOAD_TIMEOUT_MS = Math.max(15000, Number(process.env.DASHBOARD_NO
 const ALERT_ERROR_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_ERROR_TTL_MS || 15 * 60 * 1000))
 const ALERT_WARNING_TTL_MS = Math.max(30000, Number(process.env.DASHBOARD_ALERT_WARNING_TTL_MS || 15 * 60 * 1000))
 const RUNTIME_DURATION_ALERT_MS = Math.max(60 * 1000, Number(process.env.DASHBOARD_RUNTIME_DURATION_ALERT_MS || 30 * 60 * 1000))
+const QUEUE_COMPLETED_STATUSES = new Set(['placed', 'completed', 'succeeded'])
 const MAX_REQUEST_BODY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_REQUEST_BYTES || 64 * 1024 * 1024))
 const MAX_UPLOAD_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_MAX_UPLOAD_BYTES || 512 * 1024 * 1024))
 const MAX_NODE_LOG_RESULT_BYTES = Math.max(MAX_REQUEST_BODY_BYTES, Number(process.env.DASHBOARD_MAX_NODE_LOG_RESULT_BYTES || 256 * 1024 * 1024))
@@ -236,6 +237,10 @@ function actorHasPermission(actor, requiredPermission) {
   if (requiredPermission === 'authenticated') return Boolean(actor)
   if (requiredPermission === 'admin') return normalizeRole(actor?.role, '') === 'admin'
   return Boolean(actor?.permissions?.[requiredPermission])
+}
+
+function actorCanViewBotIps(actor) {
+  return normalizeRole(actor?.role, '') === 'admin' || actor?.permissions?.canManageOperators === true
 }
 
 function getAuthRequirement(pathname, method) {
@@ -898,7 +903,7 @@ function hasRecentBotError(bot, now = Date.now()) {
   return isRecentTimestamp(bot?.lastErrorAt, ALERT_ERROR_TTL_MS, now)
 }
 
-function summarizeBot(bot, pauseState = null) {
+function summarizeBot(bot, pauseState = null, options = {}) {
   const lastStatusAt = new Date(bot?.serverStatusAt || bot?.lastStatusAt || bot?.heartbeatAt || 0).getTime()
   const ageMs = Number.isFinite(lastStatusAt) ? Math.max(0, Date.now() - lastStatusAt) : Number.POSITIVE_INFINITY
   const fresh = ageMs <= BOT_FRESH_MS
@@ -952,7 +957,7 @@ function summarizeBot(bot, pauseState = null) {
     progress: bot.progress || null,
     verificationCode: bot.verificationCode || null,
     tokenWaiting: bot.tokenWaiting === true,
-    botIp: bot.botIp || null,
+    ...(options.includeBotIp === true ? { botIp: bot.botIp || null } : {}),
     currentNbtStartedAt: bot.currentNbtStartedAt || null,
     latencyMs: typeof bot.latencyMs === 'number' ? bot.latencyMs : null,
     tpaTarget: bot.tpaTarget || null,
@@ -1119,25 +1124,157 @@ function listUploadAssignmentPage(limit = 10, sourceItems = null) {
   }
 }
 
+function normalizedUploadFileName(value) {
+  const fileName = path.basename(String(value || '').trim()).toLowerCase()
+  return fileName || ''
+}
+
+function normalizedUploadSource(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+function addUploadIndexItem(map, key, item) {
+  if (!key) return
+  if (!map.has(key)) map.set(key, [])
+  map.get(key).push(item)
+}
+
+function buildUploadCompletionContext() {
+  const filesById = new Map()
+  const filesByName = new Map()
+  const filesBySource = new Map()
+  const filesBySourceBatch = new Map()
+  const finishedNames = new Set()
+
+  for (const item of store.listFilesRaw()) {
+    if (!item) continue
+    if (item.fileId) filesById.set(String(item.fileId), item)
+    const source = normalizedUploadSource(item.source)
+    const batchId = String(item.batchId || '').trim()
+    if (source) {
+      addUploadIndexItem(filesBySource, source, item)
+      addUploadIndexItem(filesBySourceBatch, `${source}\u0000${batchId}`, item)
+    }
+
+    const names = new Set([
+      normalizedUploadFileName(item.originalName),
+      normalizedUploadFileName(item.storedName),
+      normalizedUploadFileName(item.localFileName)
+    ].filter(Boolean))
+    for (const name of names) addUploadIndexItem(filesByName, name, item)
+  }
+
+  for (const node of store.listNodes()) {
+    for (const file of Array.isArray(node.finishedMapFiles) ? node.finishedMapFiles : []) {
+      const fileName = normalizedUploadFileName(file?.fileName)
+      if (fileName) finishedNames.add(fileName)
+    }
+  }
+
+  return { filesById, filesByName, filesBySource, filesBySourceBatch, finishedNames }
+}
+
+function queueUploadItemCompleted(item, context) {
+  const status = String(item?.queueStatus || item?.deliveryStatus || item?.status || '').trim().toLowerCase()
+  if (QUEUE_COMPLETED_STATUSES.has(status)) return true
+  return [
+    item?.localFileName,
+    item?.originalName,
+    item?.storedName
+  ].some((name) => context.finishedNames.has(normalizedUploadFileName(name)))
+}
+
+function buildUploadCompletion(item, context) {
+  const queuedFileIds = Array.isArray(item?.queuedFileIds) ? item.queuedFileIds.filter(Boolean).map(String) : []
+  const extractedNames = Array.isArray(item?.extractedNames)
+    ? item.extractedNames.map(normalizedUploadFileName).filter(Boolean)
+    : []
+  const source = normalizedUploadSource(`zip:${item?.originalName || ''}`)
+  const batchId = String(item?.batchId || '').trim()
+  const linkedFileIds = new Set()
+  const completedFileIds = new Set()
+  const completedNames = new Set()
+
+  const considerQueueFile = (file) => {
+    if (!file) return
+    const fileId = file.fileId ? String(file.fileId) : ''
+    if (fileId) {
+      if (linkedFileIds.has(fileId)) return
+      linkedFileIds.add(fileId)
+    }
+    if (!queueUploadItemCompleted(file, context)) return
+    if (fileId) completedFileIds.add(fileId)
+    for (const name of [
+      normalizedUploadFileName(file.originalName),
+      normalizedUploadFileName(file.localFileName),
+      normalizedUploadFileName(file.storedName)
+    ]) {
+      if (name) completedNames.add(name)
+    }
+  }
+
+  for (const fileId of queuedFileIds) considerQueueFile(context.filesById.get(fileId))
+
+  const sourceBatchFiles = context.filesBySourceBatch.get(`${source}\u0000${batchId}`) || []
+  const sourceFiles = sourceBatchFiles.length ? sourceBatchFiles : (context.filesBySource.get(source) || [])
+  for (const file of sourceFiles) considerQueueFile(file)
+
+  for (const name of extractedNames) {
+    if (context.finishedNames.has(name)) {
+      completedNames.add(name)
+      continue
+    }
+    if (linkedFileIds.size > 0) continue
+    for (const file of context.filesByName.get(name) || []) {
+      if (queueUploadItemCompleted(file, context)) {
+        completedNames.add(name)
+        break
+      }
+    }
+  }
+
+  const total = Math.max(
+    0,
+    Number.isFinite(Number(item?.queuedCount)) ? Number(item.queuedCount) : 0,
+    Number.isFinite(Number(item?.extractedCount)) ? Number(item.extractedCount) : 0,
+    queuedFileIds.length,
+    extractedNames.length,
+    linkedFileIds.size
+  )
+  const completedCount = Math.min(total, Math.max(completedFileIds.size, completedNames.size))
+  return {
+    completedCount,
+    completionTotal: total,
+    completionPercent: total > 0 ? Math.round((completedCount / total) * 100) : 0
+  }
+}
+
 function listUploadHistory(limit = 10) {
   const parsedLimit = Math.min(200, Math.max(1, Number(limit || 10)))
   const items = store.listUploadHistory(0).filter((item) => item?.kind === 'zip')
+  const completionContext = buildUploadCompletionContext()
   return {
-    items: items.slice(0, parsedLimit).map((item) => ({
-    id: item.uploadId,
-    fileName: item.originalName || 'unknown',
-    kind: item.kind || 'nbt',
-    sizeBytes: Number.isFinite(Number(item.sizeBytes)) ? Number(item.sizeBytes) : 0,
-    uploadedBy: item.uploadedBy || null,
-    uploadedAt: item.uploadedAt || null,
-    targetBotName: item.targetBotName || null,
-    targetHostLabel: item.targetHostLabel || null,
-    batchId: item.batchId || null,
-    queuedCount: Number.isFinite(Number(item.queuedCount)) ? Number(item.queuedCount) : 0,
-    extractedCount: Number.isFinite(Number(item.extractedCount)) ? Number(item.extractedCount) : 0,
-    extractedNames: Array.isArray(item.extractedNames) ? item.extractedNames.slice(0, 50) : [],
-    errors: Array.isArray(item.errors) ? item.errors.slice(0, 10) : []
-  })),
+    items: items.slice(0, parsedLimit).map((item) => {
+      const completion = buildUploadCompletion(item, completionContext)
+      return {
+        id: item.uploadId,
+        fileName: item.originalName || 'unknown',
+        kind: item.kind || 'nbt',
+        sizeBytes: Number.isFinite(Number(item.sizeBytes)) ? Number(item.sizeBytes) : 0,
+        uploadedBy: item.uploadedBy || null,
+        uploadedAt: item.uploadedAt || null,
+        targetBotName: item.targetBotName || null,
+        targetHostLabel: item.targetHostLabel || null,
+        batchId: item.batchId || null,
+        queuedCount: Number.isFinite(Number(item.queuedCount)) ? Number(item.queuedCount) : 0,
+        extractedCount: Number.isFinite(Number(item.extractedCount)) ? Number(item.extractedCount) : 0,
+        completedCount: completion.completedCount,
+        completionTotal: completion.completionTotal,
+        completionPercent: completion.completionPercent,
+        extractedNames: Array.isArray(item.extractedNames) ? item.extractedNames.slice(0, 50) : [],
+        errors: Array.isArray(item.errors) ? item.errors.slice(0, 10) : []
+      }
+    }),
     total: items.length,
     hasMore: items.length > parsedLimit,
     limit: parsedLimit
@@ -1707,7 +1844,8 @@ function buildDashboardSnapshot(actor = null, options = {}) {
   const now = Date.now()
   const includeNodeInventory = options.includeNodeInventory === true && actor?.permissions?.canOperate === true
   const includeEvents = options.includeEvents === true
-  const cacheKey = `${actor?.permissions?.canOperate === true ? 'operate' : 'public'}:${includeNodeInventory ? 'node-inventory' : 'summary'}:${includeEvents ? 'events' : 'no-events'}`
+  const includeBotIps = actorCanViewBotIps(actor)
+  const cacheKey = `${actor?.permissions?.canOperate === true ? 'operate' : 'public'}:${includeNodeInventory ? 'node-inventory' : 'summary'}:${includeEvents ? 'events' : 'no-events'}:${includeBotIps ? 'bot-ips' : 'no-bot-ips'}`
   if (snapshotCache.payload?.cacheKey === cacheKey && snapshotCache.expiresAt > now) {
     return snapshotCache.payload.body
   }
@@ -1719,7 +1857,7 @@ function buildDashboardSnapshot(actor = null, options = {}) {
     return value
   }
   const fleet = timed('fleet', () => store.listFleet())
-  const bots = timed('bots', () => fleet.bots.map((bot) => summarizeBot(bot, store.getBotPauseState(bot.botName))))
+  const bots = timed('bots', () => fleet.bots.map((bot) => summarizeBot(bot, store.getBotPauseState(bot.botName), { includeBotIp: includeBotIps })))
   const nodes = timed('nodes', () => fleet.nodes.map((node) => summarizeNode(node, { includeInventory: includeNodeInventory })))
   const eventPage = includeEvents ? timed('events', () => store.listEventPage(24)) : { items: undefined, total: 0, hasMore: false, limit: 24 }
   const queueStats = timed('queueStats', () => buildQueueSummaryFast(nodes, bots))
@@ -2542,7 +2680,10 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/bots') {
-    return sendJson(res, 200, { items: store.listBots().map(summarizeBot) })
+    const includeBotIps = actorCanViewBotIps(actor)
+    return sendJson(res, 200, {
+      items: store.listBots().map((bot) => summarizeBot(bot, store.getBotPauseState(bot.botName), { includeBotIp: includeBotIps }))
+    })
   }
 
   if (req.method === 'GET' && pathname === '/api/dashboard/events') {
@@ -2638,7 +2779,7 @@ async function route(req, res) {
     if (!bot) return notFound(res)
     const recentCommands = store.listCommands((item) => item.targetBotName === params.botName).slice(-5).reverse()
     return sendJson(res, 200, {
-      bot,
+      bot: summarizeBot(bot, store.getBotPauseState(bot.botName), { includeBotIp: actorCanViewBotIps(actor) }),
       recentCommands
     })
   }

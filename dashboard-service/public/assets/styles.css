@@ -1067,6 +1067,48 @@ button:disabled {
   scrollbar-width: thin;
 }
 
+.compact-file-item .file-row > div:first-child {
+  min-width: 0;
+  flex: 1;
+}
+
+.zip-completion {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 340px);
+  margin-top: 8px;
+  margin-bottom: 6px;
+}
+
+.zip-completion-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.zip-completion-head strong {
+  color: var(--ink);
+}
+
+.zip-completion-track {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(28, 143, 114, 0.24);
+  border-radius: 999px;
+  background: rgba(151, 177, 190, 0.08);
+}
+
+.zip-completion-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  transition: width 180ms ease;
+}
+
 .upload-history-more,
 .upload-assignments-more {
   align-self: center;

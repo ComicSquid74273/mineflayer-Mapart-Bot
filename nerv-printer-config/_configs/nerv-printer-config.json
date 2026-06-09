@@ -481,7 +481,7 @@
     "retryInteractTimeoutMs": 800,
     "checkpointBuffer": 0.8,
     "breakCarpetAboveReset": false,
-    "debugPrints": false
+    "debugPrints": true
   },
   "errorHandling": {
     "logErrors": true,

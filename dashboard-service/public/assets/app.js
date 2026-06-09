@@ -1194,6 +1194,11 @@ function renderBotCard(bot) {
   const currentRunElapsedMs = getCurrentRunElapsedMs(bot)
   const currentRunElapsed = currentRunElapsedMs === null ? 'n/a' : formatDuration(currentRunElapsedMs)
   const showVerify = bot.tokenWaiting && !state.dismissedVerify.has(bot.botName)
+  const canViewBotIp = hasPermission('canManageOperators')
+  const botIpText = canViewBotIp && bot.botIp ? String(bot.botIp) : ''
+  const verifyIpField = botIpText
+    ? `<span class="verify-field">IP: <strong>${escapeHtml(botIpText)}</strong></span>`
+    : ''
   const verifyBanner = showVerify ? `
     <div class="verify-banner">
       <div class="verify-info">
@@ -1201,7 +1206,7 @@ function renderBotCard(bot) {
         <div class="verify-detail">
           <span class="verify-field">Bot: <strong>${escapeHtml(bot.botName)}</strong></span>
           <span class="verify-field">Code: <strong class="verify-code">${escapeHtml(bot.verificationCode || 'loading...')}</strong></span>
-          <span class="verify-field">IP: <strong>${escapeHtml(bot.botIp || 'unknown')}</strong></span>
+          ${verifyIpField}
         </div>
       </div>
       <div class="verify-actions">
@@ -1233,7 +1238,7 @@ function renderBotCard(bot) {
           <span class="health-dot ${escapeHtml(healthClass)}" title="${escapeHtml(healthClass === 'health-green' ? 'Healthy' : healthClass === 'health-yellow' ? 'Warning' : 'Issue')}"></span>
           <div>
             <h3 class="bot-name">${escapeHtml(bot.botName)}</h3>
-            <p class="bot-meta">${escapeHtml(bot.role || 'single')} | ${escapeHtml(locationText)}${bot.botIp && !showVerify ? ` | ${escapeHtml(bot.botIp)}` : ''}</p>
+            <p class="bot-meta">${escapeHtml(bot.role || 'single')} | ${escapeHtml(locationText)}${botIpText && !showVerify ? ` | ${escapeHtml(botIpText)}` : ''}</p>
           </div>
         </div>
         <div class="status-inline">
@@ -1634,6 +1639,15 @@ function renderUploadHistory() {
       : (item.targetHostLabel ? `Node: ${item.targetHostLabel}` : 'Central queue')
     const queued = Number(item.queuedCount || 0)
     const extracted = Number(item.extractedCount || 0)
+    const completionTotal = Math.max(0, Number(item.completionTotal || queued || extracted || 0))
+    const rawCompletedCount = Number(item.completedCount || 0)
+    const completedCount = Number.isFinite(rawCompletedCount)
+      ? Math.max(0, Math.min(completionTotal, rawCompletedCount))
+      : 0
+    const rawCompletionPercent = Number(item.completionPercent)
+    const completionPercent = Number.isFinite(rawCompletionPercent)
+      ? Math.max(0, Math.min(100, Math.round(rawCompletionPercent)))
+      : (completionTotal > 0 ? Math.round((completedCount / completionTotal) * 100) : 0)
     const errors = Array.isArray(item.errors) ? item.errors : []
     const extractedNames = Array.isArray(item.extractedNames) ? item.extractedNames : []
     const detailParts = [
@@ -1643,17 +1657,32 @@ function renderUploadHistory() {
       `uploaded ${formatTime(item.uploadedAt)}`
     ]
     if (item.uploadedBy) detailParts.push(`by ${item.uploadedBy}`)
-    if (kind === 'ZIP') detailParts.splice(2, 0, `${extracted} extracted`)
+    if (kind === 'ZIP') detailParts.splice(2, 0, `${extracted} extracted`, `${completionPercent}% complete`)
     const previewNames = extractedNames.slice(0, 4).join(', ')
     const totalExtractedNames = Math.max(extractedNames.length, extracted)
     const moreNames = totalExtractedNames > 4 ? ` +${totalExtractedNames - 4} more` : ''
     const errorText = errors.length ? errors.map((error) => error.error || String(error)).join('; ') : ''
+    const completionLabel = completionTotal > 0
+      ? `${completedCount} / ${completionTotal} done`
+      : 'No queued maps'
+    const completionTitle = `${completionPercent}% complete${completionTotal > 0 ? ` (${completedCount}/${completionTotal})` : ''}`
+    const completionHtml = kind === 'ZIP' ? `
+            <div class="zip-completion" title="${escapeHtml(completionTitle)}">
+              <div class="zip-completion-head">
+                <span>${escapeHtml(completionLabel)}</span>
+                <strong>${escapeHtml(`${completionPercent}%`)}</strong>
+              </div>
+              <div class="zip-completion-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${escapeHtml(completionPercent)}" aria-label="${escapeHtml(completionTitle)}">
+                <span class="zip-completion-fill" style="width: ${escapeHtml(`${completionPercent}%`)}"></span>
+              </div>
+            </div>` : ''
     return `
       <article class="file-item compact-file-item">
         <div class="file-row">
           <div>
             <strong>${escapeHtml(item.fileName || 'unknown')}</strong>
             <p class="file-meta">${escapeHtml(detailParts.join(' | '))}</p>
+            ${completionHtml}
             ${previewNames ? `<p class="file-meta">${escapeHtml(previewNames + moreNames)}</p>` : ''}
             ${errorText ? `<p class="file-meta">${escapeHtml(errorText)}</p>` : ''}
           </div>

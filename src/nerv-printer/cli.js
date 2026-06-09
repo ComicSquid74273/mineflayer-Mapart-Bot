@@ -5427,15 +5427,25 @@ async function openContainerAt(bot, position, accessPosition, options = {}) {
   const blockWaitMs = Math.max(500, toNumber(options.blockWaitMs, 5000))
   const blockPollMs = Math.max(50, toNumber(options.blockPollMs, 150))
   const strictAccess = options.strictAccess === true
+  const debugConfig = options.config || bot.__nervConfig || null
+  if (debugConfig?.advanced?.debugPrints) {
+    console.log(`[OPEN-CONTAINER-DEBUG] reason=${options.reason || 'open-container'} stage=goto-start target=${position.x},${position.y},${position.z} access=${accessPosition ? `${accessPosition.x},${accessPosition.y},${accessPosition.z}` : 'none'} range=${accessRange} strict=${strictAccess} pos=${formatBotPosition(bot)}`)
+  }
   // Always navigate to accessPosition if provided — it is the configured standing spot for the chest.
   // Falling back to the chest block position when far away caused the bot to pathfind into walls/inaccessible spots.
   await gotoConfiguredAccess(bot, position, accessPosition, accessRange, options.config || null, options.reason || 'open-container', { strict: strictAccess })
+  if (debugConfig?.advanced?.debugPrints) {
+    console.log(`[OPEN-CONTAINER-DEBUG] reason=${options.reason || 'open-container'} stage=goto-ok target=${position.x},${position.y},${position.z} pos=${formatBotPosition(bot)}`)
+  }
 
   const block = await waitForBlockAt(bot, blockPos, {
     timeoutMs: blockWaitMs,
     pollMs: blockPollMs,
     expectedNames: options.expectedNames
   })
+  if (debugConfig?.advanced?.debugPrints) {
+    console.log(`[OPEN-CONTAINER-DEBUG] reason=${options.reason || 'open-container'} stage=block-ok block=${block?.name || 'unknown'} pos=${formatBotPosition(bot)}`)
+  }
 
   let lastError = null
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -5443,15 +5453,25 @@ async function openContainerAt(bot, position, accessPosition, options = {}) {
       closeCurrentWindowIfOpen(bot, `open-container-attempt-${attempt}`)
       await applyAdaptiveLatencyBackoff(bot, options.config || bot.__nervConfig, `open-container-attempt-${attempt}`, { pauseMovement: true })
       await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
-      return await Promise.race([
+      if (debugConfig?.advanced?.debugPrints) {
+        console.log(`[OPEN-CONTAINER-DEBUG] reason=${options.reason || 'open-container'} stage=open-attempt attempt=${attempt}/${attempts} pos=${formatBotPosition(bot)}`)
+      }
+      const opened = await Promise.race([
         bot.openContainer(block),
         (async () => {
           await delay(adjustedTimeoutMs)
           throw new Error(`open-container-timeout-${adjustedTimeoutMs}ms`)
         })()
       ])
+      if (debugConfig?.advanced?.debugPrints) {
+        console.log(`[OPEN-CONTAINER-DEBUG] reason=${options.reason || 'open-container'} stage=open-ok attempt=${attempt}/${attempts} window=${opened?.type || opened?.title || 'unknown'} inventoryStart=${Number.isFinite(opened?.inventoryStart) ? opened.inventoryStart : 'unknown'} pos=${formatBotPosition(bot)}`)
+      }
+      return opened
     } catch (err) {
       lastError = err
+      if (debugConfig?.advanced?.debugPrints) {
+        console.log(`[OPEN-CONTAINER-DEBUG] reason=${options.reason || 'open-container'} stage=open-fail attempt=${attempt}/${attempts} error=${err?.message || err} pos=${formatBotPosition(bot)}`)
+      }
       if (attempt >= attempts) break
       try { bot.pathfinder?.stop?.() } catch { }
       await delay(retryDelayMs)
@@ -5583,6 +5603,11 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
               blockPollMs: toNumber(advanced.restockChestBlockPollMs, 150),
               expectedNames: ['chest', 'trapped_chest', 'barrel']
             })
+            if (config.advanced?.debugPrints) {
+              const inventoryStart = Number.isFinite(container?.inventoryStart) ? container.inventoryStart : 'unknown'
+              const inventoryEnd = Number.isFinite(container?.inventoryEnd) ? container.inventoryEnd : 'unknown'
+              console.log(`[RESTOCK-OPEN-OK] ${blockName}: chest=${spot.x},${spot.y},${spot.z} window=${container?.type || container?.title || 'unknown'} inventoryStart=${inventoryStart} inventoryEnd=${inventoryEnd} invHave=${countInventoryItems(bot, blockName)} capacity=${inventoryCapacityForItem(bot, blockName)}`)
+            }
           } catch (navErr) {
             const navMsg = String(navErr?.message || navErr || '').toLowerCase()
             if (navMsg.includes('goal was changed') || navMsg.includes('goalchanged')) {
@@ -5620,6 +5645,13 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           await delay(Math.max(200, toNumber(advanced.preRestockDelayMs, 200)))
           chestSlots = container.containerItems().filter((entry) => entry.type === itemId)
           totalInChest = chestSlots.reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+        }
+
+        if (config.advanced?.debugPrints) {
+          const nonEmptyChestSlots = getChestWindowSlots(container).length
+          const matchingStacks = chestSlots.map((entry) => toNumber(entry.count, 0)).filter((count) => count > 0)
+          const sampleStacks = matchingStacks.slice(0, 8).join(',') || 'none'
+          console.log(`[RESTOCK-SCAN] ${blockName}: chest=${spot.x},${spot.y},${spot.z} group=${groupIndex + 1}/${spotGroups.length} spot=${spotIndex + 1}/${group.length} total=${totalInChest} stacks=${matchingStacks.length} sample=${sampleStacks} nonEmptyChestSlots=${nonEmptyChestSlots} invHave=${countInventoryItems(bot, blockName)} exactTarget=${exactDesiredItemCount} desiredTarget=${desiredItemCount} capacity=${inventoryCapacityForItem(bot, blockName)} strategy=${attemptStrategy}`)
         }
 
         if (typeof options.onMaterialChestScanned === 'function') {
@@ -5678,6 +5710,9 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           exactStillNeedTotal <= capacityBeforePull &&
           fullStackCapacityBeforePull < stackSize
         if (canPartialTopUp) {
+          if (config.advanced?.debugPrints) {
+            console.log(`[RESTOCK-PARTIAL-TRY] ${blockName}: have=${haveAtStart} exactNeed=${exactStillNeedTotal} exactTarget=${exactDesiredItemCount} capacity=${capacityBeforePull} fullStackCapacity=${fullStackCapacityBeforePull} chestTotal=${totalInChest}`)
+          }
           const moved = await topUpPartialInventoryStackFromChest(
             bot,
             container,
@@ -5729,6 +5764,9 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
         retryTargetCount = haveAtStart + willPullTotal
 
         if (willPullTotal <= 0) {
+          if (config.advanced?.debugPrints) {
+            console.log(`[RESTOCK-NO-PULL] ${blockName}: have=${haveAtStart} exactTarget=${exactDesiredItemCount} desiredTarget=${desiredItemCount} exactStillNeed=${exactStillNeedTotal} stillNeed=${stillNeedTotal} chestTotal=${totalInChest} fullStackChestTotal=${fullStackChestTotal} capacity=${capacityBeforePull} fullStackCapacity=${fullStackCapacityBeforePull} canPartialTopUp=${canPartialTopUp}`)
+          }
           try { container.close() } catch { }
           container = null
           if (haveAtStart >= desiredItemCount) {
@@ -5988,7 +6026,7 @@ async function restockMaterial(bot, config, blockName, requestedPulls = 1, neede
           if (message.includes('Could not open container') || message.includes('open-container-timeout') || message.includes('No block at') || message.includes('Unexpected block at')) {
             console.log(`[RESTOCK-WARN] Could not open chest for ${blockName} at ${spot.x},${spot.y},${spot.z}: ${message}`)
           } else if (config.advanced?.debugPrints) {
-            console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.z}: ${message}`)
+            console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.y},${spot.z}: ${message}`)
           }
         } finally {
           if (container) {
@@ -6461,6 +6499,12 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
       }
     })
     const haveAfter = countInventoryItems(bot, blockName)
+    if (config.advanced?.debugPrints) {
+      const groupSummary = attemptGroupScans
+        .map((scan, index) => `g${index + 1}:scanned=${scan.scanned.size} total=${scan.total} pulled=${scan.pulledCount}`)
+        .join(' ')
+      console.log(`[REQUIRED-MATERIAL-WAIT-DEBUG] ${blockName} attempt=${attempt} restocked=${restocked} haveBefore=${haveBefore} haveAfter=${haveAfter} target=${targetCount} capacity=${inventoryCapacityForItem(bot, blockName)} reason=${reason} ${groupSummary}`)
+    }
     if (haveAfter > haveBefore && config.advanced?.debugPrints) {
       console.log(`[REQUIRED-MATERIAL-WAIT-OBSERVED] ${blockName} inventoryIncrease=${haveAfter - haveBefore}`)
     }
@@ -8028,22 +8072,35 @@ async function takeOneChestItemToInventory(bot, window, itemId, itemName, timeou
 }
 
 async function topUpPartialInventoryStackFromChest(bot, window, itemId, itemName, amountNeeded, stackSize, timeoutMs = 3000, pollMs = 100) {
+  const debug = bot?.__nervConfig?.advanced?.debugPrints
   const targetSlot = findPartialWindowInventorySlot(window, itemId, itemName, stackSize)
-  if (targetSlot < 0) return 0
+  if (targetSlot < 0) {
+    if (debug) console.log(`[RESTOCK-PARTIAL-SKIP] ${itemName}: no partial inventory stack found in open window.`)
+    return 0
+  }
 
   const targetStack = window.slots?.[targetSlot]
   const targetRoom = Math.max(0, stackSize - toNumber(targetStack?.count, 0))
   const transferTarget = Math.min(Math.max(1, toNumber(amountNeeded, 1)), targetRoom)
-  if (transferTarget <= 0) return 0
+  if (transferTarget <= 0) {
+    if (debug) console.log(`[RESTOCK-PARTIAL-SKIP] ${itemName}: targetSlot=${targetSlot} room=${targetRoom} amountNeeded=${amountNeeded}.`)
+    return 0
+  }
 
   const source = getChestWindowSlots(window)
     .filter((entry) => entry.stack?.type === itemId || entry.stack?.name === itemName)
     .filter((entry) => toNumber(entry.stack?.count, 0) >= transferTarget)
     .sort((a, b) => toNumber(a.stack?.count, 0) - toNumber(b.stack?.count, 0))[0]
-  if (!source) return 0
+  if (!source) {
+    if (debug) console.log(`[RESTOCK-PARTIAL-SKIP] ${itemName}: no chest stack can satisfy transferTarget=${transferTarget}.`)
+    return 0
+  }
 
   const adjustedTimeoutMs = getLatencyAdjustedTimeoutMs(bot, bot.__nervConfig, timeoutMs, timeoutMs)
   const beforeTarget = countWindowInventoryItems(window, itemId, itemName)
+  if (debug) {
+    console.log(`[RESTOCK-PARTIAL-CLICK] ${itemName}: sourceSlot=${source.slot} sourceCount=${toNumber(source.stack?.count, 0)} targetSlot=${targetSlot} targetCount=${toNumber(targetStack?.count, 0)} transferTarget=${transferTarget} beforeWindow=${beforeTarget}`)
+  }
   await safeWindowClick(bot, window, source.slot, 0, 0, { precondition: 'any' })
   await delay(pollMs)
   await safeWindowClick(bot, window, targetSlot, 0, 0, { precondition: 'any' })
@@ -8052,7 +8109,9 @@ async function topUpPartialInventoryStackFromChest(bot, window, itemId, itemName
 
   const expected = beforeTarget + transferTarget
   const invCount = await waitForWindowInventoryCount(window, itemId, itemName, expected, adjustedTimeoutMs, pollMs)
-  return Math.max(0, invCount - beforeTarget)
+  const moved = Math.max(0, invCount - beforeTarget)
+  if (debug) console.log(`[RESTOCK-PARTIAL-DONE] ${itemName}: moved=${moved} expected=${expected} afterWindow=${invCount}`)
+  return moved
 }
 
 async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stackSize, maxStacks = 8, options = {}) {
@@ -10178,6 +10237,9 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
 
     assertRuntimeContinue(bot, config, 'stopping-before-restock')
     const restocked = await waitForRequiredMaterialRestock(bot, config, closestItem.blockName, pullsNeeded, neededByBlock, 'inventory-window')
+    if (config.advanced?.debugPrints) {
+      console.log(`[NERV-RESTOCK-RESULT] ${closestItem.blockName} restocked=${restocked} haveBefore=${haveBefore} haveAfter=${countInventoryItems(bot, closestItem.blockName)} needed=${closestItem.needed} capacity=${inventoryCapacityForItem(bot, closestItem.blockName)} windowMaterials=${planning.materials.length}`)
+    }
 
     if (!restocked) {
       const haveAfter = countInventoryItems(bot, closestItem.blockName)
