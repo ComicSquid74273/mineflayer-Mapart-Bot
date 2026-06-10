@@ -336,6 +336,8 @@
         "printer-platform": "platform"
       }
     },
+    "platformWaterGuardEnabled": false,
+    "restockChestAccessRange": 2,
     "inlineRepairSegmentBlocks": 3,
     "platformWatchdogEnabled": true,
     "platformWatchdogPollMs": 1000,
