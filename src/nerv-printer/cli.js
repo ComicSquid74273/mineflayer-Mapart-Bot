@@ -8054,7 +8054,10 @@ async function takeOneChestItemToInventory(bot, window, itemId, itemName, timeou
   if (!source) return false
 
   const targetSlot = findEmptyWindowInventorySlot(window)
-  if (targetSlot < 0) return false
+  if (targetSlot < 0) {
+    console.log(`[WITHDRAW-WARN] ${itemName}: no empty inventory slot to take the item into.`)
+    return false
+  }
 
   const adjustedTimeoutMs = getLatencyAdjustedTimeoutMs(bot, bot.__nervConfig, timeoutMs, timeoutMs)
   const beforeTarget = countWindowInventoryItems(window, itemId, itemName)
@@ -8477,6 +8480,10 @@ async function pullFoodStackFromChest(bot, config, foodItem, reason) {
 
   const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[foodItem]?.stackSize, 64))
   if (inventoryCapacityForItem(bot, foodItem) <= 0) {
+    console.log(`[AUTO-EAT] ${reason}: no inventory room for ${foodItem}; dumping a carpet stack for space.`)
+    await dumpCarpetStacksForSpace(bot, config, new Set(), 1)
+  }
+  if (inventoryCapacityForItem(bot, foodItem) <= 0) {
     const message = `No inventory room for ${foodItem}; continuing without auto-eat.`
     console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
     reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem })
@@ -8872,6 +8879,12 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
     }
 
     await waitForPlatformReady(bot, config, 'postprint-withdraw')
+    const needsMapPull = countInventoryByType(bot, 'map') <= 0
+    const needsPanePull = countInventoryItems(bot, 'glass_pane') <= 0
+    if ((needsMapPull || needsPanePull) && countEmptyInventorySlots(bot) < 2) {
+      console.log(`[POSTPRINT] Only ${countEmptyInventorySlots(bot)} empty slot(s) before map/pane withdraw; dumping carpet stacks for space.`)
+      await dumpCarpetStacksForSpace(bot, config, new Set(), 2)
+    }
     const gotMap = countInventoryByType(bot, 'map') > 0 || await withdrawFromChest(bot, config, mapChestPos, 'map', 1)
     const gotPane = countInventoryItems(bot, 'glass_pane') > 0 || await withdrawFromChest(bot, config, mapChestPos, 'glass_pane', 1)
     if (!gotMap || !gotPane) {
