@@ -3610,6 +3610,7 @@ function getPlatformStallReconnectConfig(config) {
     pollMs: Math.max(1000, toNumber(advanced.platformStallReconnectPollMs, 5000)),
     timeoutMs: Math.max(30000, toNumber(advanced.platformStallReconnectTimeoutMs, 120000)),
     movementThreshold: Math.max(0.01, toNumber(advanced.platformStallReconnectMovementThreshold, 0.35)),
+    latencyHoldMaxMs: Math.max(60000, toNumber(advanced.platformStallLatencyHoldMaxMs, 300000)),
     logMs: Math.max(1000, toNumber(advanced.platformStallReconnectLogMs, 30000))
   }
 }
@@ -3645,6 +3646,8 @@ function startPlatformStallReconnectWatchdog(bot, config) {
   let lastProgressToken = ''
   let lastLogAt = 0
   let reconnecting = false
+  let latencyHoldSinceAt = 0
+  let latencyHoldPos = null
 
   const resetBaseline = (pos, progressToken) => {
     baselinePos = cloneFinitePosition(pos)
@@ -3670,12 +3673,43 @@ function startPlatformStallReconnectWatchdog(bot, config) {
     }
     const latencyState = getLatencyBackoffState(bot, config)
     if (latencyState.level !== 'normal') {
-      resetBaseline(bot?.entity?.position, lastProgressToken)
+      // A long lag storm can wedge the session while also pausing this timer forever:
+      // escalate if an active job sat at the same position through the whole hold.
+      const holdProgress = readProgressState(progressFile)
+      const holdPos = bot?.entity?.position
+      const activeJob = holdProgress && isPlatformStallReconnectPhase(holdProgress.phase)
+      if (!activeJob || !latencyHoldPos || distanceToPoint(holdPos, latencyHoldPos) > settings.movementThreshold) {
+        latencyHoldSinceAt = activeJob ? Date.now() : 0
+        latencyHoldPos = activeJob ? cloneFinitePosition(holdPos) : null
+      }
+      if (activeJob && latencyHoldSinceAt && Date.now() - latencyHoldSinceAt >= settings.latencyHoldMaxMs) {
+        reconnecting = true
+        const reason = `platform-stall-latency-${normalizeResumePhase(holdProgress.phase)}`
+        console.log(`[PLATFORM-STALL-RECONNECT] Latency hold active ${Math.round((Date.now() - latencyHoldSinceAt) / 1000)}s with no movement (ping=${latencyState.pingMs}ms level=${latencyState.level}); forcing reconnect anyway.`)
+        try {
+          writeJson(progressFile, {
+            ...holdProgress,
+            interrupted: true,
+            lastEndReason: reason,
+            lastDisconnectAt: new Date().toISOString()
+          })
+        } catch (err) {
+          console.log(`[PLATFORM-STALL-WARN] Failed to update progress checkpoint before reconnect: ${err?.message || err}`)
+        }
+        stopBotMovement(bot)
+        closeCurrentWindowIfOpen(bot, reason)
+        bot.__nervForcedEndReason = reason
+        try { bot.quit(reason) } catch {}
+        return
+      }
+      resetBaseline(holdPos, lastProgressToken)
       logThrottled('platform-stall-latency-hold', `[PLATFORM-STALL] ping=${latencyState.pingMs}ms level=${latencyState.level}; pausing stall reconnect timer until latency recovers.`, {
         intervalMs: settings.logMs
       })
       return
     }
+    latencyHoldSinceAt = 0
+    latencyHoldPos = null
 
     const progress = readProgressState(progressFile)
     if (!progress || !isPlatformStallReconnectPhase(progress.phase)) {
