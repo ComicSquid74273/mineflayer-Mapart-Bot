@@ -337,7 +337,7 @@
       }
     },
     "platformWaterGuardEnabled": false,
-    "restockChestAccessRange": 2,
+    "restockChestAccessRange": 1.25,
     "inlineRepairSegmentBlocks": 3,
     "platformWatchdogEnabled": true,
     "platformWatchdogPollMs": 1000,

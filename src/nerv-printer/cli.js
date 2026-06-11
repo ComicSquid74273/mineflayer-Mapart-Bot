@@ -5475,7 +5475,7 @@ async function openContainerAt(bot, position, accessPosition, options = {}) {
       if (attempt >= attempts) break
       try { bot.pathfinder?.stop?.() } catch { }
       await delay(retryDelayMs)
-      await gotoConfiguredAccess(bot, position, accessPosition, Math.max(0.35, accessRange * 0.8), options.config || null, options.reason || 'open-container-retry', { strict: strictAccess })
+      await gotoConfiguredAccess(bot, position, accessPosition, accessRange, options.config || null, options.reason || 'open-container-retry', { strict: strictAccess })
     }
   }
 
@@ -7241,7 +7241,9 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
   if (config) assertLivePlatformReady(bot, config, `${reason}:pre-goto`)
   const strict = options.strict === true
   const goalRange = Math.max(0.1, Number(range))
-  const readyDistance = strict ? Math.max(0.35, goalRange) : Math.max(2.25, goalRange)
+  // GoalNear tests quantized block nodes while assertNearPoint measures the bot's float
+  // position, so a "reached" stop can settle up to ~0.75 past the goal radius.
+  const readyDistance = strict ? Math.max(0.35, goalRange) + 0.75 : Math.max(2.25, goalRange)
   if (distanceToPoint(bot?.entity?.position, goalPos) <= readyDistance) {
     if (strict) assertNearPoint(bot, goalPos, readyDistance, `${reason}:access-ready`)
     return
@@ -7287,7 +7289,7 @@ async function openBlockWindowAt(bot, position, accessPosition, options = {}) {
   await gotoConfiguredAccess(bot, position, accessPosition, accessRange, config, reason, { strict: strictAccess })
   if (config) assertLivePlatformReady(bot, config, `${reason}:at-access`)
   if (strictAccess && (accessPosition || position)) {
-    assertNearPoint(bot, accessPosition || position, Math.max(0.35, accessRange), `${reason}:strict-access`)
+    assertNearPoint(bot, accessPosition || position, Math.max(0.35, accessRange) + 0.75, `${reason}:strict-access`)
   }
   const block = await waitForBlockAt(bot, position, {
     timeoutMs: options.blockWaitMs,
