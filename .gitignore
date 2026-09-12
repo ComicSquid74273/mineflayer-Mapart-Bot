@@ -1,0 +1,69 @@
+# Local auth/session cache
+auth-cache/
+reference/
+
+# Runtime logs
+logs/
+
+# Generated spatial scans may contain live world coordinates
+spatial-awareness/*.json
+
+# Reference/source dump folder
+reference/
+
+# Node-generated dependencies
+node_modules/
+
+# Graphify generated artifacts
+graphify-out/
+
+# Dashboard service runtime data
+dashboard-service/data/
+dashboard-service/smtp-config.env
+node-02
+node-01
+
+nerv-printer-config/_configs/nerx-premium*.json
+
+# Local Nixtri test node runtime data
+local-nixtri-nodes/**/auth-cache/
+local-nixtri-nodes/**/finished-maps/
+local-nixtri-nodes/**/logs/
+local-nixtri-nodes/**/nbt/
+local-nixtri-nodes/**/sync/
+local-nixtri-nodes/**/*.pid
+local-nixtri-nodes/**/runtime-config.json
+local-nixtri-nodes/**/watchdog-state.json
+local-nixtri-nodes/**/*.log
+local-nixtri-nodes/**/stdout-*.log
+local-nixtri-nodes/**/stderr-*.log
+local-nixtri-nodes/**/watchdog-stdout-*.log
+local-nixtri-nodes/**/watchdog-stderr-*.log
+nerv-printer-config/duper-group-state.json
+# Generated finished map outputs
+finished-maps/
+
+# Backup/old config files
+*-backup.json
+*.backup.json
+*_backup.json
+*.bak
+*.old
+*.old.json
+*_old.json
+nerv-printer-config.old.json
+nerv-printer-config.backup.json
+
+docs/6b6t.txt
+docs/anchorinformation.txt
+docs/EC2-DEPLOY.md
+
+.claude
+
+# Local Nixtri nodes
+local-nixtri-nodes/
+.codex*
+
+
+# Local deployment scripts
+.local-tools/

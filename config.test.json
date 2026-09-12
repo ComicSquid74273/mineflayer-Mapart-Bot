@@ -1,0 +1,12 @@
+{
+  "bots": [
+    {
+      "host": "premium-2.lunarbyte.in",
+      "port": 25569,
+      "auth": "offline",
+      "profilesFolder": "./auth-cache",
+      "viewDistance": "normal",
+      "checkTimeoutInterval": 60000
+    }
+  ]
+}

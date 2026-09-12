@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mapart Bot Dashboard</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Headless operators console</p>
+        <h1>Mapart Bot Dashboard</h1>
+        <p class="hero-copy">Live bot status, fleet controls, and NBT delivery from one page.</p>
+      </div>
+      <div class="hero-actions">
+        <div id="queueTracker" class="queue-tracker" title="Central queue plus unmanaged local node NBT totals">
+          <span>NBT queue</span>
+          <div class="queue-tracker-grid">
+            <div>
+              <strong id="queueRemainingValue">0</strong>
+              <small>Remaining</small>
+            </div>
+            <div>
+              <strong id="queueCompletedValue">0</strong>
+              <small>Completed</small>
+            </div>
+            <div>
+              <strong id="queueTotalValue">0</strong>
+              <small>Total</small>
+            </div>
+            <div>
+              <strong id="queueEtaValue">n/a</strong>
+              <small>Deployed ETA</small>
+              <small id="queueOnlineEtaValue" class="queue-eta-sub">Online n/a</small>
+            </div>
+          </div>
+          <small id="queueRemainingMeta">Queue 0 · local 0</small>
+        </div>
+        <div id="fleetJump" class="fleet-jump hidden" aria-label="Known node shortcuts"></div>
+        <div class="auth-box">
+          <input id="operatorUsername" type="text" placeholder="operator">
+          <input id="operatorPassword" type="password" placeholder="password">
+          <button id="loginButton" class="ghost-button" type="button">Login</button>
+          <button id="logoutButton" class="ghost-button" type="button">Logout</button>
+          <span id="authStatus" class="timestamp">Viewer mode</span>
+        </div>
+        <label class="refresh-control" for="refreshInterval">
+          <span>Auto refresh</span>
+          <select id="refreshInterval">
+            <option value="10000">10 seconds</option>
+            <option value="20000">20 seconds</option>
+            <option value="30000">30 seconds</option>
+            <option value="60000">1 minute</option>
+            <option value="300000" selected>5 minutes</option>
+            <option value="600000">10 minutes</option>
+          </select>
+        </label>
+        <button id="refreshButton" class="ghost-button" type="button">Refresh</button>
+        <button id="startAllButton" class="accent-button" type="button" data-permission-needed="canControlBots">Start Printing All</button>
+        <button id="stopAllButton" class="danger-button" type="button" data-permission-needed="canControlBots">Pause Printing All</button>
+        <button id="homeAllButton" class="ghost-button" type="button" data-permission-needed="canControlBots" title="Queue /home platform for every known bot; bots wait for their first platform arrival, correct world, and cooldown">Home All Bots</button>
+        <button class="danger-button" type="button" data-action="delete-all-finished-maps" data-permission-needed="admin">CLEANFINISHEDNBT</button>
+        <button class="danger-button" type="button" data-action="reset-everything" data-permission-needed="admin">RESETEVERYTHING</button>
+      </div>
+    </header>
+
+    <nav class="section-jump-bar" aria-label="Dashboard sections">
+      <a class="section-jump-link" href="#fleetPanel">Fleet</a>
+      <a class="section-jump-link" href="#uploadPanel">Upload</a>
+      <a class="section-jump-link" href="#operatorsPanel">Operators</a>
+      <a class="section-jump-link" href="#dataFilesPanel">Data</a>
+      <a class="section-jump-link" href="#nodeNbtDetails">NBT Files</a>
+      <a class="section-jump-link" href="#logsDetails">Logs</a>
+      <a class="section-jump-link" href="#teleportWhitelistPanel">Whitelist</a>
+      <a class="section-jump-link" href="#operatorLogDetails">Activity</a>
+      <a class="section-jump-link" href="#botInventoryDetails">Inventory</a>
+      <a class="section-jump-link" href="#resourceMetricsDetails">Resources</a>
+    </nav>
+
+    <section id="alertsBar" class="alerts-bar hidden"></section>
+
+    <main class="layout-grid">
+      <section id="fleetPanel" class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Fleet</p>
+            <h2>Grouped Fleet</h2>
+          </div>
+          <div class="status-inline">
+            <span id="serviceStatus" class="status-pill status-neutral">Checking service</span>
+            <span id="lastRefresh" class="timestamp">Never</span>
+          </div>
+        </div>
+        <div id="botSummary" class="summary-strip"></div>
+        <div id="botsGrid" class="bot-grid">
+          <article class="empty-card">
+            <h3>No bot data yet</h3>
+            <p>Start the dashboard service and at least one bot with dashboard integration enabled.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="uploadPanel" class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Delivery</p>
+            <h2>Upload NBT</h2>
+          </div>
+        </div>
+        <form id="uploadForm" class="stack-form">
+          <label>
+            <span>NBT or ZIP file</span>
+            <input id="fileInput" name="file" type="file" accept=".nbt,.zip" multiple required>
+          </label>
+          <label>
+            <span>Target type</span>
+            <select id="uploadTargetType">
+              <option value="node">Nodes / shared folders</option>
+              <option value="bot">Individual bots</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input id="distributeCheckbox" type="checkbox" checked>
+            <span id="distributeLabel">Use central queue: any eligible bot can poll later</span>
+          </label>
+          <label id="uploadTargetSelectLabel" style="display:none">
+            <span id="uploadTargetSelectText">Target bot</span>
+            <select id="uploadNodeSelect">
+              <option value="">Select bot</option>
+            </select>
+          </label>
+          <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload To Queue</button>
+          <div id="uploadProgress" class="upload-progress hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="upload-progress-head">
+              <span id="uploadProgressText">0% uploaded</span>
+            </div>
+            <div class="upload-progress-track">
+              <div id="uploadProgressFill" class="upload-progress-fill"></div>
+            </div>
+          </div>
+          <p id="uploadStatus" class="hint">No upload in progress.</p>
+        </form>
+        <div class="subsection-header compact-section-header">
+          <div>
+            <p class="panel-kicker">Uploads</p>
+            <h3>Uploaded NBT ZIP Files</h3>
+          </div>
+        </div>
+        <div id="uploadHistoryList" class="file-list"></div>
+        <div class="subsection-header compact-section-header">
+          <div>
+            <p class="panel-kicker">Retries</p>
+            <h3>Failed NBT Retry</h3>
+          </div>
+          <button id="retryAllFailedButton" class="accent-button small-button" type="button" data-action="queue-retry-all" data-permission-needed="canOperate">Retry All Failed</button>
+        </div>
+        <div id="failedQueueList" class="file-list"></div>
+        <div id="uploadAssignmentsList" class="file-list"></div>
+      </section>
+
+      <section id="deliveryPanel" class="panel hidden">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">GetAllMaps</p>
+            <h2>Delivery Bot</h2>
+          </div>
+        </div>
+        <div id="deliveryLocationSummary" class="delivery-location-summary"></div>
+        <div id="deliveryChatPanel" class="chat-panel delivery-chat-panel"></div>
+        <div class="subsection-header compact-section-header delivery-station-header">
+          <div>
+            <p class="panel-kicker">Delivery Station</p>
+            <h3>New Target Anchor</h3>
+          </div>
+        </div>
+        <form id="deliveryStationForm" class="delivery-station-form" autocomplete="off">
+          <label>
+            <span>X</span>
+            <input id="deliveryStationX" type="number" step="any" inputmode="decimal" required data-permission-needed="admin">
+          </label>
+          <label>
+            <span>Y</span>
+            <input id="deliveryStationY" type="number" step="any" inputmode="decimal" required data-permission-needed="admin">
+          </label>
+          <label>
+            <span>Z</span>
+            <input id="deliveryStationZ" type="number" step="any" inputmode="decimal" required data-permission-needed="admin">
+          </label>
+          <button class="accent-button small-button" type="submit" data-permission-needed="admin">Submit Anchor</button>
+        </form>
+        <p id="deliveryStationStatus" class="hint">Delivery target status will appear after the dashboard loads.</p>
+        <div class="subsection-header compact-section-header">
+          <div>
+            <p class="panel-kicker">Targets</p>
+            <h3>Printer Readiness</h3>
+          </div>
+        </div>
+        <div id="deliveryTargetsList" class="file-list"></div>
+      </section>
+
+      <section id="operatorsPanel" class="panel panel-wide">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Admin</p>
+            <h2>Operators</h2>
+          </div>
+        </div>
+        <form id="operatorForm" class="stack-form">
+          <label>
+            <span>Username</span>
+            <input id="managedUsername" type="text" placeholder="new-operator" required>
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="managedPassword" type="text" placeholder="leave blank to keep current password on update">
+          </label>
+          <label>
+            <span>Role</span>
+            <select id="managedRole">
+              <option value="viewer">viewer</option>
+              <option value="bot-controller">bot-controller</option>
+              <option value="bot-operator">bot-operator</option>
+              <option value="operator">operator</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          <div class="checkbox-grid">
+            <label class="checkbox-row"><input id="permViewLogs" type="checkbox"> <span>Allow log downloads</span></label>
+            <label class="checkbox-row"><input id="permControlBots" type="checkbox"> <span>Allow bot controls</span></label>
+            <label class="checkbox-row"><input id="permOperate" type="checkbox"> <span>Allow NBT uploads and queue operations</span></label>
+            <label class="checkbox-row"><input id="permViewNodeFiles" type="checkbox"> <span>Allow node NBT file view</span></label>
+            <label class="checkbox-row"><input id="permViewBotInventory" type="checkbox"> <span>Allow bot inventory view and refresh</span></label>
+            <label class="checkbox-row"><input id="permViewVmMetrics" type="checkbox"> <span>Allow VM metrics view and refresh</span></label>
+            <label class="checkbox-row"><input id="permViewOperatorLog" type="checkbox"> <span>Allow operator log view</span></label>
+            <label class="checkbox-row"><input id="permViewTeleportWhitelist" type="checkbox"> <span>Allow teleport whitelist view</span></label>
+            <label class="checkbox-row"><input id="permDeleteNodeFiles" type="checkbox"> <span>Allow node file deletes</span></label>
+            <label class="checkbox-row"><input id="permManageOperators" type="checkbox"> <span>Allow operator management</span></label>
+          </div>
+          <button class="accent-button" type="submit" data-permission-needed="canManageOperators">Create Or Update Operator</button>
+          <p id="operatorStatus" class="hint">Admin only. This writes directly to the operators JSON file.</p>
+        </form>
+        <div id="operatorsList" class="file-list">
+          <article class="empty-card">
+            <h3>Admin only</h3>
+            <p>Log in with an operator that can manage operators to view and edit accounts.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel panel-wide">
+        <details id="dataFilesPanel" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Admin</p>
+              <h2>Data Files</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div class="inventory-toolbar collapsible-content">
+            <button id="clearDataButton" class="danger-button small-button" type="button" data-permission-needed="canManageOperators" title="Delete all data JSON files (preserves operators.json)">Clear Data Folder</button>
+          </div>
+          <div id="dataFilesList" class="file-list collapsible-content">
+            <article class="empty-card">
+              <h3>Data files not loaded</h3>
+              <p>Open this section to list dashboard data files.</p>
+            </article>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel panel-wide">
+        <details id="nodeNbtDetails" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Nodes</p>
+              <h2>Node NBT Files</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div class="toolbar-row">
+            <input id="nbtSearchInput" type="search" placeholder="Search NBT files">
+          </div>
+          <div id="nodesGrid" class="node-grid collapsible-content">
+            <article class="empty-card">
+              <h3>No node inventory yet</h3>
+              <p>Once a node reports its shared NBT folder, the files will appear here.</p>
+            </article>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel panel-wide">
+        <details id="logsDetails" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Diagnostics</p>
+              <h2>Log Downloads</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div id="logsList" class="file-list log-download-list collapsible-content">
+            <article class="empty-card">
+              <h3>Login required</h3>
+              <p>Authenticate as a viewer, operator, or admin to list and download log files.</p>
+            </article>
+          </div>
+        </details>
+      </section>
+
+      <section id="teleportWhitelistPanel" class="panel admin-top-panel panel-wide hidden">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Admin</p>
+            <h2>Teleport Whitelist</h2>
+          </div>
+          <div class="status-inline">
+            <span id="teleportWhitelistStatus" class="timestamp">whitelisted-users.json</span>
+            <button id="teleportWhitelistToggle" class="ghost-button small-button" type="button" data-permission-needed="canViewTeleportWhitelist">Show</button>
+          </div>
+        </div>
+        <div id="teleportWhitelistBody" class="teleport-whitelist-body hidden">
+          <form id="teleportWhitelistForm" class="teleport-whitelist-form">
+            <label>
+              <span>Whitelist file</span>
+              <select id="teleportWhitelistConfig"></select>
+            </label>
+            <label>
+              <span>Minecraft username</span>
+              <input id="teleportWhitelistUsername" type="text" placeholder="ComicSquid74273" autocomplete="off">
+            </label>
+            <button class="accent-button" type="submit" data-permission-needed="admin">Add User</button>
+          </form>
+          <div id="teleportWhitelistList" class="whitelist-list"></div>
+        </div>
+      </section>
+
+      <section class="panel panel-wide">
+        <details id="operatorLogDetails" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Activity</p>
+              <h2>Operator Log</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div id="eventLog" class="event-log collapsible-content"></div>
+        </details>
+      </section>
+
+      <section class="panel panel-wide">
+        <details id="botInventoryDetails" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Inventory</p>
+              <h2>Bot Inventory</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div class="inventory-toolbar collapsible-content">
+            <button class="accent-button small-button" type="button" data-action="load-bot-inventory" data-permission-needed="canViewBotInventory">Refresh Inventory</button>
+          </div>
+          <div id="botInventoryGrid" class="inventory-grid collapsible-content">
+            <article class="empty-card">
+              <h3>Inventory hidden</h3>
+              <p>Log in with bot inventory access to view or refresh bot inventory.</p>
+            </article>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel panel-wide">
+        <details id="resourceMetricsDetails" class="collapsible-section">
+          <summary class="panel-header collapsible-summary">
+            <div>
+              <p class="panel-kicker">Resources</p>
+              <h2>VM Metrics</h2>
+            </div>
+            <span class="ghost-button small-button summary-action"></span>
+          </summary>
+          <div class="inventory-toolbar collapsible-content">
+            <button class="accent-button small-button" type="button" data-action="load-resource-metrics" data-permission-needed="canViewVmMetrics">View Metrics</button>
+          </div>
+          <div id="resourceMetricsGrid" class="resource-metrics-grid collapsible-content">
+            <article class="empty-card">
+              <h3>Metrics not loaded</h3>
+              <p>Open this section and click View Metrics to load current dashboard and node process usage.</p>
+            </article>
+          </div>
+        </details>
+      </section>
+    </main>
+    <footer class="dashboard-credit" aria-label="Dashboard credit">
+      Made with <span aria-hidden="true">&hearts;</span> by ComicSquid
+    </footer>
+  </div>
+  <button id="backToTopButton" class="back-to-top hidden" type="button" title="Go to top" aria-label="Go to top">Top</button>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "mapart-dashboard-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Headless dashboard API for mapart bot operations",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check src/store.js && node --check public/assets/app.js",
+    "test": "node --test test/*.test.js"
+  }
+}

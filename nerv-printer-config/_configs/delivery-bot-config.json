@@ -1,0 +1,470 @@
+{
+  "bot": {
+    "usernames": [
+      {
+        "name": "VulcanDelivery",
+        "enabled": false,
+        "auth": "offline",
+        "loginPassword": "",
+        "proxyEnabled": false
+      },
+      {
+        "name": "DeliveryBot",
+        "enabled": false,
+        "auth": "offline",
+        "loginPassword": "",
+        "proxyEnabled": false
+      },
+      {
+        "name": "ComicSquid007",
+        "enabled": false,
+        "proxyEnabled": false
+      }
+    ],
+    "version": "1.20",
+    "profilesFolder": "./auth-cache",
+    "viewDistance": "normal",
+    "checkTimeoutInterval": 60000,
+    "reconnect": {
+      "enabled": true,
+      "delayMs": 20000,
+      "maxAttempts": 50
+    }
+  },
+  "connection": {
+    "active": "premium-1",
+    "profiles": {
+      "local": {
+        "bot": {
+          "usernames": [
+            {
+              "name": "VulcanDelivery",
+              "enabled": true,
+              "auth": "offline",
+              "loginPassword": ""
+            }
+          ],
+          "host": "127.0.0.1",
+          "port": 54321,
+          "auth": "offline",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "normal",
+          "checkTimeoutInterval": 60000,
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 5000,
+            "maxAttempts": 25
+          }
+        }
+      },
+      "premium-1": {
+        "bot": {
+          "usernames": [
+            {
+              "name": "VulcanDelivery",
+              "enabled": true,
+              "auth": "offline",
+              "loginPassword": ""
+            }
+          ],
+          "host": "premium-2.lunarbyte.in",
+          "port": 25569,
+          "auth": "offline",
+          "version": "auto",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "normal",
+          "checkTimeoutInterval": 60000,
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 5000,
+            "maxAttempts": 25
+          }
+        },
+        "advanced": {
+          "teleportRequestAcceptCommand": "/tpaccept",
+          "teleportRequestAcceptIncludeUsername": false
+        }
+      },
+      "6b6t": {
+        "bot": {
+          "usernames": [
+            {
+              "name": "ComicSquid007",
+              "enabled": true
+            }
+          ],
+          "host": "alt.6b6t.org",
+          "hosts": [
+            "alt.6b6t.org",
+            "alt3.6b6t.org",
+            "play.6b6t.org",
+            "alt2.6b6t.org"
+          ],
+          "port": 25565,
+          "version": "26.1.2",
+          "auth": "microsoft",
+          "profilesFolder": "./auth-cache",
+          "viewDistance": "normal",
+          "checkTimeoutInterval": 90000,
+          "requiredSpawnCountBeforeStartup": 3,
+          "requiredSpawnFallbackSeconds": 90,
+          "spawnPositionTimeoutSeconds": 240,
+          "spawnMissingPositionReconnectSeconds": 75,
+          "platformPositionCacheEnabled": false,
+          "waitForPlatformPositionOnSpawn": true,
+          "seedPositionFromPlatformOnSpawn": true,
+          "platformRecoveryTpa": {
+            "enabled": false,
+            "command": "/tpa ComicSquid74273",
+            "retryMs": 300000
+          },
+          "chatLogin": {
+            "enabled": true,
+            "offlineOnly": true,
+            "command": "/login",
+            "promptPatterns": [
+              "please login with the command",
+              "/login <password>"
+            ],
+            "successPatterns": [
+              "you are now logged in",
+              "successfully logged in"
+            ],
+            "minDelayMs": 750,
+            "retryMs": 5000,
+            "maxAttempts": 5
+          },
+          "lobbyPortal": {
+            "enabled": true,
+            "accountMode": "auto",
+            "maxAttempts": 3,
+            "pathTimeoutMs": 60000,
+            "portalEntryMs": 3000,
+            "waitAfterPortalMs": 12000,
+            "portalSearchRadius": 96,
+            "lobbyRegions": [
+              {
+                "name": "observed-2026-06-new-lobby",
+                "type": "sphere",
+                "action": "spawn-portal",
+                "center": {
+                  "x": 319,
+                  "y": 163,
+                  "z": 425
+                },
+                "radius": 16,
+                "yTolerance": 4,
+                "portal": {
+                  "enabled": true,
+                  "targetBlock": {
+                    "x": 311,
+                    "y": 163,
+                    "z": 424
+                  },
+                  "approach": {
+                    "x": 313,
+                    "y": 163,
+                    "z": 424
+                  },
+                  "goalRange": 2,
+                  "facing": "west"
+                }
+              },
+              {
+                "name": "lobby-1",
+                "type": "disk",
+                "action": "wait-transfer",
+                "centerX": 500,
+                "centerZ": 500,
+                "radius": 30
+              },
+              {
+                "name": "lobby-2",
+                "type": "disk",
+                "action": "wait-transfer",
+                "centerX": 1000,
+                "centerZ": 1000,
+                "radius": 30
+              },
+              {
+                "name": "login-portal-neg999",
+                "type": "box",
+                "action": "login-portal",
+                "x": -1000,
+                "y": 100,
+                "z": -1000,
+                "radius": 16
+              },
+              {
+                "name": "spawn-portal-overworld-0",
+                "enabled": false,
+                "type": "box",
+                "action": "spawn-portal",
+                "x": 0,
+                "y": 20,
+                "z": 4,
+                "radius": 100
+              },
+              {
+                "name": "observed-2026-09-low-lobby",
+                "type": "sphere",
+                "center": {
+                  "x": 32.5,
+                  "y": 15,
+                  "z": -4.5
+                },
+                "radius": 10,
+                "yTolerance": 10
+              }
+            ],
+            "spawnDisk": {
+              "enabled": false,
+              "centerX": 0,
+              "centerZ": 4,
+              "radius": 100,
+              "waitBeforeMoveMs": 2500,
+              "forcedStraightRoute": {
+                "enabled": true,
+                "trigger": {
+                  "x": 31,
+                  "y": 62,
+                  "z": -3.5,
+                  "radius": 10
+                },
+                "backoffBlocks": 5,
+                "backoffGoalRange": 1.5,
+                "waypointGoalRange": 2,
+                "portalGoalRange": 2
+              },
+              "backoffWhenNearWaypoint": true,
+              "backoffBlocks": 5,
+              "backoffTriggerRadius": 12,
+              "backoffGoalRange": 1.5,
+              "twoStepRoute": false,
+              "useConfiguredPortalTarget": true,
+              "waypoint": {
+                "x": 0,
+                "y": 20,
+                "z": 4
+              },
+              "portal": {
+                "x": 0,
+                "y": 20,
+                "z": -16
+              },
+              "goalRange": 2
+            },
+            "loginPortal": {
+              "enabled": true,
+              "x": -1000,
+              "y": 100,
+              "z": -1000,
+              "radius": 16,
+              "waitBeforeMoveMs": 5000,
+              "portalTargetZ": -989,
+              "goalRange": 2
+            }
+          },
+          "reconnect": {
+            "enabled": true,
+            "delayMs": 60000,
+            "maxAttempts": 50
+          }
+        },
+        "multiUser": {
+          "joinStaggerMs": 15000,
+          "startStaggerMs": 6000,
+          "staleStateMs": 60000,
+          "heartbeatMs": 4000
+        }
+      }
+    }
+  },
+  "files": {
+    "inputMode": "nbt",
+    "machineConfigProfile": "carpet",
+    "machineConfigFile": "./nerv-printer-config/_configs/legacy-nerv-carpet-printer-config.json",
+    "resumeProgress": true,
+    "progressFile": "./logs/delivery-printer-progress.json",
+    "nbtFolder": "./nerv-printer-config/delivery-unused-nbts",
+    "moveToFinishedFolder": false,
+    "disableOnFinished": true
+  },
+  "printer": {
+    "startOnSpawn": false,
+    "startDelayMs": 1500,
+    "allowJump": false
+  },
+  "advanced": {
+    "antiHunger": {
+      "enabled": true,
+      "sprint": true,
+      "onGround": true
+    },
+    "machineAccessSprintMode": "automatic",
+    "platformWatchdogEnabled": true,
+    "platformWaterGuardEnabled": false,
+    "autoEatEnabled": true,
+    "autoEatFoodItem": "cooked_beef",
+    "autoEatMinHealth": 12,
+    "autoEatMinHunger": 12,
+    "autoEatTargetHunger": 20,
+    "autoEatReturnUnusedFood": true
+  },
+  "anchorTranslation": {
+    "enabled": true,
+    "sourceAnchor": {
+      "x": -706,
+      "y": -9,
+      "z": -962
+    },
+    "targetAnchor": {
+      "x": 21,
+      "y": 86,
+      "z": -854
+    }
+  },
+  "multiUser": {
+    "enabled": false,
+    "runtime": {
+      "role": "delivery"
+    }
+  },
+  "dashboard": {
+    "enabled": true,
+    "maxZipEntries": 5000,
+    "maxTotalNbts": 10000,
+    "serviceUrl": "http://localhost:4080",
+    "hostLabel": "Delivery",
+    "heartbeatMs": 5000,
+    "commandPollMs": 3000,
+    "queuePrefetchHighWater": 10,
+    "queuePrefetchLowWater": 3,
+    "idleWindowMs": 15000,
+    "staleMs": 20000
+  },
+  "delivery": {
+    "enabled": true,
+    "station": {
+      "anchor": {
+        "x": 21,
+        "y": 86,
+        "z": -854
+      },
+      "radius": 25,
+      "offsets": {
+        "enderChest": {
+          "x": -2,
+          "y": 1,
+          "z": 0
+        },
+        "dropChest": {
+          "x": -4,
+          "y": 1,
+          "z": 0
+        },
+        "bundlesChest": {
+          "x": -5,
+          "y": 1,
+          "z": 0
+        },
+        "foodChest": {
+          "x": -7,
+          "y": 1,
+          "z": 1
+        },
+        "openPosition": {
+          "x": -4,
+          "y": 0,
+          "z": 2
+        }
+      },
+      "enderChest": null,
+      "dropChest": null,
+      "bundlesChest": null,
+      "foodChest": null,
+      "openPosition": null
+    },
+    "homeCommand": "/home",
+    "homeName": "platform",
+    "tpaCommand": "/tpa",
+    "homeRetryMs": 60000,
+    "dashboardPlanRefreshMs": 30000,
+    "targetReadyRetryMs": 5000,
+    "targetStatusFreshMs": 20000,
+    "missionStateFile": "./logs/delivery-mission-state.json",
+    "death": {
+      "alertEnabled": true,
+      "haltMissionOnDeath": true
+    },
+    "cooldowns": {
+      "fallbackTpaMs": 600000,
+      "fallbackHomeMs": 600000,
+      "extraDelayMs": 1500,
+      "maxChatWaitMs": 8000,
+      "silentRetryMs": 20000
+    },
+    "teleport": {
+      "arrivalTimeoutMs": 20000,
+      "warmupExtraMs": 2000,
+      "maxRetries": 3
+    },
+    "bundles": {
+      "enabled": true,
+      "itemName": "bundle",
+      "mapsPerBundle": 64,
+      "minEmptyBundles": 4,
+      "maxBundlesToCarry": 18,
+      "restockTo": 8,
+      "bundlesPerTarget": 5,
+      "allowLooseMapDeposit": false,
+      "depositLooseMaps": false,
+      "stowMouseButton": "left"
+    },
+    "chests": {
+      "order": [
+        "upper",
+        "middle",
+        "lowest"
+      ],
+      "legacySourceAnchor": {
+        "x": -706,
+        "y": -9,
+        "z": -962
+      },
+      "legacyOffsets": {
+        "upper": {
+          "x": 61,
+          "y": 2,
+          "z": -4
+        },
+        "middle": {
+          "x": 61,
+          "y": 1,
+          "z": -3
+        },
+        "lowest": {
+          "x": 61,
+          "y": 0,
+          "z": -2
+        },
+        "openPos": {
+          "x": 61.66,
+          "y": 1,
+          "z": -0.67
+        }
+      },
+      "openTimeoutMs": 8000,
+      "openAttempts": 4,
+      "emptyVerifyPasses": 2
+    }
+  },
+  "errorHandling": {
+    "logErrors": true,
+    "errorAction": "repair"
+  },
+  "logging": {
+    "rotateHours": 4,
+    "retentionHours": 12
+  }
+}
