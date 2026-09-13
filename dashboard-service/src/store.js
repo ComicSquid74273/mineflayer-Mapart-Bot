@@ -64,6 +64,7 @@ function createStore(baseDir) {
   const nodeInventoryFile = path.join(dataDir, 'node-inventory.json')
   const botInventoryFile = path.join(dataDir, 'bot-inventory.json')
   const deliveryConfigFile = path.join(dataDir, 'delivery-config.json')
+  const playerJoinMessagesFile = path.join(dataDir, 'player-join-messages.json')
   const nodeLogDownloadsDir = path.join(dataDir, 'node-log-downloads')
   const BOT_FRESH_MS = Math.max(5000, Number(process.env.DASHBOARD_BOT_FRESH_MS || 90000))
   const NODE_INVENTORY_FRESH_MS = Math.max(BOT_FRESH_MS, Number(process.env.DASHBOARD_NODE_INVENTORY_FRESH_MS || 3 * 60 * 1000))
@@ -164,6 +165,7 @@ function createStore(baseDir) {
   if (!fs.existsSync(nodeStatsFile)) writeJson(nodeStatsFile, {})
   if (!fs.existsSync(nodeInventoryFile)) writeJson(nodeInventoryFile, {})
   if (!fs.existsSync(botInventoryFile)) writeJson(botInventoryFile, {})
+  if (!fs.existsSync(playerJoinMessagesFile)) writeJson(playerJoinMessagesFile, { version: 0, fileName: null, messages: [], updatedAt: null })
 
   function toTimestamp(value) {
     const ms = new Date(value || 0).getTime()
@@ -2248,6 +2250,33 @@ function createStore(baseDir) {
     }
   }
 
+  function getPlayerJoinMessages() {
+    const stored = readJson(playerJoinMessagesFile, null)
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+      return { version: 0, fileName: null, messages: [], updatedAt: null }
+    }
+    return {
+      version: Math.max(0, Math.floor(toNumber(stored.version, 0))),
+      fileName: typeof stored.fileName === 'string' && stored.fileName.trim() ? stored.fileName.trim() : null,
+      messages: Array.isArray(stored.messages) ? stored.messages.map((message) => String(message || '').trim()).filter(Boolean) : [],
+      updatedAt: stored.updatedAt || null
+    }
+  }
+
+  function updatePlayerJoinMessages(input) {
+    const current = getPlayerJoinMessages()
+    const messages = Array.isArray(input?.messages) ? input.messages.map((message) => String(message || '').trim()).filter(Boolean) : []
+    if (JSON.stringify(messages) === JSON.stringify(current.messages)) return current
+    const next = {
+      version: current.version + 1,
+      fileName: String(input?.fileName || 'messages.csv').trim() || 'messages.csv',
+      messages,
+      updatedAt: nowIso()
+    }
+    writeJson(playerJoinMessagesFile, next)
+    return next
+  }
+
   function saveDeliveryConfig(config) {
     config.updatedAt = nowIso()
     writeJson(deliveryConfigFile, config)
@@ -2459,6 +2488,8 @@ function createStore(baseDir) {
     getNodeLogDownload,
     invalidateDataFileCache,
     resolveFilePath,
+    getPlayerJoinMessages,
+    updatePlayerJoinMessages,
     getDeliveryConfig,
     updateDeliveryStation,
     upsertDeliveryTarget,

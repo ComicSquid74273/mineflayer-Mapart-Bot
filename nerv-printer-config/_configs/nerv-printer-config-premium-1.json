@@ -526,6 +526,17 @@
     "startStaggerMs": 5000,
     "launchFromSingleProcess": true
   },
+  "playerJoinMessaging": {
+    "enabled": false,
+    "masterOnly": true,
+    "joinDelayMs": 1000,
+    "intervalMs": 10000,
+    "messageListPollMs": 30000,
+    "defaultMessages": [
+      "Get 300 free maparts, Join Vulcan Today | https://discord.gg/yzNbSgWc7n",
+      "Need Help with mapart, Vulcan can help you out | https://discord.gg/yzNbSgWc7n"
+    ]
+  },
   "dashboard": {
     "enabled": true,
     "serviceUrl": "http://localhost:4080",

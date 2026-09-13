@@ -8,6 +8,7 @@ const net = require('net')
 const tls = require('tls')
 const { spawn } = require('child_process')
 const { createStore } = require('./store')
+const { parsePlayerJoinMessagesCsv } = require('./player-join-messages')
 const { getProgressAgeMs, hasActiveRequiredStockAlert, isLongRuntimeStalled } = require('./runtime-alerts')
 
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0'
@@ -52,7 +53,8 @@ const MAX_ZIP_ENTRY_BYTES = Math.max(1024 * 1024, Number(process.env.DASHBOARD_M
 const MAX_ZIP_TOTAL_BYTES = Math.max(MAX_ZIP_ENTRY_BYTES, Number(process.env.DASHBOARD_MAX_ZIP_TOTAL_BYTES || MAX_UPLOAD_BYTES))
 const MAX_ZIP_ENTRIES = Math.max(5000, Number(process.env.DASHBOARD_MAX_ZIP_ENTRIES || printerConfigDashboard.maxZipEntries || 5000))
 const MAX_TOTAL_NBTS = Math.max(10000, Number(process.env.DASHBOARD_MAX_TOTAL_NBTS || printerConfigDashboard.maxTotalNbts || 10000))
-const PROTECTED_DATA_FILES = new Set(['operators.json', 'upload-history.json'])
+const MAX_PLAYER_JOIN_MESSAGES_BYTES = Math.max(1024, Number(process.env.DASHBOARD_MAX_PLAYER_JOIN_MESSAGES_BYTES || 2 * 1024 * 1024))
+const PROTECTED_DATA_FILES = new Set(['operators.json', 'upload-history.json', 'player-join-messages.json'])
 const TELEPORT_WHITELIST_FILE_NAME = 'whitelisted-users.json'
 const TELEPORT_WHITELIST_PATH = path.join(DATA_DIR, TELEPORT_WHITELIST_FILE_NAME)
 const SUPPORT_SUBMISSIONS_FILE = path.join(DATA_DIR, 'support-queries.json')
@@ -364,6 +366,7 @@ function getAuthRequirement(pathname, method) {
   if (reqIsNodeDeletePath(pathname, method)) return 'canDeleteNodeFiles'
   if (reqIsBotControlPath(pathname, method)) return 'canControlBots'
   if (pathname === '/api/dashboard/delivery' && method === 'GET') return 'canControlBots'
+  if (pathname === '/api/dashboard/player-join-messages') return 'canOperate'
   if (reqIsDeliveryConfigWritePath(pathname, method)) return 'canOperate'
   if (reqIsDashboardOperationPath(pathname, method)) return 'canOperate'
   return null
@@ -3563,6 +3566,23 @@ async function route(req, res) {
     return methodNotAllowed(res)
   }
 
+  if (pathname === '/api/dashboard/player-join-messages') {
+    if (req.method === 'GET') return sendJson(res, 200, store.getPlayerJoinMessages())
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const body = await readBody(req, { maxBytes: MAX_PLAYER_JOIN_MESSAGES_BYTES })
+    const fileName = path.basename(String(body?.fileName || '').trim())
+    const messages = parsePlayerJoinMessagesCsv(fileName, body?.content)
+    const previousVersion = store.getPlayerJoinMessages().version
+    const item = store.updatePlayerJoinMessages({ fileName, messages })
+    auditOperatorAction(actor, 'player-join-messages-upload', `Uploaded ${messages.length} player join message(s).`, {
+      fileName,
+      count: messages.length,
+      version: item.version,
+      changed: item.version !== previousVersion
+    })
+    return sendJson(res, 200, { ok: true, item })
+  }
+
   const nbtUploadParams = matchPath(pathname, '/api/dashboard/nodes/:hostLabel/nbt/upload')
   if (nbtUploadParams) {
     if (req.method !== 'POST') return methodNotAllowed(res)
@@ -3744,6 +3764,19 @@ async function route(req, res) {
     const bot = store.upsertBotStatus({ ...statusBody, botIp: reportedProxyIp || socketIp })
     queueTeleportWhitelistSyncForHost(bot.hostLabel || body.hostLabel, 'node-status')
     return sendJson(res, 200, { ok: true, nextPollMs: 3000, bot: summarizeBot(bot, store.getBotPauseState(bot.botName)) })
+  }
+
+  params = matchPath(pathname, '/api/bots/:botName/player-join-messages')
+  if (params) {
+    if (req.method !== 'GET') return methodNotAllowed(res)
+    const item = store.getPlayerJoinMessages()
+    const knownVersion = Math.max(0, Math.floor(Number(parseUrl(req).searchParams.get('version') || 0)))
+    if (knownVersion === item.version) {
+      res.writeHead(304, { 'cache-control': 'no-store' })
+      res.end()
+      return
+    }
+    return sendJson(res, 200, item)
   }
 
   params = matchPath(pathname, '/api/bots/:botName/commands')

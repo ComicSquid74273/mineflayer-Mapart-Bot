@@ -20,6 +20,8 @@ const state = {
   uploadHistoryTotal: 0,
   uploadHistoryHasMore: false,
   uploadHistoryLoading: false,
+  playerJoinMessages: { version: 0, fileName: null, messages: [], updatedAt: null },
+  playerJoinMessagesBusy: false,
   queueSummary: {
     combinedRemaining: 0,
     combinedCompleted: 0,
@@ -176,6 +178,11 @@ const elements = {
   uploadStatus: document.getElementById('uploadStatus'),
   uploadHistoryList: document.getElementById('uploadHistoryList'),
   uploadAssignmentsList: document.getElementById('uploadAssignmentsList'),
+  playerJoinMessagesPanel: document.getElementById('playerJoinMessagesPanel'),
+  playerJoinMessagesForm: document.getElementById('playerJoinMessagesForm'),
+  playerJoinMessagesFile: document.getElementById('playerJoinMessagesFile'),
+  playerJoinMessagesMeta: document.getElementById('playerJoinMessagesMeta'),
+  playerJoinMessagesStatus: document.getElementById('playerJoinMessagesStatus'),
   failedQueueList: document.getElementById('failedQueueList'),
   retryAllFailedButton: document.getElementById('retryAllFailedButton'),
   clearDataButton: document.getElementById('clearDataButton'),
@@ -630,6 +637,8 @@ function renderAuthState() {
 
   const canOperate = hasPermission('canOperate')
   if (elements.uploadForm) elements.uploadForm.style.display = canOperate ? '' : 'none'
+  if (elements.playerJoinMessagesPanel) elements.playerJoinMessagesPanel.classList.toggle('hidden', !canOperate)
+  if (elements.playerJoinMessagesFile) elements.playerJoinMessagesFile.disabled = !canOperate
   if (elements.fileInput) elements.fileInput.disabled = !canOperate
   if (elements.uploadNodeSelect) elements.uploadNodeSelect.disabled = !canOperate
   if (elements.uploadTargetType) elements.uploadTargetType.disabled = !canOperate
@@ -3333,10 +3342,13 @@ async function refreshData(options = {}) {
         : Promise.resolve({ files: [] }),
       state.auth.verified && hasPermission('canViewTeleportWhitelist')
         ? requestJson('/api/dashboard/teleport-whitelist', { requireAuth: true })
-        : Promise.resolve({ files: [] })
+        : Promise.resolve({ files: [] }),
+      state.auth.verified && hasPermission('canOperate')
+        ? requestJson('/api/dashboard/player-join-messages', { requireAuth: true })
+        : Promise.resolve(null)
     ])
-    const optionalFallbacks = [{ items: [] }, { items: [] }, { files: [] }, { files: [] }]
-    const [logs, operators, configs, teleportWhitelist] = optionalRequests.map((result, index) => {
+    const optionalFallbacks = [{ items: [] }, { items: [] }, { files: [] }, { files: [] }, null]
+    const [logs, operators, configs, teleportWhitelist, playerJoinMessages] = optionalRequests.map((result, index) => {
       if (result.status === 'fulfilled') return result.value
       pushEvent('warn', result.reason?.message || 'A dashboard detail panel failed to load.')
       return optionalFallbacks[index]
@@ -3345,6 +3357,7 @@ async function refreshData(options = {}) {
     state.operators = Array.isArray(operators.items) ? operators.items : []
     state.configs = Array.isArray(configs.files) ? configs.files : []
     state.teleportWhitelist.files = Array.isArray(teleportWhitelist.files) ? teleportWhitelist.files : []
+    if (playerJoinMessages && typeof playerJoinMessages === 'object') state.playerJoinMessages = playerJoinMessages
     // Clear dismissed banners for bots that are no longer verifying
     for (const botName of [...state.dismissedVerify]) {
       if (!state.bots.some((b) => b.botName === botName && b.tokenWaiting)) {
@@ -3365,6 +3378,7 @@ async function refreshData(options = {}) {
     renderOperators()
     renderConfigs()
     renderTeleportWhitelist()
+    renderPlayerJoinMessages()
     renderDelivery()
     renderDataFiles()
     renderAuthState()
@@ -3395,6 +3409,41 @@ async function submitJson(url, body) {
     body: JSON.stringify(body || {}),
     requireAuth: true
   })
+}
+
+function renderPlayerJoinMessages() {
+  if (!elements.playerJoinMessagesMeta) return
+  const item = state.playerJoinMessages || {}
+  const count = Array.isArray(item.messages) ? item.messages.length : 0
+  elements.playerJoinMessagesMeta.textContent = count
+    ? `${count} custom message(s) from ${item.fileName || 'CSV'}; version ${Number(item.version || 0)}; updated ${formatTime(item.updatedAt)}.`
+    : 'No custom CSV uploaded. Enabled bots use configured defaults.'
+}
+
+async function onPlayerJoinMessagesUpload(event) {
+  event.preventDefault()
+  if (!hasPermission('canOperate')) throw new Error('canOperate permission required')
+  if (state.playerJoinMessagesBusy) return
+  const file = elements.playerJoinMessagesFile?.files?.[0]
+  if (!file) throw new Error('Select a CSV file')
+  if (!file.name.toLowerCase().endsWith('.csv')) throw new Error('Message list must be a .csv file')
+  state.playerJoinMessagesBusy = true
+  if (elements.playerJoinMessagesStatus) elements.playerJoinMessagesStatus.textContent = 'Uploading and validating message list...'
+  try {
+    const result = await submitJson('/api/dashboard/player-join-messages', {
+      fileName: file.name,
+      content: await file.text()
+    })
+    state.playerJoinMessages = result.item
+    renderPlayerJoinMessages()
+    elements.playerJoinMessagesForm.reset()
+    if (elements.playerJoinMessagesStatus) {
+      elements.playerJoinMessagesStatus.textContent = `Uploaded ${result.item.messages.length} message(s). Enabled bots receive version ${result.item.version} on their next poll.`
+    }
+    pushEvent('info', `Uploaded ${result.item.messages.length} player join message(s).`)
+  } finally {
+    state.playerJoinMessagesBusy = false
+  }
 }
 
 async function fileToBase64(file) {
@@ -4341,6 +4390,15 @@ elements.homeAllButton.addEventListener('click', async () => {
 elements.uploadForm.addEventListener('submit', (event) => {
   void onUpload(event).catch((error) => pushEvent('error', error.message))
 })
+
+if (elements.playerJoinMessagesForm) {
+  elements.playerJoinMessagesForm.addEventListener('submit', (event) => {
+    void onPlayerJoinMessagesUpload(event).catch((error) => {
+      if (elements.playerJoinMessagesStatus) elements.playerJoinMessagesStatus.textContent = `Upload failed: ${error.message}`
+      pushEvent('error', error.message)
+    })
+  })
+}
 
 elements.distributeCheckbox.addEventListener('change', () => {
   const distribute = elements.distributeCheckbox.checked

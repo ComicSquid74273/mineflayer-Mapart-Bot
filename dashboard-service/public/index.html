@@ -160,6 +160,24 @@
         <div id="uploadAssignmentsList" class="file-list"></div>
       </section>
 
+      <section id="playerJoinMessagesPanel" class="panel hidden">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Advertising</p>
+            <h2>Player Join Messages</h2>
+          </div>
+        </div>
+        <form id="playerJoinMessagesForm" class="stack-form">
+          <label>
+            <span>One-column CSV message list</span>
+            <input id="playerJoinMessagesFile" name="file" type="file" accept=".csv" required>
+          </label>
+          <button class="accent-button" type="submit" data-permission-needed="canOperate">Upload Message List</button>
+          <p id="playerJoinMessagesMeta" class="hint">No custom CSV uploaded. Enabled bots use configured defaults.</p>
+          <p id="playerJoinMessagesStatus" class="hint">No upload in progress.</p>
+        </form>
+      </section>
+
       <section id="deliveryPanel" class="panel hidden">
         <div class="panel-header">
           <div>

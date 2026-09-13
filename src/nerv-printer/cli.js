@@ -84,6 +84,7 @@ const {
 } = require('./navigation/off-platform-context')
 const { collectLegacyFinishedMapChests } = require('./legacy-finished-chests')
 const { buildAnvilRenameTarget } = require('./anvil-name')
+const { createPlayerJoinMessenger, getPlayerJoinMessagingSettings } = require('./player-join-messaging')
 const {
   extendDeadlineForHold,
   inspectFinishedMapChestCapacity
@@ -1192,6 +1193,30 @@ function getDashboardConfig(config) {
 function isDashboardEnabled(config) {
   const dashboard = getDashboardConfig(config)
   return dashboard.enabled && Boolean(dashboard.serviceUrl)
+}
+
+function createPlayerJoinMessagingRuntime(bot, config, dashboardRuntime) {
+  const settings = getPlayerJoinMessagingSettings(config)
+  if (!settings.enabled || !dashboardRuntime) return null
+  const dashboard = getDashboardConfig(config)
+  return createPlayerJoinMessenger({
+    bot,
+    settings,
+    isPrinting: () => dashboardRuntime.getPhase() === 'printing',
+    requestMessages: dashboard.enabled && dashboard.serviceUrl
+      ? (version) => createDashboardRequest(
+          `${dashboard.serviceUrl}/api/bots/${encodeURIComponent(config.bot?.username || bot.username)}/player-join-messages?version=${encodeURIComponent(version)}`,
+          'GET',
+          null,
+          { timeoutMs: 5000 }
+        )
+      : null,
+    logger: {
+      warn(message) {
+        logThrottled(`player-join-messaging-${bot.username}`, message, { intervalMs: 30000, level: 'warn' })
+      }
+    }
+  })
 }
 
 function isWaitForCommandEnabled() {
@@ -3280,6 +3305,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
   const dashboardRuntimeApi = {
     setConnectedHost,
+    getPhase() {
+      return state.phase
+    },
     start() {
       if (ownsDashboardJobs()) {
         state.terminalResetHandler = async (source = 'terminal') => requestCurrentNbtReset(source)
@@ -5623,6 +5651,17 @@ function createDefaultConfig() {
       queuePrefetchLowWater: 3,
       idleWindowMs: 15000,
       staleMs: 20000
+    },
+    playerJoinMessaging: {
+      enabled: false,
+      masterOnly: true,
+      joinDelayMs: 1000,
+      intervalMs: 10000,
+      messageListPollMs: 30000,
+      defaultMessages: [
+        'Get 300 free maparts, Join Vulcan Today | https://discord.gg/yzNbSgWc7n',
+        'Need Help with mapart, Vulcan can help you out | https://discord.gg/yzNbSgWc7n'
+      ]
     },
     logging: {
       rotateHours: 12,
@@ -24887,6 +24926,7 @@ function runSingleSession(config, sessionNumber) {
     const runtimeControl = managedControlEnabled ? createRuntimeControl(config) : null
     runtimeControl?.attach()
     const dashboardRuntime = createDashboardRuntime(bot, config, sessionNumber, runtimeControl)
+    const playerJoinMessagingRuntime = createPlayerJoinMessagingRuntime(bot, config, dashboardRuntime)
     bot.loadPlugin(pathfinder)
     installFinalWorldDeathRespawnTracking(bot, config)
     installPlatformSafety(bot, config)
@@ -24894,6 +24934,7 @@ function runSingleSession(config, sessionNumber) {
       installPhysicsNaNProbe(bot, config, `main-session-${sessionNumber}`, { logPackets: false, logRepairs: false })
     }
     dashboardRuntime?.start()
+    playerJoinMessagingRuntime?.start()
     bot.on('move', () => {
       dashboardRuntime?.noteActivity()
     })
@@ -24983,6 +25024,7 @@ function runSingleSession(config, sessionNumber) {
         try { multiCoordinator.markOffline(multiWorkerName, reason || cleanError || 'disconnected', bot.__nervMultiSessionId) } catch { }
       }
       if (config.multiUser?.runtime?.sessionId === multiSessionId) config.multiUser.runtime.sessionId = null
+      playerJoinMessagingRuntime?.stop()
       dashboardRuntime?.stop(finalPhase, false)
       runtimeControl?.detach()
       resolve({
@@ -25230,6 +25272,7 @@ function runSingleSession(config, sessionNumber) {
 
       printerStarted = true
       successfulStartup = true
+      playerJoinMessagingRuntime?.arm()
       stopLobbyHostFailoverWatchdog()
       bot.__nervPlatformWatchdogActive = true
       dashboardRuntime?.setLastError('')

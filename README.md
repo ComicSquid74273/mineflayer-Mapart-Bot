@@ -685,6 +685,19 @@ Verify without connecting:
 npm run test:multi-user-plan
 ```
 
+### 3.6.1 `playerJoinMessaging`
+
+Optional direct messages for newly joined players. Disabled by default. The bot sends only during the exact dashboard `printing` phase, ignores players already online when the runtime becomes ready, coalesces simultaneous joins to the newest player, and uses `/msg <username> <message>`.
+
+| Key | Current | Options / Meaning | Tuning hint |
+|---|---:|---|---|
+| `playerJoinMessaging.enabled` | `false` | Enables join messaging and dashboard message-list polling. | Enable only on selected bot configs. Disabled bots make no message-list requests. |
+| `playerJoinMessaging.masterOnly` | `true` | Prevents multibot slave accounts from sending duplicate messages. | Keep `true` for multi-account nodes. |
+| `playerJoinMessaging.joinDelayMs` | `1000` | Wait after the newest join before messaging. | Minimum is one second. |
+| `playerJoinMessaging.intervalMs` | `10000` | Minimum time between messages. | Joins during the interval replace the pending target; only the newest receives a message. |
+| `playerJoinMessaging.messageListPollMs` | `30000` | Dashboard list-version check interval. | The dashboard returns the list only when its version changes. |
+| `playerJoinMessaging.defaultMessages` | two messages | Used until a custom CSV exists. | Upload a one-column CSV in the dashboard’s separate Player Join Messages panel. |
+
 ### 3.7 `dashboard`
 
 Use this only when running the separate `dashboard-service` project.

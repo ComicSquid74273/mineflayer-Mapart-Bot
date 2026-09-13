@@ -71,6 +71,17 @@ test.after(async () => {
   fs.rmSync(dataDir, { recursive: true, force: true })
 })
 
+test('bots receive player join messages only when the version changes', async () => {
+  const item = store.updatePlayerJoinMessages({ fileName: 'messages.csv', messages: ['hello'] })
+  let result = await request('/api/bots/master-a/player-join-messages?version=0')
+  assert.equal(result.response.status, 200)
+  assert.equal(result.body.version, item.version)
+  assert.deepEqual(result.body.messages, ['hello'])
+
+  result = await request(`/api/bots/master-a/player-join-messages?version=${item.version}`)
+  assert.equal(result.response.status, 304)
+})
+
 test('dashboard NBT downloads require the owning controller and exact host', async () => {
   registerBot('master-a', 'node-a', 'master')
   registerBot('slave-a', 'node-a', 'slave')
