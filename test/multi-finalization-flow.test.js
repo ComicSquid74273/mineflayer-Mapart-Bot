@@ -72,6 +72,14 @@ test('dashboard queue-result mutations and reports are serialized and atomically
   assert.ok(complete.includes("String(status || '').trim().toLowerCase() === 'failed'"))
   assert.ok(complete.includes('restoreQueueFileForNbt(sourceReference)'))
   assert.ok(complete.includes('shouldForgetQueueFileAfterAcceptedResult'))
+
+  const forgetStart = source.indexOf('function forgetQueueFile(')
+  const forgetEnd = source.indexOf('\n  function resolveFinishedMapPath(', forgetStart)
+  assert.ok(forgetStart >= 0 && forgetEnd > forgetStart)
+  const forget = source.slice(forgetStart, forgetEnd)
+  assert.ok(forget.includes("String(stateFile[entryName]?.fileId || '') === wantedFileId"))
+  assert.ok(forget.includes("String(active?.fileId || '') === wantedFileId"))
+  assert.equal(forget.includes('if (!stateFile[safeName]) return'), false)
 })
 
 test('missing accepted queue failures release stale local identity and invalid NBT rejection does not reassign a const', () => {

@@ -2432,7 +2432,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         const terminal = dashboardQueueResultIsTerminal(item)
         if (!terminal || completeCoordinatorAfterDashboardResult(item)) {
           const forgetAcceptedResult = shouldForgetQueueFileAfterAcceptedResult(item, terminal)
-          if (forgetAcceptedResult) forgetQueueFile(item.fileName || item.originalName)
+          if (forgetAcceptedResult) forgetQueueFile(item.fileName || item.originalName, item.fileId)
           if (forgetAcceptedResult && state.activeQueueFile?.fileId === item.fileId) state.activeQueueFile = null
           changed = true
         } else {
@@ -2479,7 +2479,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           lastReportError: null
         }
         if (!terminal || completeCoordinatorAfterDashboardResult(acceptedItem)) {
-          if (forgetAcceptedResult) forgetQueueFile(reportItem.fileName || reportItem.originalName)
+          if (forgetAcceptedResult) forgetQueueFile(reportItem.fileName || reportItem.originalName, reportItem.fileId)
           if (forgetAcceptedResult && state.activeQueueFile?.fileId === reportItem.fileId) state.activeQueueFile = null
         } else {
           remaining.push(acceptedItem)
@@ -2678,15 +2678,33 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return localPath
   }
 
-  function forgetQueueFile(fileName) {
+  function forgetQueueFile(fileName, fileId = null) {
     const safeName = path.basename(String(fileName || '').trim())
-    if (!safeName) return
+    const wantedFileId = String(fileId || '').trim()
+    if (!safeName && !wantedFileId) return false
     const stateFile = readQueueState()
-    if (!stateFile[safeName]) return
     const active = stateFile.__activeQueueFile
-    delete stateFile[safeName]
-    if (active?.fileName === safeName) delete stateFile.__activeQueueFile
-    writeQueueState(stateFile)
+    const rememberedName = safeName && stateFile[safeName]
+      ? safeName
+      : Object.keys(stateFile).find((entryName) => (
+          !entryName.startsWith('__') &&
+          wantedFileId &&
+          String(stateFile[entryName]?.fileId || '') === wantedFileId
+        ))
+    let changed = false
+    if (rememberedName) {
+      delete stateFile[rememberedName]
+      changed = true
+    }
+    if (
+      (safeName && active?.fileName === safeName) ||
+      (wantedFileId && String(active?.fileId || '') === wantedFileId)
+    ) {
+      delete stateFile.__activeQueueFile
+      changed = true
+    }
+    if (changed) writeQueueState(stateFile)
+    return changed
   }
 
   function resolveFinishedMapPath(fileName) {
@@ -3552,7 +3570,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           if (terminal && !completeCoordinatorAfterDashboardResult(resultItem)) return false
           removeQueueResultOutboxItem(active.fileId)
           if (shouldForgetQueueFileAfterAcceptedResult(resultItem, terminal)) {
-            forgetQueueFile(active.fileName || active.originalName)
+            forgetQueueFile(active.fileName || active.originalName, active.fileId)
             state.activeQueueFile = null
           }
           return true
@@ -3579,7 +3597,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           }
           removeQueueResultOutboxItem(active.fileId)
           if (shouldForgetQueueFileAfterAcceptedResult(acceptedItem, terminal)) {
-            forgetQueueFile(active.fileName || active.originalName)
+            forgetQueueFile(active.fileName || active.originalName, active.fileId)
             state.activeQueueFile = null
           }
           return true
