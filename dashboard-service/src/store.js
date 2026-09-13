@@ -157,7 +157,7 @@ function createStore(baseDir) {
   ensureDir(nodeLogDownloadsDir)
   if (!fs.existsSync(botsFile)) writeJson(botsFile, {})
   if (!fs.existsSync(commandsFile)) writeJson(commandsFile, [])
-  if (!fs.existsSync(controlFile)) writeJson(controlFile, { pausedBots: {}, preferredHosts: {} })
+  if (!fs.existsSync(controlFile)) writeJson(controlFile, { pausedBots: {}, preferredHosts: {}, advertisingBots: {} })
   if (!fs.existsSync(uploadsFile)) writeJson(uploadsFile, [])
   if (!fs.existsSync(uploadHistoryFile)) writeJson(uploadHistoryFile, [])
   if (!fs.existsSync(eventsFile)) writeJson(eventsFile, [])
@@ -182,15 +182,17 @@ function createStore(baseDir) {
     return state && typeof state === 'object' && !Array.isArray(state) ? {
       ...state,
       pausedBots: state.pausedBots && typeof state.pausedBots === 'object' && !Array.isArray(state.pausedBots) ? state.pausedBots : {},
-      preferredHosts: state.preferredHosts && typeof state.preferredHosts === 'object' && !Array.isArray(state.preferredHosts) ? state.preferredHosts : {}
-    } : { pausedBots: {}, preferredHosts: {} }
+      preferredHosts: state.preferredHosts && typeof state.preferredHosts === 'object' && !Array.isArray(state.preferredHosts) ? state.preferredHosts : {},
+      advertisingBots: state.advertisingBots && typeof state.advertisingBots === 'object' && !Array.isArray(state.advertisingBots) ? state.advertisingBots : {}
+    } : { pausedBots: {}, preferredHosts: {}, advertisingBots: {} }
   }
 
   function saveControlState(state) {
     writeJson(controlFile, {
       ...(state && typeof state === 'object' && !Array.isArray(state) ? state : {}),
       pausedBots: state?.pausedBots && typeof state.pausedBots === 'object' && !Array.isArray(state.pausedBots) ? state.pausedBots : {},
-      preferredHosts: state?.preferredHosts && typeof state.preferredHosts === 'object' && !Array.isArray(state.preferredHosts) ? state.preferredHosts : {}
+      preferredHosts: state?.preferredHosts && typeof state.preferredHosts === 'object' && !Array.isArray(state.preferredHosts) ? state.preferredHosts : {},
+      advertisingBots: state?.advertisingBots && typeof state.advertisingBots === 'object' && !Array.isArray(state.advertisingBots) ? state.advertisingBots : {}
     })
   }
 
@@ -1143,9 +1145,13 @@ function createStore(baseDir) {
       ))
       if (existing) return existing
     }
-    const exclusiveCommandTypes = ['start', 'stop', 'get-all-maps', 'stop-mission']
-    const nextItems = exclusiveCommandTypes.includes(input.commandType) && input.targetBotName
-      ? items.filter((item) => !(item.targetBotName === input.targetBotName && exclusiveCommandTypes.includes(item.commandType) && (item.status === 'pending' || item.status === 'claimed')))
+    const advertisingCommandTypes = ['advertising-start', 'advertising-stop']
+    const existingExclusiveCommandTypes = ['start', 'stop', 'get-all-maps', 'stop-mission']
+    const exclusiveCommandGroup = advertisingCommandTypes.includes(input.commandType)
+      ? advertisingCommandTypes
+      : (existingExclusiveCommandTypes.includes(input.commandType) ? existingExclusiveCommandTypes : null)
+    const nextItems = exclusiveCommandGroup && input.targetBotName
+      ? items.filter((item) => !(item.targetBotName === input.targetBotName && exclusiveCommandGroup.includes(item.commandType) && (item.status === 'pending' || item.status === 'claimed')))
       : items
     const command = {
       commandId: crypto.randomUUID(),
@@ -1217,6 +1223,29 @@ function createStore(baseDir) {
     }
   }
 
+  function setBotAdvertisingDesired(botName, enabled) {
+    const name = String(botName || '').trim()
+    if (!name) return null
+    const state = readControlState()
+    state.advertisingBots[name] = {
+      enabled: enabled === true,
+      updatedAt: nowIso()
+    }
+    saveControlState(state)
+    return state.advertisingBots[name]
+  }
+
+  function getBotAdvertisingState(botName) {
+    const name = String(botName || '').trim()
+    if (!name) return null
+    const item = readControlState().advertisingBots[name]
+    if (!item || typeof item.enabled !== 'boolean') return null
+    return {
+      enabled: item.enabled,
+      updatedAt: item.updatedAt || null
+    }
+  }
+
   function setNodePreferredHost(hostLabel, host) {
     const label = String(hostLabel || '').trim()
     if (!label) return null
@@ -1260,6 +1289,22 @@ function createStore(baseDir) {
     })
   }
 
+  function ensureDesiredAdvertisingCommand(botName) {
+    const name = String(botName || '').trim()
+    const desired = getBotAdvertisingState(name)
+    if (!name || !desired) return null
+    const bot = getBot(name)
+    if (bot && bot.playerJoinMessagingEnabled === desired.enabled) return null
+    const commandType = desired.enabled ? 'advertising-start' : 'advertising-stop'
+    const existing = listCommands((item) => item.targetBotName === name && item.commandType === commandType && (item.status === 'pending' || item.status === 'claimed'))[0]
+    if (existing) return existing
+    return createCommand({
+      targetBotName: name,
+      commandType,
+      reason: 'dashboard-advertising-policy'
+    })
+  }
+
   function claimCommand(botName, commandId) {
     const items = listCommands()
     const index = items.findIndex((item) => item.commandId === commandId && item.targetBotName === botName)
@@ -1288,6 +1333,7 @@ function createStore(baseDir) {
 
   function listPendingCommands(botName) {
     ensureDesiredPauseCommand(botName)
+    ensureDesiredAdvertisingCommand(botName)
     return listCommands((item) => item.targetBotName === botName && (item.status === 'pending' || item.status === 'claimed'))
       .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)))
   }
@@ -2452,6 +2498,8 @@ function createStore(baseDir) {
     setBotsPauseDesired,
     isBotPauseDesired,
     getBotPauseState,
+    setBotAdvertisingDesired,
+    getBotAdvertisingState,
     setNodePreferredHost,
     getNodePreferredHost,
     claimCommand,

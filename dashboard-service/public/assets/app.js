@@ -1603,6 +1603,12 @@ function renderBotCard(bot) {
         </div>`).join('')}</div>`
     : ''
   const isDeliveryBot = String(bot.role || '').toLowerCase() === 'delivery'
+  const isPrinterController = ['single', 'master'].includes(String(bot.role || '').toLowerCase())
+  const advertisingReported = bot.playerJoinMessagingEnabled === true
+  const advertisingDesired = typeof bot.playerJoinMessagingDesired === 'boolean' ? bot.playerJoinMessagingDesired : advertisingReported
+  const advertisingStatus = advertisingDesired !== advertisingReported
+    ? (advertisingDesired ? 'starting' : 'stopping')
+    : (advertisingReported ? 'on' : 'off')
   const delivery = bot.delivery && typeof bot.delivery === 'object' ? bot.delivery : null
   const deliveryPlace = isDeliveryBot ? describeDeliveryBotPlace(bot) : null
   const deliveryMetricRows = isDeliveryBot ? `
@@ -1635,6 +1641,7 @@ function renderBotCard(bot) {
     ` : `
         <button class="accent-button" type="button" data-action="start" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}">Start Print</button>
         <button class="danger-button" type="button" data-action="stop" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}">Pause Print</button>
+        ${isPrinterController ? `<button class="${advertisingDesired ? 'danger-button' : 'accent-button'} small-button" type="button" data-action="${advertisingDesired ? 'advertising-stop' : 'advertising-start'}" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}">${advertisingDesired ? 'Stop Advertising' : 'Start Advertising'}</button>` : ''}
         <button class="ghost-button small-button" type="button" data-action="home-platform-bot" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}" title="Send /home platform">Home Platform</button>
         ${resettableCurrentNbt ? `<button class="danger-button small-button" type="button" data-action="reset-current-nbt" data-permission-needed="canOperate" data-bot-name="${escapeHtml(bot.botName)}" data-current-nbt="${escapeHtml(bot.currentNbt || '')}" title="Reset platform and restart this NBT from target 0">Reset NBT</button>` : ''}
         <button class="ghost-button small-button" type="button" data-action="disconnect-bot" data-permission-needed="canControlBots" data-bot-name="${escapeHtml(bot.botName)}" title="Disconnect from server (no auto-reconnect)">Disconnect</button>
@@ -1664,6 +1671,7 @@ function renderBotCard(bot) {
         <div class="metric">Activity<strong>${escapeHtml(bot.activeState || 'n/a')}</strong></div>
         <div class="metric">Progress<strong>${escapeHtml(progress)}</strong></div>
         <div class="metric">MC Ping<strong>${escapeHtml(pingText)}</strong></div>
+        ${isPrinterController ? `<div class="metric">Advertising<strong>${escapeHtml(advertisingStatus)}</strong></div>` : ''}
         ${isBotPaused(bot) ? `<div class="metric">Paused For<strong data-paused-started-at="${escapeHtml(pauseStartedAt)}">${escapeHtml(pausedForText)}</strong></div>` : ''}
       </div>
       <div class="bot-metrics">
@@ -4071,6 +4079,12 @@ async function onFleetAction(action, botName = null) {
   } else if (action === 'stop' && botName) {
     await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/commands/stop`, { reason: 'dashboard-ui pause' })
     pushEvent('warn', `Queued print pause for ${botName}`)
+  } else if (action === 'advertising-start' && botName) {
+    await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/advertising/start`, {})
+    pushEvent('info', `Enabled player join advertising for ${botName}`)
+  } else if (action === 'advertising-stop' && botName) {
+    await submitJson(`/api/dashboard/bots/${encodeURIComponent(botName)}/advertising/stop`, {})
+    pushEvent('warn', `Disabled player join advertising for ${botName}`)
   } else if (action === 'start-node' && botName) {
     await submitJson(`/api/dashboard/nodes/${encodeURIComponent(botName)}/commands/start`, {})
     pushEvent('info', `Queued print start for node ${botName}`)

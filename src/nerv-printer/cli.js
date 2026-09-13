@@ -1197,7 +1197,7 @@ function isDashboardEnabled(config) {
 
 function createPlayerJoinMessagingRuntime(bot, config, dashboardRuntime) {
   const settings = getPlayerJoinMessagingSettings(config)
-  if (!settings.enabled || !dashboardRuntime) return null
+  if (!settings.canEnable || !dashboardRuntime) return null
   const dashboard = getDashboardConfig(config)
   return createPlayerJoinMessenger({
     bot,
@@ -1578,6 +1578,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
   const botName = String(config?.bot?.username || bot?.username || 'MapartBot').trim() || 'MapartBot'
   const chatBuffer = []
   const maxChatBuffer = 50
+  let playerJoinMessagingRuntime = null
   const state = {
     phase: 'starting',
     statusDetail: 'starting',
@@ -2003,7 +2004,8 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       latencyMs: getBotLatencyMs(bot),
       runtimeMetrics: buildProcessRuntimeMetrics(),
       tpaTarget: getTpaTarget(config),
-      platformAnchor: toPoint3(config.anchorTranslation?.targetAnchor) || null
+      platformAnchor: toPoint3(config.anchorTranslation?.targetAnchor) || null,
+      playerJoinMessagingEnabled: playerJoinMessagingRuntime?.isEnabled?.() === true
     }
     if (state.delivery) {
       payload.delivery = state.delivery
@@ -3129,6 +3131,23 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
         await reportCommandResult(claimed.commandId, 'succeeded', claimed.reason || 'pause requested; bot will remain connected idle')
         break
       }
+      case 'advertising-start': {
+        if (!playerJoinMessagingRuntime?.setEnabled?.(true)) {
+          await reportCommandResult(claimed.commandId, 'failed', 'player join advertising is unavailable for this bot role')
+          break
+        }
+        noteActivity()
+        await reportCommandResult(claimed.commandId, 'succeeded', 'player join advertising enabled')
+        void postStatus()
+        break
+      }
+      case 'advertising-stop': {
+        playerJoinMessagingRuntime?.setEnabled?.(false)
+        noteActivity()
+        await reportCommandResult(claimed.commandId, 'succeeded', 'player join advertising disabled')
+        void postStatus()
+        break
+      }
       case 'get-all-maps': {
         if (!isDeliveryMode(config)) {
           await reportCommandResult(claimed.commandId, 'failed', 'get-all-maps is only supported by delivery bots')
@@ -3305,6 +3324,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
 
   const dashboardRuntimeApi = {
     setConnectedHost,
+    setPlayerJoinMessagingRuntime(runtime) {
+      playerJoinMessagingRuntime = runtime || null
+    },
     getPhase() {
       return state.phase
     },
@@ -5653,11 +5675,11 @@ function createDefaultConfig() {
       staleMs: 20000
     },
     playerJoinMessaging: {
-      version: 1,
+      version: 2,
       enabled: false,
       masterOnly: true,
       joinDelayMs: 1000,
-      intervalMs: 5000,
+      intervalMs: 3000,
       messageListPollMs: 30000,
       defaultMessages: [
         'Get 300 free maparts, Join Vulcan Today | https://discord.gg/yzNbSgWc7n',
@@ -24928,6 +24950,7 @@ function runSingleSession(config, sessionNumber) {
     runtimeControl?.attach()
     const dashboardRuntime = createDashboardRuntime(bot, config, sessionNumber, runtimeControl)
     const playerJoinMessagingRuntime = createPlayerJoinMessagingRuntime(bot, config, dashboardRuntime)
+    dashboardRuntime?.setPlayerJoinMessagingRuntime?.(playerJoinMessagingRuntime)
     bot.loadPlugin(pathfinder)
     installFinalWorldDeathRespawnTracking(bot, config)
     installPlatformSafety(bot, config)

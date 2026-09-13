@@ -21,8 +21,10 @@ function getPlayerJoinMessagingSettings(config) {
   const raw = config?.playerJoinMessaging || {}
   const masterOnly = raw.masterOnly !== false
   const role = String(config?.multiUser?.runtime?.role || 'single').trim().toLowerCase()
+  const canEnable = !masterOnly || role !== 'slave'
   return {
-    enabled: raw.enabled === true && (!masterOnly || role !== 'slave'),
+    enabled: raw.enabled === true && canEnable,
+    canEnable,
     masterOnly,
     joinDelayMs: Math.max(1000, Number(raw.joinDelayMs || 1000)),
     intervalMs: Math.max(1000, Number(raw.intervalMs || 3000)),
@@ -35,7 +37,7 @@ function getPlayerJoinMessagingSettings(config) {
 function createPlayerJoinMessenger(options) {
   const bot = options?.bot
   const settings = options?.settings || {}
-  if (!bot || settings.enabled !== true) return null
+  if (!bot) return null
 
   const isPrinting = typeof options.isPrinting === 'function' ? options.isPrinting : () => false
   const requestMessages = typeof options.requestMessages === 'function' ? options.requestMessages : null
@@ -47,6 +49,7 @@ function createPlayerJoinMessenger(options) {
   let messageIndex = 0
   let version = 0
   let started = false
+  let enabled = settings.enabled === true && settings.canEnable !== false
   let armed = false
   let pendingPlayer = null
   let lastSentAt = null
@@ -81,7 +84,7 @@ function createPlayerJoinMessenger(options) {
   }
 
   function arm() {
-    if (!started) return
+    if (!started || !enabled) return
     pendingPlayer = null
     baselinePlayers = currentPlayers()
     armed = true
@@ -90,7 +93,7 @@ function createPlayerJoinMessenger(options) {
 
   function schedulePendingSend() {
     clearSendTimer()
-    if (!pendingPlayer) return
+    if (!enabled || !pendingPlayer) return
     const dueAt = Math.max(
       pendingPlayer.joinedAt + Number(settings.joinDelayMs || 1000),
       lastSentAt == null ? 0 : lastSentAt + Number(settings.intervalMs || 3000)
@@ -99,7 +102,7 @@ function createPlayerJoinMessenger(options) {
       sendTimer = null
       const target = pendingPlayer
       pendingPlayer = null
-      if (!target || !armed || !isPrinting() || !playerIsOnline(target.username)) return
+      if (!target || !enabled || !armed || !isPrinting() || !playerIsOnline(target.username)) return
       const message = messages[messageIndex % messages.length]
       try {
         bot.chat(`/msg ${target.username} ${message}`)
@@ -116,7 +119,7 @@ function createPlayerJoinMessenger(options) {
     const username = String(player?.username || '').trim()
     const key = playerKey(username)
     if (!validUsername(username) || key === playerKey(bot.username)) return
-    if (!armed || !isPrinting() || baselinePlayers.has(key)) return
+    if (!enabled || !armed || !isPrinting() || baselinePlayers.has(key)) return
     baselinePlayers.add(key)
     pendingPlayer = { username, joinedAt: now() }
     schedulePendingSend()
@@ -134,6 +137,7 @@ function createPlayerJoinMessenger(options) {
 
   function onSpawn() {
     disarm()
+    if (!enabled) return
     if (rearmTimer) clearTimer(rearmTimer)
     rearmTimer = setTimer(() => {
       rearmTimer = null
@@ -143,7 +147,7 @@ function createPlayerJoinMessenger(options) {
   }
 
   async function pollMessages() {
-    if (!started || !requestMessages) return
+    if (!started || !enabled || !requestMessages) return
     try {
       const response = await requestMessages(version)
       if (response?.statusCode === 304) return
@@ -159,7 +163,7 @@ function createPlayerJoinMessenger(options) {
     } catch (error) {
       logger.warn?.(`[PLAYER-JOIN-MSG-WARN] dashboard list refresh failed: ${error?.message || error}`)
     } finally {
-      if (started && requestMessages) {
+      if (started && enabled && requestMessages) {
         pollTimer = setTimer(pollMessages, Number(settings.messageListPollMs || 30000))
         pollTimer?.unref?.()
       }
@@ -172,7 +176,7 @@ function createPlayerJoinMessenger(options) {
     bot.on('playerJoined', onPlayerJoined)
     bot.on('playerLeft', onPlayerLeft)
     bot.on('spawn', onSpawn)
-    void pollMessages()
+    if (enabled) void pollMessages()
   }
 
   function stop() {
@@ -190,6 +194,23 @@ function createPlayerJoinMessenger(options) {
   return {
     arm,
     disarm,
+    isEnabled() {
+      return enabled
+    },
+    setEnabled(nextEnabled) {
+      const next = nextEnabled === true && settings.canEnable !== false
+      if (enabled === next) return enabled
+      enabled = next
+      if (!enabled) {
+        disarm()
+        if (pollTimer) clearTimer(pollTimer)
+        pollTimer = null
+        return false
+      }
+      arm()
+      void pollMessages()
+      return true
+    },
     start,
     stop,
     updateMessages(nextMessages) {

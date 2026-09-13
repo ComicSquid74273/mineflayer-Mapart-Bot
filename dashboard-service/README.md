@@ -166,6 +166,7 @@ Example record:
 - admin-only operator panel for creating, updating, and deleting accounts
 - NBT upload form
 - separate one-column CSV uploader for player join messages; this does not enter the NBT queue
+- persistent Start Advertising / Stop Advertising controls on each printer-controller bot card; no bot restart or config edit required
 - node/shared-folder and bot-based NBT assignment form
 - authenticated log download panel for current and archived `.log` files on the dashboard host
 - shared operator audit log showing actions done by authenticated operators

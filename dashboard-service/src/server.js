@@ -601,6 +601,8 @@ function reqIsBotControlPath(pathname, method) {
     || pathname === '/api/dashboard/delivery/process/reconnect'
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/start'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/stop'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/advertising/start'))
+    || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/advertising/stop'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/verify'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/chat'))
     || Boolean(matchPath(pathname, '/api/dashboard/bots/:botName/commands/disconnect'))
@@ -1593,6 +1595,7 @@ function summarizeBot(bot, pauseState = null, options = {}) {
   const displayPhase = activeNbtRun && (spawnPhase || spawnDetail) ? 'printing' : bot.phase
   const displayStatusDetail = activeNbtRun && (spawnPhase || spawnDetail) ? 'printing' : statusDetail
   const warnings = online ? filterRecentWarnings(bot.warnings) : []
+  const advertisingState = store.getBotAdvertisingState(bot.botName)
   const recentError = online && hasRecentBotError(bot)
   const position = bot?.position && ['x', 'y', 'z'].every((axis) => Number.isFinite(Number(bot.position[axis])))
     ? { x: Number(bot.position.x), y: Number(bot.position.y), z: Number(bot.position.z) }
@@ -1616,6 +1619,9 @@ function summarizeBot(bot, pauseState = null, options = {}) {
     pauseStartedAt: pauseState?.pausedAt || null,
     pauseUpdatedAt: pauseState?.updatedAt || null,
     pauseReason: pauseState?.reason || null,
+    playerJoinMessagingEnabled: bot.playerJoinMessagingEnabled === true,
+    playerJoinMessagingDesired: advertisingState?.enabled ?? null,
+    playerJoinMessagingUpdatedAt: advertisingState?.updatedAt || null,
     location: bot.location,
     locationDetail: bot.locationDetail || bot.location || null,
     idle: bot.idle,
@@ -4320,6 +4326,32 @@ async function route(req, res) {
       ? `Cleared 6b6t host pin for node ${params.hostLabel} (default auto-select).`
       : `Pinned node ${params.hostLabel} to 6b6t host ${saved}.`, { hostLabel: params.hostLabel, host: saved || 'default' })
     return sendJson(res, 200, { hostLabel: params.hostLabel, preferredHost: saved || null })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/advertising/start')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const bot = store.getBot(params.botName)
+    if (!bot) return notFound(res)
+    if (!isPrinterControllerBot(bot)) return badRequest(res, 'advertising is only supported by printer controller bots')
+    const advertising = store.setBotAdvertisingDesired(params.botName, true)
+    const command = store.createCommand({ targetBotName: params.botName, commandType: 'advertising-start', requestedBy: actor.username })
+    invalidateSnapshotCache()
+    auditOperatorAction(actor, 'advertising-start', `Enabled player join advertising for ${params.botName}.`, { botName: params.botName })
+    return sendJson(res, 201, { command, advertising })
+  }
+
+  params = matchPath(pathname, '/api/dashboard/bots/:botName/advertising/stop')
+  if (params) {
+    if (req.method !== 'POST') return methodNotAllowed(res)
+    const bot = store.getBot(params.botName)
+    if (!bot) return notFound(res)
+    if (!isPrinterControllerBot(bot)) return badRequest(res, 'advertising is only supported by printer controller bots')
+    const advertising = store.setBotAdvertisingDesired(params.botName, false)
+    const command = store.createCommand({ targetBotName: params.botName, commandType: 'advertising-stop', requestedBy: actor.username })
+    invalidateSnapshotCache()
+    auditOperatorAction(actor, 'advertising-stop', `Disabled player join advertising for ${params.botName}.`, { botName: params.botName }, 'warn')
+    return sendJson(res, 201, { command, advertising })
   }
 
   params = matchPath(pathname, '/api/dashboard/bots/:botName/commands/start')

@@ -82,6 +82,32 @@ test('bots receive player join messages only when the version changes', async ()
   assert.equal(result.response.status, 304)
 })
 
+test('dashboard advertising controls persist desired state and queue live bot commands', async () => {
+  registerBot('advertising-bot', 'node-advertising', 'single')
+  const operator = store.listOperatorCredentials().find((item) => item.role === 'admin' || item.role === 'operator')
+  const login = await jsonRequest('/api/dashboard/auth/login', { username: operator.username, password: operator.password })
+  const cookie = String(login.response.headers.get('set-cookie') || '').split(';')[0]
+  assert.equal(login.response.status, 200)
+
+  let result = await request('/api/dashboard/bots/advertising-bot/advertising/start', {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: '{}'
+  })
+  assert.equal(result.response.status, 201)
+  assert.equal(store.getBotAdvertisingState('advertising-bot').enabled, true)
+  assert.equal(result.body.command.commandType, 'advertising-start')
+
+  result = await request('/api/dashboard/bots/advertising-bot/advertising/stop', {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: '{}'
+  })
+  assert.equal(result.response.status, 201)
+  assert.equal(store.getBotAdvertisingState('advertising-bot').enabled, false)
+  assert.equal(result.body.command.commandType, 'advertising-stop')
+})
+
 test('dashboard NBT downloads require the owning controller and exact host', async () => {
   registerBot('master-a', 'node-a', 'master')
   registerBot('slave-a', 'node-a', 'slave')

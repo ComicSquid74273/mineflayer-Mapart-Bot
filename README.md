@@ -689,6 +689,8 @@ npm run test:multi-user-plan
 
 Optional direct messages for newly joined players. Disabled by default. The bot sends only during the exact dashboard `printing` phase, ignores players already online when the runtime becomes ready, coalesces simultaneous joins to the newest player, and uses `/msg <username> <message>`.
 
+The dashboard bot card can start or stop advertising live. The desired state is persisted and reapplied after reconnects; stopping advertising cancels pending sends and message-list polling immediately.
+
 | Key | Current | Options / Meaning | Tuning hint |
 |---|---:|---|---|
 | `playerJoinMessaging.enabled` | `false` | Enables join messaging and dashboard message-list polling. | Enable only on selected bot configs. Disabled bots make no message-list requests. |

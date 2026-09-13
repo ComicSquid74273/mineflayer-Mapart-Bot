@@ -173,3 +173,51 @@ test('messages advance in round-robin order after successful sends', async () =>
   }
   messenger.stop()
 })
+
+test('dashboard control enables and disables advertising without polling while stopped', async () => {
+  const clock = createClock()
+  const bot = createBot()
+  const requestedVersions = []
+  const messenger = createPlayerJoinMessenger({
+    bot,
+    settings: {
+      enabled: false,
+      canEnable: true,
+      joinDelayMs: 1000,
+      intervalMs: 3000,
+      messageListPollMs: 5000,
+      worldSettleMs: 2000,
+      defaultMessages: ['default']
+    },
+    isPrinting: () => true,
+    requestMessages: async (version) => {
+      requestedVersions.push(version)
+      return { statusCode: 200, body: { version: 1, messages: ['dashboard'] } }
+    },
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer
+  })
+  messenger.start()
+  messenger.arm()
+  await Promise.resolve()
+  assert.equal(messenger.isEnabled(), false)
+  assert.deepEqual(requestedVersions, [])
+
+  assert.equal(messenger.setEnabled(true), true)
+  await Promise.resolve()
+  await Promise.resolve()
+  bot.players.Player1 = { username: 'Player1' }
+  bot.emit('playerJoined', bot.players.Player1)
+  await clock.advance(1000)
+  assert.deepEqual(bot.sent, ['/msg Player1 dashboard'])
+  assert.deepEqual(requestedVersions, [0])
+
+  assert.equal(messenger.setEnabled(false), false)
+  bot.players.Player2 = { username: 'Player2' }
+  bot.emit('playerJoined', bot.players.Player2)
+  await clock.advance(6000)
+  assert.deepEqual(bot.sent, ['/msg Player1 dashboard'])
+  assert.deepEqual(requestedVersions, [0])
+  messenger.stop()
+})
