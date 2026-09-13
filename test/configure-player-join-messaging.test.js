@@ -12,7 +12,8 @@ test('deployment helper migrates the old default once and preserves later custom
     fs.writeFileSync(configPath, JSON.stringify({ bot: { username: 'ExampleBot' }, playerJoinMessaging: { intervalMs: 10000 } }))
     const result = configurePlayerJoinMessaging(configPath, true)
     assert.equal(result.enabled, true)
-    assert.equal(result.intervalMs, 5000)
+    assert.equal(result.version, 2)
+    assert.equal(result.intervalMs, 3000)
 
     const custom = JSON.parse(fs.readFileSync(configPath, 'utf8'))
     custom.playerJoinMessaging.intervalMs = 15000

@@ -22,16 +22,20 @@ test('CSV parser preserves internal commas and removes one optional trailing del
   assert.throws(() => parsePlayerJoinMessagesCsv('messages.csv', 'bad\u0000message'), /control/)
 })
 
-test('store increments message-list version only when content changes', () => {
+test('each CSV upload replaces the prior message list and increments its version', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'player-join-messages-'))
   try {
     const store = createStore(dir)
     assert.deepEqual(store.getPlayerJoinMessages(), { version: 0, fileName: null, messages: [], updatedAt: null })
     assert.equal(store.updatePlayerJoinMessages({ fileName: 'a.csv', messages: ['one'] }).version, 1)
-    assert.equal(store.updatePlayerJoinMessages({ fileName: 'renamed.csv', messages: ['one'] }).version, 1)
+    const replacement = store.updatePlayerJoinMessages({ fileName: 'renamed.csv', messages: ['one'] })
+    assert.equal(replacement.version, 2)
+    assert.equal(replacement.fileName, 'renamed.csv')
     const changed = store.updatePlayerJoinMessages({ fileName: 'b.csv', messages: ['two'] })
-    assert.equal(changed.version, 2)
+    assert.equal(changed.version, 3)
+    assert.equal(changed.fileName, 'b.csv')
     assert.deepEqual(changed.messages, ['two'])
+    assert.equal(fs.readdirSync(dir, { recursive: true }).some((fileName) => String(fileName).toLowerCase().endsWith('.csv')), false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

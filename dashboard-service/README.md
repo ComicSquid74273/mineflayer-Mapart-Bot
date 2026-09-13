@@ -187,7 +187,7 @@ This keeps the first version dependency-free. A later version can switch to mult
 
 The dashboard accepts up to 5,000 entries in one ZIP upload and stores up to 10,000 NBT queue records by default. `DASHBOARD_MAX_ZIP_ENTRIES` and `DASHBOARD_MAX_TOTAL_NBTS` can raise these capacities, but values below 5,000 and 10,000 respectively are clamped to those minimums.
 
-Player join message uploads accept a one-column `.csv`. Internal commas are preserved; one optional trailing comma is removed. Enabled bots poll by version and receive no message-list body when their current version matches. No uploaded CSV means enabled bots keep their configured default messages.
+Player join message uploads accept a one-column `.csv`. Every valid upload atomically replaces the previous filename and full message list, increments the version, and stores no CSV file. Internal commas are preserved; one optional trailing comma is removed. Enabled bots poll by version and receive no message-list body when their current version matches. No uploaded CSV means enabled bots keep their configured default messages.
 
 ## Node Assignment
 

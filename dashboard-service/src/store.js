@@ -2266,7 +2266,6 @@ function createStore(baseDir) {
   function updatePlayerJoinMessages(input) {
     const current = getPlayerJoinMessages()
     const messages = Array.isArray(input?.messages) ? input.messages.map((message) => String(message || '').trim()).filter(Boolean) : []
-    if (JSON.stringify(messages) === JSON.stringify(current.messages)) return current
     const next = {
       version: current.version + 1,
       fileName: String(input?.fileName || 'messages.csv').trim() || 'messages.csv',

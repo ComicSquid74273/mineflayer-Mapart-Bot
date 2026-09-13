@@ -3438,7 +3438,7 @@ async function onPlayerJoinMessagesUpload(event) {
     renderPlayerJoinMessages()
     elements.playerJoinMessagesForm.reset()
     if (elements.playerJoinMessagesStatus) {
-      elements.playerJoinMessagesStatus.textContent = `Uploaded ${result.item.messages.length} message(s). Enabled bots receive version ${result.item.version} on their next poll.`
+      elements.playerJoinMessagesStatus.textContent = `Replaced the previous list with ${result.item.messages.length} message(s). Enabled bots receive version ${result.item.version} on their next poll.`
     }
     pushEvent('info', `Uploaded ${result.item.messages.length} player join message(s).`)
   } finally {

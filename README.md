@@ -694,9 +694,9 @@ Optional direct messages for newly joined players. Disabled by default. The bot 
 | `playerJoinMessaging.enabled` | `false` | Enables join messaging and dashboard message-list polling. | Enable only on selected bot configs. Disabled bots make no message-list requests. |
 | `playerJoinMessaging.masterOnly` | `true` | Prevents multibot slave accounts from sending duplicate messages. | Keep `true` for multi-account nodes. |
 | `playerJoinMessaging.joinDelayMs` | `1000` | Wait after the newest join before messaging. | Minimum is one second. |
-| `playerJoinMessaging.intervalMs` | `5000` | Minimum time between messages. | Joins during the interval replace the pending target; only the newest receives a message. |
+| `playerJoinMessaging.intervalMs` | `3000` | Minimum time between messages. | Joins during the interval replace the pending target; only the newest receives a message. Successful sends rotate through the list in order. |
 | `playerJoinMessaging.messageListPollMs` | `30000` | Dashboard list-version check interval. | The dashboard returns the list only when its version changes. |
-| `playerJoinMessaging.defaultMessages` | two messages | Used until a custom CSV exists. | Upload a one-column CSV in the dashboard’s separate Player Join Messages panel. |
+| `playerJoinMessaging.defaultMessages` | two messages | Used until a custom CSV exists. | Each one-column CSV upload fully replaces the previous list; no CSV file is retained. |
 
 ### 3.7 `dashboard`
 

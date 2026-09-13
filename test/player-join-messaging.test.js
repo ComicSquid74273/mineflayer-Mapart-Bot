@@ -46,7 +46,7 @@ function createBot(username = 'VulcanB001') {
 test('disabled and slave configs do not create dashboard polling work', () => {
   const disabled = getPlayerJoinMessagingSettings({ playerJoinMessaging: { enabled: false } })
   assert.equal(disabled.enabled, false)
-  assert.equal(disabled.intervalMs, 5000)
+  assert.equal(disabled.intervalMs, 3000)
   assert.equal(getPlayerJoinMessagingSettings({
     playerJoinMessaging: { enabled: true, masterOnly: true },
     multiUser: { runtime: { role: 'slave' } }
@@ -141,5 +141,35 @@ test('dashboard messages replace defaults only on a newer version', async () => 
   assert.deepEqual(bot.sent, ['/msg NewPlayer dashboard'])
   await clock.advance(5000)
   assert.deepEqual(requestedVersions, [0, 1])
+  messenger.stop()
+})
+
+test('messages advance in round-robin order after successful sends', async () => {
+  const clock = createClock()
+  const bot = createBot()
+  const messenger = createPlayerJoinMessenger({
+    bot,
+    settings: {
+      enabled: true,
+      joinDelayMs: 1000,
+      intervalMs: 3000,
+      messageListPollMs: 30000,
+      worldSettleMs: 2000,
+      defaultMessages: ['first', 'second', 'third']
+    },
+    isPrinting: () => true,
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer
+  })
+  messenger.start()
+  messenger.arm()
+
+  for (const [username, expected] of [['Player1', 'first'], ['Player2', 'second'], ['Player3', 'third'], ['Player4', 'first']]) {
+    bot.players[username] = { username }
+    bot.emit('playerJoined', bot.players[username])
+    await clock.advance(3000)
+    assert.equal(bot.sent.at(-1), `/msg ${username} ${expected}`)
+  }
   messenger.stop()
 })

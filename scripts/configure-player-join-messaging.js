@@ -10,11 +10,11 @@ function configurePlayerJoinMessaging(configPath, enabled) {
     : {}
   const currentVersion = Number(current.version || 0)
   config.playerJoinMessaging = {
-    version: 1,
+    version: 2,
     enabled: enabled === true,
     masterOnly: current.masterOnly !== false,
     joinDelayMs: Number(current.joinDelayMs || 1000),
-    intervalMs: currentVersion >= 1 ? Number(current.intervalMs || 5000) : 5000,
+    intervalMs: currentVersion >= 2 ? Number(current.intervalMs || 3000) : 3000,
     messageListPollMs: Number(current.messageListPollMs || 30000),
     defaultMessages: Array.isArray(current.defaultMessages) && current.defaultMessages.length
       ? current.defaultMessages
