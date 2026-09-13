@@ -2383,6 +2383,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     return !fs.existsSync(resolveNodeNbtPath(fileName))
   }
 
+  function shouldForgetQueueFileAfterAcceptedResult(item = {}, terminal = false) {
+    if (terminal) return true
+    return String(item.deliveryStatus || '').trim().toLowerCase() === 'failed' && queueResultSourceIsRetired(item)
+  }
+
   function completeCoordinatorAfterDashboardResult(item = {}) {
     const multiJobId = String(item.multiJobId || '').trim()
     if (!multiJobId) return true
@@ -2426,8 +2431,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       if (item.dashboardReportedAt) {
         const terminal = dashboardQueueResultIsTerminal(item)
         if (!terminal || completeCoordinatorAfterDashboardResult(item)) {
-          if (terminal) forgetQueueFile(item.fileName || item.originalName)
-          if (terminal && state.activeQueueFile?.fileId === item.fileId) state.activeQueueFile = null
+          const forgetAcceptedResult = shouldForgetQueueFileAfterAcceptedResult(item, terminal)
+          if (forgetAcceptedResult) forgetQueueFile(item.fileName || item.originalName)
+          if (forgetAcceptedResult && state.activeQueueFile?.fileId === item.fileId) state.activeQueueFile = null
           changed = true
         } else {
           remaining.push(item)
@@ -2463,6 +2469,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           reportItem
         )
         const terminal = dashboardQueueResultIsTerminal(reportItem, dashboardItem)
+        const forgetAcceptedResult = shouldForgetQueueFileAfterAcceptedResult(reportItem, terminal)
         reportedAny = true
         changed = true
         const acceptedItem = {
@@ -2472,8 +2479,8 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           lastReportError: null
         }
         if (!terminal || completeCoordinatorAfterDashboardResult(acceptedItem)) {
-          if (terminal) forgetQueueFile(reportItem.fileName || reportItem.originalName)
-          if (terminal && state.activeQueueFile?.fileId === reportItem.fileId) state.activeQueueFile = null
+          if (forgetAcceptedResult) forgetQueueFile(reportItem.fileName || reportItem.originalName)
+          if (forgetAcceptedResult && state.activeQueueFile?.fileId === reportItem.fileId) state.activeQueueFile = null
         } else {
           remaining.push(acceptedItem)
         }
@@ -3517,10 +3524,16 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
     async completeActiveQueueFile(status = 'placed', reason = null, options = {}) {
       if (!ownsDashboardJobs()) return false
       return serializeQueueResultOutbox(async () => {
-        const active = await recoverActiveQueueFileForNbt(
-          options.sourcePath || config.__dashboardQueueNbtPath,
+        const sourceReference = options.sourcePath || config.__dashboardQueueNbtPath
+        let active = await recoverActiveQueueFileForNbt(
+          sourceReference,
           options.sourceSha256
         )
+        if (!active?.fileId && String(status || '').trim().toLowerCase() === 'failed') {
+          active = sourceReference
+            ? restoreQueueFileForNbt(sourceReference)
+            : restoreActiveQueueFile()
+        }
         if (!active?.fileId) return false
         const staged = readQueueResultOutbox()
           .find((item) => String(item.fileId || '') === String(active.fileId))
@@ -3538,7 +3551,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
           const terminal = dashboardQueueResultIsTerminal(staged)
           if (terminal && !completeCoordinatorAfterDashboardResult(resultItem)) return false
           removeQueueResultOutboxItem(active.fileId)
-          if (terminal) {
+          if (shouldForgetQueueFileAfterAcceptedResult(resultItem, terminal)) {
             forgetQueueFile(active.fileName || active.originalName)
             state.activeQueueFile = null
           }
@@ -3565,7 +3578,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
             return false
           }
           removeQueueResultOutboxItem(active.fileId)
-          if (terminal) {
+          if (shouldForgetQueueFileAfterAcceptedResult(acceptedItem, terminal)) {
             forgetQueueFile(active.fileName || active.originalName)
             state.activeQueueFile = null
           }
@@ -3955,7 +3968,6 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
         if (ownsDashboardJobs()) {
           await dashboardRuntime?.completeActiveQueueFile?.('failed', text)
         }
-        claimedQueueNbt = null
         dashboardRuntime?.setCurrentNbt(null)
         dashboardRuntime?.setLastError(text)
         dashboardRuntime?.setPhase('idle', 'nbt-unprintable')
@@ -27442,4 +27454,3 @@ start().catch((err) => {
   console.error('[FATAL]', err?.message || err)
   process.exitCode = 1
 })
-

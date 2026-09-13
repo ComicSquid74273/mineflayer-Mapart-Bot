@@ -69,6 +69,26 @@ test('dashboard queue-result mutations and reports are serialized and atomically
   assert.ok(complete.includes('return serializeQueueResultOutbox(async () => {'))
   assert.ok(complete.includes('enqueueQueueResultUnlocked('))
   assert.ok(complete.includes('recoverActiveQueueFileForNbt'))
+  assert.ok(complete.includes("String(status || '').trim().toLowerCase() === 'failed'"))
+  assert.ok(complete.includes('restoreQueueFileForNbt(sourceReference)'))
+  assert.ok(complete.includes('shouldForgetQueueFileAfterAcceptedResult'))
+})
+
+test('missing accepted queue failures release stale local identity and invalid NBT rejection does not reassign a const', () => {
+  const helperStart = source.indexOf('function shouldForgetQueueFileAfterAcceptedResult(')
+  const finalizerStart = source.indexOf('function completeCoordinatorAfterDashboardResult(', helperStart)
+  assert.ok(helperStart >= 0 && finalizerStart > helperStart)
+  const helper = source.slice(helperStart, finalizerStart)
+  assert.ok(helper.includes("String(item.deliveryStatus || '').trim().toLowerCase() === 'failed'"))
+  assert.ok(helper.includes('queueResultSourceIsRetired(item)'))
+
+  const managedStart = source.indexOf('async function runDashboardManagedPrintLoop(')
+  const managedEnd = source.indexOf('\nasync function runDeliveryManagedLoop(', managedStart)
+  const managed = source.slice(managedStart, managedEnd)
+  const unprintableStart = managed.indexOf('if (isUnrecoverableTargetError)')
+  const unprintableEnd = managed.indexOf('if (isMultiCoordinatorError(err))', unprintableStart)
+  assert.ok(unprintableStart >= 0 && unprintableEnd > unprintableStart)
+  assert.doesNotMatch(managed.slice(unprintableStart, unprintableEnd), /claimedQueueNbt\s*=/)
 })
 
 test('multi finalization recovers exact dashboard identity instead of selecting a prefetched NBT', () => {
