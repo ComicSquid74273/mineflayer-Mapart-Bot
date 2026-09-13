@@ -1857,25 +1857,39 @@ function createStore(baseDir) {
     return items[match.index]
   }
 
-  function isResumableQueueRuntimeFailure(failedReason = '') {
+ function isResumableQueueRuntimeFailure(failedReason = '') {
+   const text = String(failedReason || '').toLowerCase()
+   if (!text) return false
+   return (
+     text.includes('nerv-workload-checkpoint-timeout') ||
+     text.includes('checkpoint-timeout') ||
+     text.includes('goal was changed') ||
+     text.includes('goalchanged') ||
+     text.includes('path was interrupted') ||
+     text.includes('direct-machine-route-hitbox-obstructed') ||
+     text.includes('platform-hold') ||
+     text.includes('platform-stall') ||
+     text.includes('latency') ||
+     text.includes('timed out') ||
+     text.includes('timeout')
+   )
+ }
+
+  function isPermanentQueueFileFailure(failedReason = '') {
     const text = String(failedReason || '').toLowerCase()
     if (!text) return false
     return (
-      text.includes('nerv-workload-checkpoint-timeout') ||
-      text.includes('checkpoint-timeout') ||
-      text.includes('goal was changed') ||
-      text.includes('goalchanged') ||
-      text.includes('path was interrupted') ||
-      text.includes('direct-machine-route-hitbox-obstructed') ||
-      text.includes('platform-hold') ||
-      text.includes('platform-stall') ||
-      text.includes('latency') ||
-      text.includes('timed out') ||
-      text.includes('timeout')
+      text.includes('multi_empty_targets') ||
+      text.includes('no printable carpet targets') ||
+      text.includes('contains no carpet blocks') ||
+      text.includes('nbt_target_out_of_bounds') ||
+      text.includes('nbt_invalid_carpet_position') ||
+      text.includes('multi_target_out_of_bounds') ||
+      text.includes('multi_invalid_target')
     )
   }
 
-  function completeQueueFileDelivery(hostLabel, botName, fileId, deliveryStatus, failedReason = null, details = null) {
+ function completeQueueFileDelivery(hostLabel, botName, fileId, deliveryStatus, failedReason = null, details = null) {
     const normalizedHost = String(hostLabel || '').trim()
     const normalizedBot = String(botName || '').trim()
     if (!normalizedBot || isSlaveBot(normalizedBot)) return null
@@ -1943,10 +1957,13 @@ function createStore(baseDir) {
       return items[index]
     }
 
-    if (status === 'failed') {
-      const attemptCount = Math.max(0, toNumber(current.attemptCount, 0)) + 1
+   if (status === 'failed') {
+      const isPermanent = isPermanentQueueFileFailure(failedReason)
+      const attemptCount = isPermanent
+        ? Math.max(1, toNumber(current.maxAttempts, 3))
+        : Math.max(0, toNumber(current.attemptCount, 0)) + 1
       const maxAttempts = Math.max(1, toNumber(current.maxAttempts, 3))
-      const finalFailure = attemptCount >= maxAttempts
+      const finalFailure = isPermanent || attemptCount >= maxAttempts
       const history = Array.isArray(current.failureHistory) ? current.failureHistory.slice(-19) : []
       history.push({
         botName: normalizedBot || current.claimedByBotName || null,

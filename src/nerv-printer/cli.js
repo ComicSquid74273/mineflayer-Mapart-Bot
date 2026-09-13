@@ -3933,6 +3933,35 @@ async function runDashboardManagedPrintLoop(bot, config, runtimeControl, dashboa
         continue
       }
       const text = String(err?.message || err)
+      const isUnrecoverableTargetError = (
+        err?.code === 'MULTI_EMPTY_TARGETS' ||
+        err?.code === 'MULTI_TARGET_OUT_OF_BOUNDS' ||
+        err?.code === 'MULTI_INVALID_TARGET' ||
+        err?.code === 'MULTI_SOURCE_MISSING' ||
+        err?.code === 'MULTI_SOURCE_HASH_MISMATCH' ||
+        err?.code === 'NBT_TARGET_OUT_OF_BOUNDS' ||
+        err?.code === 'NBT_INVALID_CARPET_POSITION' ||
+        text.includes('no printable carpet targets') ||
+        text.includes('contains no carpet blocks')
+      )
+      if (isUnrecoverableTargetError) {
+        console.warn(`[NBT-UNPRINTABLE] ${text}`)
+        const badNbtPath = (claimedQueueNbt && fs.existsSync(claimedQueueNbt))
+          ? claimedQueueNbt
+          : (multiRole === 'slave' ? null : getNextNbtFile(config))
+        if (badNbtPath && fs.existsSync(badNbtPath)) {
+          retireDashboardQueueNbt(badNbtPath, config)
+        }
+        if (ownsDashboardJobs()) {
+          await dashboardRuntime?.completeActiveQueueFile?.('failed', text)
+        }
+        claimedQueueNbt = null
+        dashboardRuntime?.setCurrentNbt(null)
+        dashboardRuntime?.setLastError(text)
+        dashboardRuntime?.setPhase('idle', 'nbt-unprintable')
+        await delay(1000)
+        continue
+      }
       if (isMultiCoordinatorError(err)) {
         console.warn(`[MULTI-HOLD] ${text}`)
         dashboardRuntime?.setLastError?.(text)
@@ -6327,6 +6356,9 @@ async function loadTargets(config) {
       }
       const data = await parseNbtFile(nextNbt)
       const targets = targetsFromNbt(data, config)
+      if (!Array.isArray(targets) || targets.length === 0) {
+        throw new MultiCoordinatorError('MULTI_EMPTY_TARGETS', `the master produced no printable carpet targets for ${path.basename(nextNbt)}`)
+      }
       return {
         sourceType: 'nbt',
         sourcePath: nextNbt,
@@ -27410,6 +27442,4 @@ start().catch((err) => {
   console.error('[FATAL]', err?.message || err)
   process.exitCode = 1
 })
-
-
 

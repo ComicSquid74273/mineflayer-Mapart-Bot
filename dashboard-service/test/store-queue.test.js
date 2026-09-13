@@ -151,6 +151,20 @@ test('failed queue item at maxAttempts becomes failed-final and is not claimable
   assert.equal(claimed, null)
 })
 
+test('permanent unprintable NBT failures become failed-final immediately on first attempt', () => {
+  const { store } = makeStore()
+  const file = createQueueFile(store, 'no-carpets.nbt', { maxAttempts: 3 })
+
+  store.claimNextQueueFile('node-a', 'bot-a')
+  const failed = store.completeQueueFileDelivery('node-a', 'bot-a', file.fileId, 'failed', 'MULTI_EMPTY_TARGETS: the master produced no printable carpet targets')
+  assert.equal(failed.queueStatus, 'failed-final')
+  assert.equal(failed.deliveryStatus, 'failed')
+  assert.equal(failed.attemptCount, 3)
+
+  const claimed = store.claimNextQueueFile('node-a', 'bot-b')
+  assert.equal(claimed, null)
+})
+
 test('individual retry resets failed-final to pending', () => {
   const { store } = makeStore()
   const file = createQueueFile(store, 'retry-one.nbt', { maxAttempts: 1 })
