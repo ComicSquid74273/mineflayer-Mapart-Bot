@@ -5653,10 +5653,11 @@ function createDefaultConfig() {
       staleMs: 20000
     },
     playerJoinMessaging: {
+      version: 1,
       enabled: false,
       masterOnly: true,
       joinDelayMs: 1000,
-      intervalMs: 10000,
+      intervalMs: 5000,
       messageListPollMs: 30000,
       defaultMessages: [
         'Get 300 free maparts, Join Vulcan Today | https://discord.gg/yzNbSgWc7n',

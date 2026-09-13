@@ -44,7 +44,9 @@ function createBot(username = 'VulcanB001') {
 }
 
 test('disabled and slave configs do not create dashboard polling work', () => {
-  assert.equal(getPlayerJoinMessagingSettings({ playerJoinMessaging: { enabled: false } }).enabled, false)
+  const disabled = getPlayerJoinMessagingSettings({ playerJoinMessaging: { enabled: false } })
+  assert.equal(disabled.enabled, false)
+  assert.equal(disabled.intervalMs, 5000)
   assert.equal(getPlayerJoinMessagingSettings({
     playerJoinMessaging: { enabled: true, masterOnly: true },
     multiUser: { runtime: { role: 'slave' } }
@@ -60,7 +62,7 @@ test('latest joined player receives one delayed message only while printing', as
     settings: {
       enabled: true,
       joinDelayMs: 1000,
-      intervalMs: 10000,
+      intervalMs: 5000,
       messageListPollMs: 30000,
       worldSettleMs: 2000,
       defaultMessages: ['first', 'second']
@@ -91,7 +93,7 @@ test('latest joined player receives one delayed message only while printing', as
 
   bot.players.Player21 = { username: 'Player21' }
   bot.emit('playerJoined', bot.players.Player21)
-  await clock.advance(9999)
+  await clock.advance(4999)
   assert.equal(bot.sent.length, 1)
   await clock.advance(1)
   assert.deepEqual(bot.sent, ['/msg Player20 first', '/msg Player21 second'])

@@ -25,7 +25,7 @@ function getPlayerJoinMessagingSettings(config) {
     enabled: raw.enabled === true && (!masterOnly || role !== 'slave'),
     masterOnly,
     joinDelayMs: Math.max(1000, Number(raw.joinDelayMs || 1000)),
-    intervalMs: Math.max(1000, Number(raw.intervalMs || 10000)),
+    intervalMs: Math.max(1000, Number(raw.intervalMs || 5000)),
     messageListPollMs: Math.max(5000, Number(raw.messageListPollMs || 30000)),
     worldSettleMs: Math.max(1000, Number(raw.worldSettleMs || 2000)),
     defaultMessages: normalizeMessages(raw.defaultMessages)
@@ -93,7 +93,7 @@ function createPlayerJoinMessenger(options) {
     if (!pendingPlayer) return
     const dueAt = Math.max(
       pendingPlayer.joinedAt + Number(settings.joinDelayMs || 1000),
-      lastSentAt == null ? 0 : lastSentAt + Number(settings.intervalMs || 10000)
+      lastSentAt == null ? 0 : lastSentAt + Number(settings.intervalMs || 5000)
     )
     sendTimer = setTimer(() => {
       sendTimer = null
