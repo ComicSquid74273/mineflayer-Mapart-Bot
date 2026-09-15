@@ -1645,7 +1645,10 @@ function summarizeBot(bot, pauseState = null, options = {}) {
     verificationCode: bot.verificationCode || null,
     verificationUrl: bot.verificationUrl || null,
     tokenWaiting: bot.tokenWaiting === true,
-    ...(options.includeBotIp === true ? { botIp: bot.botIp || null } : {}),
+    ...(options.includeBotIp === true ? {
+      botIp: bot.botIp || null,
+      proxyId: String(bot.proxyId || '').trim() || null
+    } : {}),
     ...(options.includeBotPosition === true && String(bot.location || '').toLowerCase() !== 'platform' ? { position } : {}),
     currentNbtStartedAt: bot.currentNbtStartedAt || null,
     latencyMs: typeof bot.latencyMs === 'number' ? bot.latencyMs : null,
@@ -3766,8 +3769,9 @@ async function route(req, res) {
     const rawIp = req.socket?.remoteAddress || req.connection?.remoteAddress || null
     const socketIp = rawIp ? rawIp.replace(/^::ffff:/, '') : null
     const reportedProxyIp = typeof body.proxyIp === 'string' && body.proxyIp.trim() ? body.proxyIp.trim() : null
-    const { inventory: ignoredInventory, proxyIp: ignoredProxyIp, ...statusBody } = body || {}
-    const bot = store.upsertBotStatus({ ...statusBody, botIp: reportedProxyIp || socketIp })
+    const reportedProxyId = typeof body.proxyId === 'string' && body.proxyId.trim() ? body.proxyId.trim().slice(0, 64) : null
+    const { inventory: ignoredInventory, proxyIp: ignoredProxyIp, proxyId: ignoredProxyId, ...statusBody } = body || {}
+    const bot = store.upsertBotStatus({ ...statusBody, botIp: reportedProxyIp || socketIp, proxyId: reportedProxyId })
     queueTeleportWhitelistSyncForHost(bot.hostLabel || body.hostLabel, 'node-status')
     return sendJson(res, 200, { ok: true, nextPollMs: 3000, bot: summarizeBot(bot, store.getBotPauseState(bot.botName)) })
   }

@@ -15,3 +15,14 @@ test('automatic host selection displays the active hostname instead of auto', ()
   assert.match(renderer, /connectedHost \? `Connected: \$\{connectedHost\}` : 'Host: Automatic'/)
   assert.doesNotMatch(renderer, /\$\{connectedHost\} \(auto\)/)
 })
+
+test('bot cards display proxy ID with the same permission gate as proxy IP', () => {
+  const rendererStart = source.indexOf('function renderBotCard(bot) {')
+  const rendererEnd = source.indexOf('\nfunction renderBots()', rendererStart)
+  assert.ok(rendererStart >= 0 && rendererEnd > rendererStart)
+
+  const renderer = source.slice(rendererStart, rendererEnd)
+  assert.match(renderer, /const proxyIdText = canViewBotIp && bot\.proxyId/)
+  assert.match(renderer, /Proxy ID: \$\{proxyIdText\}/)
+  assert.match(renderer, /\$\{verifyProxyIdField\}/)
+})

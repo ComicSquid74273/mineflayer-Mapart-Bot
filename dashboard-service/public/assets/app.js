@@ -1554,6 +1554,8 @@ function renderBotCard(bot) {
   const showVerify = bot.tokenWaiting && !state.dismissedVerify.has(bot.botName)
   const canViewBotIp = hasPermission('canManageOperators')
   const botIpText = canViewBotIp && bot.botIp ? String(bot.botIp) : ''
+  const proxyIdText = canViewBotIp && bot.proxyId ? String(bot.proxyId) : ''
+  const proxyMetaText = [botIpText, proxyIdText ? `Proxy ID: ${proxyIdText}` : ''].filter(Boolean).join(' | ')
   const showCoordinates = isAdmin()
     && String(bot.location || '').toLowerCase() !== 'platform'
     && bot.position
@@ -1563,6 +1565,9 @@ function renderBotCard(bot) {
     : ''
   const verifyIpField = botIpText
     ? `<span class="verify-field">IP: <strong>${escapeHtml(botIpText)}</strong></span>`
+    : ''
+  const verifyProxyIdField = proxyIdText
+    ? `<span class="verify-field">Proxy ID: <strong>${escapeHtml(proxyIdText)}</strong></span>`
     : ''
   const verifyUrlText = bot.verificationUrl && /^https?:\/\//i.test(bot.verificationUrl) ? String(bot.verificationUrl) : ''
   const verifyUrlField = verifyUrlText
@@ -1580,6 +1585,7 @@ function renderBotCard(bot) {
           ${verifyUrlField}
           ${verifyCodeField}
           ${verifyIpField}
+          ${verifyProxyIdField}
         </div>
       </div>
       <div class="verify-actions">
@@ -1655,7 +1661,7 @@ function renderBotCard(bot) {
           <span class="health-dot ${escapeHtml(healthClass)}" title="${escapeHtml(healthClass === 'health-green' ? 'Healthy' : healthClass === 'health-yellow' ? 'Warning' : 'Issue')}"></span>
           <div>
             <h3 class="bot-name">${escapeHtml(bot.botName)}</h3>
-            <p class="bot-meta">${escapeHtml(bot.role || 'single')} | ${escapeHtml(locationText)}${escapeHtml(coordinatesText)}${botIpText && !showVerify ? ` | ${escapeHtml(botIpText)}` : ''}</p>
+            <p class="bot-meta">${escapeHtml(bot.role || 'single')} | ${escapeHtml(locationText)}${escapeHtml(coordinatesText)}${proxyMetaText && !showVerify ? ` | ${escapeHtml(proxyMetaText)}` : ''}</p>
           </div>
         </div>
         <div class="status-inline">

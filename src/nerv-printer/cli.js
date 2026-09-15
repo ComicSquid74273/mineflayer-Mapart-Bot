@@ -1964,6 +1964,7 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       connection: config.connection?.selected || config.connection?.active || null,
       connectedHost: state.connectedHost || String(config.bot?.host || '').trim() || null,
       proxyIp: getConfiguredProxyHost(config, botName),
+      proxyId: getConfiguredProxyId(config, botName),
       online: isOnline,
       phase,
       health,
@@ -19706,10 +19707,7 @@ function getSimpleUsernameRoster(config) {
   return config.bot?.username ? [String(config.bot.username).trim()].filter(Boolean) : []
 }
 
-// Resolve the proxyHost of the enabled account for the selected connection
-// profile (config.bot reflects the merged profile). Prefers the account whose
-// name matches this bot, then the first enabled account, then config.bot itself.
-function getConfiguredProxyHost(config, botName) {
+function getConfiguredProxyValue(config, botName, key) {
   const usernames = Array.isArray(config.bot?.usernames) ? config.bot.usernames : []
   const enabled = usernames.filter((entry) => entry && entry.enabled !== false && (entry.name || entry.username))
   const wanted = String(botName || '').trim().toLowerCase()
@@ -19717,8 +19715,16 @@ function getConfiguredProxyHost(config, botName) {
     || enabled[0]
     || (config.bot?.proxyHost !== undefined ? config.bot : null)
   if (!account || account.proxyEnabled === false) return null
-  const host = String(account.proxyHost || '').trim()
-  return host || null
+  const value = String(account[key] || '').trim()
+  return value || null
+}
+
+function getConfiguredProxyHost(config, botName) {
+  return getConfiguredProxyValue(config, botName, 'proxyHost')
+}
+
+function getConfiguredProxyId(config, botName) {
+  return getConfiguredProxyValue(config, botName, 'proxyId')
 }
 
 function getAccountBotOverrides(entry) {
@@ -22103,6 +22109,7 @@ async function resolveTokenVerificationSession({
           runtime: 'nerv-printer',
           hostLabel: dashCfg.hostLabel,
           proxyIp: getConfiguredProxyHost(config, botName),
+          proxyId: getConfiguredProxyId(config, botName),
           online: false,
           phase: 'token-verification',
           health: 20,
