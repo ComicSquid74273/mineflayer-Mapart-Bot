@@ -175,6 +175,8 @@ function isHostConnectionError(error) {
     'eai_again',
     'connect timeout',
     'connection timeout',
+    'connection timed out',
+    'proxy connection timed out',
     'socks5 proxy rejected connection'
   ]
   return hints.some((hint) => text.includes(hint))

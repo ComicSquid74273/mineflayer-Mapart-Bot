@@ -161,6 +161,15 @@ test('SOCKS HostUnreachable becomes a retryable failed-startup session', () => {
   assert.match(session.lastError, /HostUnreachable/)
 })
 
+test('SOCKS proxy timeout becomes a retryable failed-startup session', () => {
+  const error = new Error('Proxy connection timed out')
+  assert.equal(isHostConnectionError(error), true)
+  assert.equal(isHostFailoverSession({
+    endReason: 'socketClosed',
+    lastError: error.message
+  }), true)
+})
+
 test('nested connection errors and emitted session errors force host failover', () => {
   const aggregate = new AggregateError([new Error('connect ECONNREFUSED')], 'all connections failed')
   assert.equal(isHostConnectionError(aggregate), true)

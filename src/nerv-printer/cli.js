@@ -63,6 +63,7 @@ const {
 const { createDeliveryRuntime } = require('./delivery/mission')
 const cooldownsLib = require('./delivery/cooldowns')
 const { applyProxyToOptions, formatProxyForLog } = require('../shared/proxy-connect')
+const { formatLogArg } = require('../shared/log-redaction')
 const {
   installConfigurationTransferGuard,
   waitForConfigurationTransferWorldSettle
@@ -364,15 +365,6 @@ function getBootstrapLogConfig() {
   }
 }
 
-function formatLogArg(value) {
-  if (typeof value === 'string') return value
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
 function terminalLogsDisabledByCli() {
   const args = process.argv.slice(2)
   const disabledFlags = new Set([
@@ -522,18 +514,21 @@ function initLogger() {
   }
 
   console.log = (...args) => {
-    if (terminalLogsEnabled) original.log(`[${new Date().toISOString()}]`, ...args)
-    write('INFO', args)
+    const safeArgs = args.map(formatLogArg)
+    if (terminalLogsEnabled) original.log(`[${new Date().toISOString()}]`, ...safeArgs)
+    write('INFO', safeArgs)
   }
 
   console.warn = (...args) => {
-    if (terminalLogsEnabled) original.warn(`[${new Date().toISOString()}]`, ...args)
-    write('WARN', args)
+    const safeArgs = args.map(formatLogArg)
+    if (terminalLogsEnabled) original.warn(`[${new Date().toISOString()}]`, ...safeArgs)
+    write('WARN', safeArgs)
   }
 
   console.error = (...args) => {
-    if (terminalLogsEnabled) original.error(`[${new Date().toISOString()}]`, ...args)
-    write('ERROR', args)
+    const safeArgs = args.map(formatLogArg)
+    if (terminalLogsEnabled) original.error(`[${new Date().toISOString()}]`, ...safeArgs)
+    write('ERROR', safeArgs)
   }
 
   process.on('exit', () => {
