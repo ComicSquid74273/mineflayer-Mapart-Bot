@@ -71,13 +71,3 @@ test('staged ingress breaks long-distance non-strict access into 24-block segmen
   assert.match(gotoCode, /staged-ingress/)
 })
 
-test('stale duper group states are pruned when targetAnchor changes or chests are out of bounds', () => {
-  const duperStart = source.indexOf('function normalizeDuperGroupState(')
-  const duperEnd = source.indexOf('\nfunction loadDuperGroupStateFile(', duperStart)
-  assert.ok(duperStart >= 0 && duperEnd > duperStart)
-
-  const duperCode = source.slice(duperStart, duperEnd)
-  assert.match(duperCode, /raw\.targetAnchor\.x !== targetAnchor\.x/)
-  assert.match(duperCode, /isPositionInsidePlatformBounds\(c, config\)/)
-})
-

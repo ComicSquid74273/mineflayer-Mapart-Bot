@@ -974,56 +974,25 @@ function getDuperGroupStateFilePath(config) {
   return DEFAULT_DUPER_GROUP_STATE_FILE
 }
 
-function normalizeDuperGroupState(raw, config = null) {
+function normalizeDuperGroupState(raw) {
   const groups = raw && typeof raw.groups === 'object' && raw.groups ? raw.groups : {}
-  const targetAnchor = config?.anchorTranslation?.targetAnchor
-  if (targetAnchor && raw?.targetAnchor) {
-    if (raw.targetAnchor.x !== targetAnchor.x ||
-        raw.targetAnchor.y !== targetAnchor.y ||
-        raw.targetAnchor.z !== targetAnchor.z) {
-      console.log(`[DUPER-STATE] Pruning duper-group-state.json: platform targetAnchor changed from ${raw.targetAnchor.x},${raw.targetAnchor.y},${raw.targetAnchor.z} to ${targetAnchor.x},${targetAnchor.y},${targetAnchor.z}.`)
-      return {
-        version: 1,
-        targetAnchor,
-        updatedAt: new Date().toISOString(),
-        groups: {}
-      }
-    }
-  }
-
-  const validGroups = {}
-  for (const [key, entry] of Object.entries(groups)) {
-    if (!entry) continue
-    const chests = Array.isArray(entry.chests) ? entry.chests : []
-    const allInside = (config && chests.length > 0)
-      ? chests.every((c) => isPositionInsidePlatformBounds(c, config))
-      : true
-    if (allInside) {
-      validGroups[key] = entry
-    } else {
-      console.log(`[DUPER-STATE] Pruned stale duper group for ${entry.blockName}: chests are outside platform bounds.`)
-    }
-  }
-
   return {
     version: 1,
-    targetAnchor: targetAnchor || raw?.targetAnchor || null,
     updatedAt: raw?.updatedAt || new Date().toISOString(),
-    groups: validGroups
+    groups
   }
 }
 
 function loadDuperGroupStateFile(config) {
   const filePath = getDuperGroupStateFilePath(config)
   const raw = readOptionalJson(filePath)
-  return normalizeDuperGroupState(raw, config)
+  return normalizeDuperGroupState(raw)
 }
 
 function saveDuperGroupStateFile(config, state) {
   const filePath = getDuperGroupStateFilePath(config)
   writeJson(filePath, {
     version: 1,
-    targetAnchor: config?.anchorTranslation?.targetAnchor || null,
     updatedAt: new Date().toISOString(),
     groups: state && typeof state.groups === 'object' && state.groups ? state.groups : {}
   })
@@ -7737,13 +7706,6 @@ async function scanDuperGroupForRepairCheck(bot, config, entry, reason = 'duper-
   const itemId = bot?.registry?.itemsByName?.[blockName]?.id
   const chests = Array.isArray(entry?.chests) ? entry.chests : []
   if (!blockName || !itemId || !chests.length) return null
-
-  for (const chest of chests) {
-    if (!isPositionInsidePlatformBounds(chest, config)) {
-      console.log(`[DUPER-REPAIR-CHECK-WARN] Aborting duper scan for ${blockName}: chest at ${chest.x},${chest.y},${chest.z} is outside platform bounds.`)
-      return null
-    }
-  }
 
   const advanced = config.advanced || {}
   const scanned = []
