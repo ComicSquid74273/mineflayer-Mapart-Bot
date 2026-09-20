@@ -3397,7 +3397,9 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       const next = sourceName ? path.basename(String(sourceName)) : null
       if (next !== state.currentNbt) {
         state.currentNbt = next
-        state.currentNbtStartedAt = next ? new Date().toISOString() : null
+        state.currentNbtStartedAt = next
+          ? (state.activeQueueFile?.queueOrderAt || new Date().toISOString())
+          : null
       }
       noteActivity()
     },
@@ -8475,7 +8477,7 @@ function configurePathfinderMovements(bot, config, options = {}) {
   const maxStepY = Number(options.maxStepY)
   if (Number.isFinite(minStepY) || Number.isFinite(maxStepY)) {
     movements.exclusionAreasStep.push(createStepElevationExclusion(minStepY, maxStepY))
-    movements.maxDropDown = 0
+    movements.maxDropDown = allowJump ? 1 : 0
   }
   if (Number.isFinite(Number(options.maxDropDown))) {
     movements.maxDropDown = Math.max(0, Number(options.maxDropDown))
