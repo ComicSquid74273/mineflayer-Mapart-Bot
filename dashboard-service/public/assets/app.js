@@ -463,14 +463,17 @@ function getNodeActiveRunForBot(bot) {
 }
 
 function getCurrentRunElapsedMs(bot) {
+  // ponytail: anchor to bot-reported job start timestamp across reconnects; upgrade if multi-bot node timing needed
+  const startedAtMs = new Date(bot?.currentNbtStartedAt || 0).getTime()
+  if (Number.isFinite(startedAtMs) && startedAtMs > 0) {
+    return Math.max(0, Date.now() - startedAtMs)
+  }
+
   const activeRun = getNodeActiveRunForBot(bot)
   const activeElapsedMs = Number(activeRun?.elapsedMs)
   if (Number.isFinite(activeElapsedMs) && activeElapsedMs >= 0) return activeElapsedMs
 
-  if (isBotPaused(bot)) return null
-  const startedAtMs = new Date(bot?.currentNbtStartedAt || 0).getTime()
-  if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) return null
-  return Math.max(0, Date.now() - startedAtMs)
+  return null
 }
 
 function updatePauseDurationText(root = document) {

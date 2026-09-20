@@ -1995,7 +1995,11 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       verificationCode: String(stdinCommandState.status?.account || '').toLowerCase() === botName.toLowerCase() ? (stdinCommandState.status?.verificationCode || null) : null,
       verificationUrl: String(stdinCommandState.status?.account || '').toLowerCase() === botName.toLowerCase() ? (stdinCommandState.status?.verificationUrl || null) : null,
       tokenWaiting: getVerificationWaiter(botName) != null,
-      currentNbtStartedAt: state.currentNbtStartedAt || null,
+      currentNbtStartedAt: state.currentNbtStartedAt || (
+        currentProgress()?.jobStartedAt && (!currentSourceName() || path.basename(String(currentProgress()?.sourceName || '')) === path.basename(String(currentSourceName())))
+          ? currentProgress().jobStartedAt
+          : null
+      ),
       recentChat: chatBuffer.slice(),
       latencyMs: getBotLatencyMs(bot),
       runtimeMetrics: buildProcessRuntimeMetrics(),
@@ -3397,11 +3401,21 @@ function createDashboardRuntime(bot, config, sessionNumber, runtimeControl) {
       const next = sourceName ? path.basename(String(sourceName)) : null
       if (next !== state.currentNbt) {
         state.currentNbt = next
+        const progress = currentProgress()
+        const progressMatches = progress?.sourceName && path.basename(String(progress.sourceName)) === next
         state.currentNbtStartedAt = next
-          ? (state.activeQueueFile?.queueOrderAt || new Date().toISOString())
+          ? (progressMatches && progress?.jobStartedAt
+              ? progress.jobStartedAt
+              : (state.activeQueueFile?.queueOrderAt || new Date().toISOString()))
           : null
       }
       noteActivity()
+    },
+    setCurrentNbtStartedAt(startedAt) {
+      if (startedAt && state.currentNbt) {
+        state.currentNbtStartedAt = String(startedAt).trim()
+        noteActivity()
+      }
     },
     setRecoveryState(nextState) {
       state.recoveryState = String(nextState || 'none')
@@ -4714,6 +4728,10 @@ function createProgressState(input, totalTargets, processedTargets, phase, detai
 
   for (const [key, value] of Object.entries(progressDetails)) {
     if (key !== 'state') state[key] = value
+  }
+
+  if (!state.jobStartedAt) {
+    state.jobStartedAt = progressDetails.jobStartedAt || details?.jobStartedAt || new Date().toISOString()
   }
 
   return state
@@ -18188,10 +18206,14 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   const checkRuntimeStop = (detail = 'pausing-after-current-step') => {
     assertRuntimeContinue(bot, config, detail)
   }
+  let runJobStartedAt = new Date().toISOString()
   const saveProgress = (phase = 'printing', details = {}) => {
     if (!progressEnabled) return
     const processedTargets = Math.min(orderedTargets.length, resumeFrom + processedInRun)
-    writeProgressSnapshot(progressFile, input, orderedTargets.length, processedTargets, phase, details)
+    writeProgressSnapshot(progressFile, input, orderedTargets.length, processedTargets, phase, {
+      jobStartedAt: runJobStartedAt,
+      ...details
+    })
     if (multiRuntime && multiAssignment) {
       const heartbeatDetails = {
         ready: multiRole !== 'master',
@@ -18247,6 +18269,10 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       ))
 
     if (sameInput) {
+      if (previous?.jobStartedAt) {
+        runJobStartedAt = String(previous.jobStartedAt).trim()
+      }
+      dashboardRuntime?.setCurrentNbtStartedAt?.(runJobStartedAt)
       resumeFrom = Math.max(0, Math.min(orderedTargets.length, toNumber(previous.processedTargets, 0)))
       const previousPhase = normalizeResumePhase(previous.phase)
       if (previous.resetBeforeResume === true) {

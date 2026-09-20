@@ -567,6 +567,8 @@ function createStore(baseDir) {
         fileName,
         botCount: 0,
         activeBotCount: 0,
+        jobStartedAtCandidate: null,
+        jobStartedAtCandidateMs: 0,
         countedStartedAtCandidate: null,
         countedStartedAtCandidateMs: 0,
         countedLastSeenAt: null,
@@ -580,6 +582,12 @@ function createStore(baseDir) {
       current.botCount += 1
       const botProgressPercent = toNumber(bot?.progress?.percent, 0)
       if (botProgressPercent > current.maxProgressPercent) current.maxProgressPercent = botProgressPercent
+      const botStartedAt = String(bot?.currentNbtStartedAt || '').trim()
+      const botStartedAtMs = toTimestamp(botStartedAt)
+      if (botStartedAtMs && (!current.jobStartedAtCandidateMs || botStartedAtMs < current.jobStartedAtCandidateMs)) {
+        current.jobStartedAtCandidateMs = botStartedAtMs
+        current.jobStartedAtCandidate = botStartedAt
+      }
       if (countedPhase) {
         current.activeBotCount += 1
         if (statusAtMs && (!current.countedStartedAtCandidateMs || statusAtMs < current.countedStartedAtCandidateMs)) {
@@ -670,7 +678,11 @@ function createStore(baseDir) {
     const previousActiveRun = nextRecord.activeRun
     const snapshotActiveRun = snapshot.activeRun
 
-    if (previousActiveRun && (!snapshotActiveRun || snapshotActiveRun.fileName !== previousActiveRun.fileName)) {
+    const isDifferentFile = Boolean(snapshotActiveRun && previousActiveRun && snapshotActiveRun.fileName !== previousActiveRun.fileName)
+    const isFinished = Boolean(previousActiveRun && (previousActiveRun.maxProgressPercent || 0) >= 100)
+    const isStaleDisconnect = Boolean(previousActiveRun && !snapshotActiveRun && (Date.now() - toTimestamp(previousActiveRun.lastSeenAt) > 15 * 60 * 1000))
+
+    if (previousActiveRun && (isDifferentFile || isFinished || isStaleDisconnect)) {
       const closedRun = closeTimingSegment(previousActiveRun, previousActiveRun.segmentLastSeenAt || snapshot.lastHostStatusAt || nowIso())
       const wasCompleted = (previousActiveRun.maxProgressPercent || 0) >= 100
       nextRecord = recordCompletedNodeRun(nextRecord, {
@@ -687,7 +699,7 @@ function createStore(baseDir) {
       if (!nextRecord.activeRun || nextRecord.activeRun.fileName !== snapshotActiveRun.fileName) {
         nextRecord.activeRun = sanitizeTimingRun({
           fileName: snapshotActiveRun.fileName,
-          startedAt: snapshotActiveRun.countedStartedAtCandidate || snapshotActiveRun.lastSeenAt || snapshot.lastHostStatusAt || nowIso(),
+          startedAt: snapshotActiveRun.jobStartedAtCandidate || snapshotActiveRun.countedStartedAtCandidate || snapshotActiveRun.lastSeenAt || snapshot.lastHostStatusAt || nowIso(),
           lastSeenAt: snapshotActiveRun.lastSeenAt || snapshot.lastHostStatusAt || nowIso(),
           activeBotCount: snapshotActiveRun.activeBotCount,
           accumulatedActiveMs: 0,
@@ -723,8 +735,10 @@ function createStore(baseDir) {
         }
         nextRecord.activeRun = activeRun
       }
-    } else {
+    } else if (!previousActiveRun || isStaleDisconnect) {
       nextRecord.activeRun = null
+    } else {
+      nextRecord.activeRun = previousActiveRun
     }
 
     nextRecord.updatedAt = snapshot.lastHostStatusAt || nextRecord.updatedAt || nowIso()
