@@ -9799,7 +9799,7 @@ function setMachineAccessPathSprintMode(bot, config, mode, sprintAllowed, moveme
     configurePathfinderMovements(bot, config, {
       ...movementOptions,
       allowSprint: !forceWalk,
-      allowJump: options.allowJump !== undefined ? options.allowJump : (strict ? false : (config.printer?.allowJump !== false)),
+      allowJump: movementOptions.allowJump !== undefined ? movementOptions.allowJump : (config.printer?.allowJump !== false),
       maxDropDown: 0,
     })
   }
