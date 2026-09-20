@@ -9799,7 +9799,7 @@ function setMachineAccessPathSprintMode(bot, config, mode, sprintAllowed, moveme
     configurePathfinderMovements(bot, config, {
       ...movementOptions,
       allowSprint: !forceWalk,
-      allowJump: false,
+      allowJump: options.allowJump !== undefined ? options.allowJump : (strict ? false : (config.printer?.allowJump !== false)),
       maxDropDown: 0,
     })
   }
@@ -11778,7 +11778,26 @@ async function gotoPostPrintPoint(bot, config, point, label, range = 1, options 
   try {
     await gotoPoint()
   } catch (error) {
-    const unsafeStart = String(error?.message || error || '').includes('flat-machine-route-unsafe-start')
+    const errorMsg = String(error?.message || error || '')
+    if (errorMsg.includes('direct-machine-route-hitbox-obstructed') || errorMsg.includes('direct-machine-route-hitbox-hazard')) {
+      console.log(`[POSTPRINT-POINT] Straight route to ${label} obstructed; falling back to pathfinder navigation around obstacle.`)
+      await gotoConfiguredAccess(
+        bot,
+        point,
+        point,
+        Math.max(0.8, toNumber(range, 1)),
+        config,
+        `${label}-fallback`,
+        {
+          strict: false,
+          avoidLiquids: true,
+          allowJump: config?.printer?.allowJump !== false,
+          timeoutMs
+        }
+      )
+      return
+    }
+    const unsafeStart = errorMsg.includes('flat-machine-route-unsafe-start')
     const liquidEgressEnabled = config?.advanced?.postPrintLiquidEgressEnabled !== false
     const verticalTolerance = Math.max(0.1, toNumber(config?.advanced?.machineAccessPreciseVerticalTolerance, 0.75))
     const liquidProximityRadius = Math.max(0, Math.floor(toNumber(config?.advanced?.machineAccessLiquidProximityRadius, 0)))
