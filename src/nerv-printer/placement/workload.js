@@ -10,6 +10,7 @@ function createPlacementWorkload(deps) {
     recoverMissingItemInventoryDesync,
     findNervScannerCandidate,
     placeNervScannerTarget,
+    prepareHotbarForBatch,
     assertRuntimeContinue
   } = deps
 
@@ -183,6 +184,9 @@ function createPlacementWorkload(deps) {
     const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide)
     const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
     const neededByBlock = estimateNeededFromLookahead(batchTargets)
+    if (typeof prepareHotbarForBatch === 'function') {
+      await prepareHotbarForBatch(bot, config, batchTargets)
+    }
 
     let active = true
     let currentGoal = checkpoints[0].position
@@ -372,6 +376,9 @@ function createPlacementWorkload(deps) {
     const checkpointBuffer = Math.max(0.5, toNumber(advanced.checkpointBuffer, 0.8))
     const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide)
     const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
+    if (typeof prepareHotbarForBatch === 'function') {
+      await prepareHotbarForBatch(bot, config, batchTargets)
+    }
 
     let active = true
     let currentGoal = checkpoints[0].position
@@ -533,8 +540,6 @@ function createPlacementWorkload(deps) {
 
             if (neededSwap) {
               hardStops += 1
-              lastTickTime = Date.now()
-              break
             }
           }
         }

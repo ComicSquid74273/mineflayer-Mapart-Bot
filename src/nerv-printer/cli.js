@@ -187,6 +187,7 @@ const placementWorkload = createPlacementWorkload({
   recoverMissingItemInventoryDesync,
   findNervScannerCandidate,
   placeNervScannerTarget,
+  prepareHotbarForBatch,
   assertRuntimeContinue
 })
 
@@ -6733,7 +6734,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   const advanced = config.advanced || {}
   const fastSwap = options.fastSwap === true
   const timeoutMs = Math.max(100, toNumber(advanced.inventoryDesyncEquipTimeoutMs, 900))
-  const pollMs = Math.max(25, toNumber(advanced.inventoryDesyncEquipPollMs, 75))
+  const pollMs = fastSwap ? 10 : Math.max(25, toNumber(advanced.inventoryDesyncEquipPollMs, 75))
   const setSelectedHotbar = (index) => {
     if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(index)
     else bot.quickBarSlot = index
@@ -6743,13 +6744,14 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
     0
   ))
   const inventorySwapStableMs = Math.max(0, toNumber(
-    fastSwap ? advanced.scannerPostInventorySwapDelayMs : advanced.postInventorySwapDelayMs,
-    fastSwap ? toNumber(advanced.scannerPostSwapDelayMs, 50) : toNumber(advanced.postSwapDelayMs, 100)
+    fastSwap ? (advanced.scannerPostInventorySwapDelayMs ?? advanced.scannerPostSwapDelayMs ?? 0) : advanced.postInventorySwapDelayMs,
+    fastSwap ? 0 : toNumber(advanced.postSwapDelayMs, 100)
   ))
 
   const existingHotbar = findHotbarIndexForItem(bot, blockName)
   if (existingHotbar >= 0) {
     setSelectedHotbar(existingHotbar)
+    if (fastSwap && hotbarSelectStableMs <= 0) return true
     return await waitForSelectedMaterialReady(bot, blockName, timeoutMs + hotbarSelectStableMs, pollMs, hotbarSelectStableMs)
   }
 
@@ -6758,33 +6760,82 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 
   if (source.slot >= 36 && source.slot <= 44) {
     setSelectedHotbar(source.slot - 36)
+    if (fastSwap && hotbarSelectStableMs <= 0) return true
     return await waitForSelectedMaterialReady(bot, blockName, timeoutMs + hotbarSelectStableMs, pollMs, hotbarSelectStableMs)
   }
 
   const hotbarIndex = chooseMaterialHotbarIndex(bot, blockName)
-  const preSwapDelayMs = Math.max(0, toNumber(fastSwap ? advanced.scannerPreSwapDelayMs : advanced.preSwapDelayMs, fastSwap ? 0 : 100))
-  const wasMoving = {
-    sprint: bot.controlState?.sprint === true,
-    forward: bot.controlState?.forward === true,
-    back: bot.controlState?.back === true,
-    left: bot.controlState?.left === true,
-    right: bot.controlState?.right === true
-  }
+  const preSwapDelayMs = Math.max(0, toNumber(fastSwap ? (advanced.scannerPreSwapDelayMs ?? 0) : advanced.preSwapDelayMs, fastSwap ? 0 : 100))
 
   if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
 
   try {
-    for (const control of ['sprint', 'forward', 'back', 'left', 'right']) {
-      bot.setControlState(control, false)
-    }
     await bot.clickWindow(source.slot, hotbarIndex, 2)
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
     if (!swapped) return false
     setSelectedHotbar(hotbarIndex)
+    if (fastSwap && inventorySwapStableMs <= 0) return true
     return await waitForSelectedMaterialReady(bot, blockName, timeoutMs + inventorySwapStableMs, pollMs, inventorySwapStableMs)
-  } finally {
-    for (const [control, value] of Object.entries(wasMoving)) {
-      if (value) bot.setControlState(control, true)
+  } catch (err) {
+    return false
+  }
+}
+
+async function prepareHotbarForBatch(bot, config, batchTargets) {
+  if (!bot?.inventory || !Array.isArray(batchTargets) || batchTargets.length === 0) return
+  const freq = new Map()
+  for (const target of batchTargets) {
+    const name = target?.blockName
+    if (!name) continue
+    freq.set(name, (freq.get(name) || 0) + 1)
+  }
+  if (freq.size === 0) return
+
+  const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name)
+  const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
+
+  const targetMaterials = sorted.slice(0, 8)
+  const targetSet = new Set(targetMaterials)
+
+  const hotbarHas = new Set()
+  for (let i = 0; i < 9; i++) {
+    const stack = slots[36 + i]
+    if (stack?.name && Number(stack.count) > 0) {
+      hotbarHas.add(stack.name)
+    }
+  }
+
+  const toStage = targetMaterials.filter(mat => !hotbarHas.has(mat))
+  if (toStage.length === 0) return
+
+  for (const mat of toStage) {
+    const source = findBestInventorySlotForItem(bot, mat)
+    if (!source || source.slot < 9 || source.slot > 35) continue
+
+    let destIndex = -1
+    for (let i = 0; i < 8; i++) {
+      const stack = bot.inventory.slots[36 + i]
+      if (!stack || Number(stack.count) <= 0) {
+        destIndex = i
+        break
+      }
+    }
+    if (destIndex < 0) {
+      for (let i = 0; i < 8; i++) {
+        const stack = bot.inventory.slots[36 + i]
+        if (stack?.name && !targetSet.has(stack.name)) {
+          destIndex = i
+          break
+        }
+      }
+    }
+    if (destIndex < 0) continue
+
+    try {
+      await bot.clickWindow(source.slot, destIndex, 2)
+      await delay(15)
+    } catch {
+      // Non-fatal if a clickWindow fails during pre-staging
     }
   }
 }
@@ -18928,6 +18979,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
         await ensureFoodBeforeTraversal(bot, config, `litematic-batch cols=${colBatch.join(',')}`)
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
+        await prepareHotbarForBatch(bot, config, batchTargets)
         const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
         placed += result.placed
         already += result.already
@@ -18973,6 +19025,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
         await ensureFoodBeforeTraversal(bot, config, `fast-batch cols=${colBatch.join(',')}`)
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
+        await prepareHotbarForBatch(bot, config, batchTargets)
         const result = scannerWorkloadMode === 'time'
           ? await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
           : await runNervScannerPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
@@ -20705,7 +20758,11 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
-      const priority = priorityKeys instanceof Set && priorityKeys.has(key) ? 1 : 0
+      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 2 : 0
+      const heldName = String(bot.heldItem?.name || '')
+      const heldCount = Number(bot.heldItem?.count || 0)
+      const heldBonus = (heldName && heldCount > 0 && target.blockName === heldName) ? 1 : 0
+      const priority = repairPriority + heldBonus
 
       if (priority > bestPriority || (priority === bestPriority && distance2 < bestDistance2)) {
         // Only do blockAt for the current best candidate to skip expensive world reads
@@ -20953,9 +21010,7 @@ async function runNervWorkloadTest(bot, config) {
           }
 
           if (neededSwap) {
-            lastTickTime = Date.now()
             hardStopThisBurst = true
-            break
           }
         }
       }
