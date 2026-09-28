@@ -16,6 +16,8 @@ function mergeBotConfigDefaults(configPath) {
   if (adv.vanillaSpeedSetbackFallbackMs === undefined) adv.vanillaSpeedSetbackFallbackMs = 3000
   if (adv.latencySafeModeEnterMs === undefined || adv.latencySafeModeEnterMs === 90) adv.latencySafeModeEnterMs = 300
   if (adv.latencySafeModeResumeMs === undefined || adv.latencySafeModeResumeMs === 85) adv.latencySafeModeResumeMs = 280
+  if (adv.dumpInventoryStableMs === undefined || adv.dumpInventoryStableMs === 2500) adv.dumpInventoryStableMs = 400
+  if (adv.machineAccessSprintMode === undefined || adv.machineAccessSprintMode === 'disabled') adv.machineAccessSprintMode = 'enabled'
 
   const tempPath = `${resolvedPath}.${process.pid}.tmp`
   fs.writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })

@@ -14914,7 +14914,7 @@ async function tossDumpStacksConfirmed(bot, config, requestedStacks, options = {
     }
   }
 
-  const stableMs = Math.max(500, toNumber(config.advanced?.dumpInventoryStableMs, 2500))
+  const stableMs = Math.max(50, toNumber(config.advanced?.dumpInventoryStableMs, 400))
   const result = await waitForSettledDumpInventory(bot, before, attempted, {
     pollMs: Math.max(25, toNumber(config.advanced?.dumpInventoryPollMs, 50)),
     stableMs,

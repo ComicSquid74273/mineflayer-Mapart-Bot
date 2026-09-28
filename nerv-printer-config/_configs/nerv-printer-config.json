@@ -345,7 +345,7 @@
       "sprint": true,
       "onGround": true
     },
-    "machineAccessSprintMode": "disabled",
+    "machineAccessSprintMode": "enabled",
     "machineAccessReadySlack": 1.25,
     "machineAccessCarpetRecoveryEnabled": true,
     "machineAccessCarpetRecoveryAttempts": 2,
@@ -485,7 +485,7 @@
     "dumpAlreadyNearRange": 2,
     "dumpGoalRange": 1,
     "dumpPreciseTolerance": 0.2,
-    "dumpInventoryStableMs": 2500,
+    "dumpInventoryStableMs": 400,
     "dumpInventoryConfirmTimeoutMs": 6000,
     "dumpInventoryPollMs": 50,
     "dumpRetreatDistance": 3,
