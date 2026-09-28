@@ -975,12 +975,12 @@ function installVanillaSpeed(bot, config) {
   let setbackCooldownUntil = 0
 
   bot._client.on('position', () => {
-    const fallbackMs = Math.max(1000, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 60000))
+    const fallbackMs = Math.max(1000, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 3000))
     setbackCooldownUntil = Date.now() + fallbackMs
   })
 
   bot.on('physicsTick', () => {
-    if (advanced.vanillaSpeedEnabled !== true) return
+    if (advanced.vanillaSpeedEnabled === false) return
     if (Date.now() < setbackCooldownUntil) return
 
     const pos = bot.entity?.position

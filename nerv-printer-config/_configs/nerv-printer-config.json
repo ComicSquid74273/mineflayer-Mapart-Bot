@@ -432,8 +432,8 @@
     "supportStockChestPollMs": 100,
     "requiredStockRefillRetryMs": 5000,
     "requiredStockRefillLogEveryMs": 30000,
-    "latencySafeModeEnterMs": 90,
-    "latencySafeModeResumeMs": 85,
+    "latencySafeModeEnterMs": 300,
+    "latencySafeModeResumeMs": 280,
     "latencySafePlacementSettleMs": 50,
     "latencySafePlacementMoveTimeoutMs": 12000,
     "sneakOnDispenserOnly": true,
@@ -564,7 +564,7 @@
     "vanillaSpeedInLiquids": false,
     "vanillaSpeedOnlyOnGround": true,
     "vanillaSpeedPlatformOnly": true,
-    "vanillaSpeedSetbackFallbackMs": 60000
+    "vanillaSpeedSetbackFallbackMs": 3000
   },
   "errorHandling": {
     "logErrors": true,
