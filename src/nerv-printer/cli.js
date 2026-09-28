@@ -1024,10 +1024,6 @@ function installVanillaSpeed(bot, config) {
       if (blockBelow && blockBelow.name !== 'air') {
         pos.x = nextX
         pos.z = nextZ
-        if (bot.entity.velocity) {
-          bot.entity.velocity.x = dirX * targetPerTick
-          bot.entity.velocity.z = dirZ * targetPerTick
-        }
       }
     }
   })
