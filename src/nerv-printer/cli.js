@@ -946,6 +946,60 @@ function installAdaptiveLatencyGuard(bot, config) {
   wrapAsyncAction('dig', 'dig', { pauseMovement: true })
 }
 
+function installVanillaSpeed(bot, config) {
+  if (!bot || bot.__nervVanillaSpeedInstalled) return
+  bot.__nervVanillaSpeedInstalled = true
+
+  const advanced = config.advanced || {}
+  let setbackCooldownUntil = 0
+
+  bot._client.on('position', () => {
+    const fallbackMs = Math.max(1000, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 60000))
+    setbackCooldownUntil = Date.now() + fallbackMs
+  })
+
+  bot.on('physicsTick', () => {
+    if (advanced.vanillaSpeedEnabled !== true) return
+    if (Date.now() < setbackCooldownUntil) return
+
+    const pos = bot.entity?.position
+    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.z)) return
+
+    if (advanced.vanillaSpeedPlatformOnly !== false) {
+      if (!isPositionInsidePlatformHorizontalBounds(pos, config)) return
+    }
+
+    if (advanced.vanillaSpeedOnlyOnGround !== false && !bot.entity?.onGround) return
+    if (bot.controlState?.sneak) return
+    if (!bot.controlState?.forward && !bot.controlState?.sprint) return
+    if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
+
+    const bps = Math.min(7.5, Math.max(1.0, toNumber(advanced.vanillaSpeedBps, 7.192)))
+    const targetPerTick = bps / 20.0
+
+    const yaw = bot.entity.yaw
+    const dirX = -Math.sin(yaw)
+    const dirZ = Math.cos(yaw)
+
+    const velX = bot.entity.velocity?.x || 0
+    const velZ = bot.entity.velocity?.z || 0
+    const currentSpeed = Math.hypot(velX, velZ)
+
+    if (currentSpeed < targetPerTick) {
+      const boost = targetPerTick - currentSpeed
+      const nextX = pos.x + dirX * boost
+      const nextZ = pos.z + dirZ * boost
+
+      const Vec3Pos = pos.constructor
+      const blockBelow = bot.blockAt(new Vec3Pos(Math.floor(nextX), Math.floor(pos.y) - 1, Math.floor(nextZ)))
+      if (blockBelow && blockBelow.name !== 'air') {
+        pos.x = nextX
+        pos.z = nextZ
+      }
+    }
+  })
+}
+
 function readOptionalJson(filePath) {
   if (!fs.existsSync(filePath)) return null
   try {
@@ -5689,7 +5743,13 @@ function createDefaultConfig() {
       retryInteractTimeoutMs: 4000,
       checkpointBuffer: 0.2,
       breakCarpetAboveReset: false,
-      debugPrints: false
+      debugPrints: false,
+      vanillaSpeedEnabled: true,
+      vanillaSpeedBps: 7.192,
+      vanillaSpeedInLiquids: false,
+      vanillaSpeedOnlyOnGround: true,
+      vanillaSpeedPlatformOnly: true,
+      vanillaSpeedSetbackFallbackMs: 60000
     },
     errorHandling: {
       logErrors: true,
@@ -19388,6 +19448,7 @@ function createBot(config) {
   installChatLogin(bot, config)
   installTeleportRequestAutoAccept(bot, config)
   bot.once('login', () => applyInventoryStateSync(bot, config))
+  installVanillaSpeed(bot, config)
 
   return bot
 }

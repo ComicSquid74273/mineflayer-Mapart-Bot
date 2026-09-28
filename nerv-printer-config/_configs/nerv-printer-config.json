@@ -558,7 +558,13 @@
     "retryInteractTimeoutMs": 800,
     "checkpointBuffer": 0.8,
     "breakCarpetAboveReset": false,
-    "debugPrints": true
+    "debugPrints": true,
+    "vanillaSpeedEnabled": true,
+    "vanillaSpeedBps": 7.192,
+    "vanillaSpeedInLiquids": false,
+    "vanillaSpeedOnlyOnGround": true,
+    "vanillaSpeedPlatformOnly": true,
+    "vanillaSpeedSetbackFallbackMs": 60000
   },
   "errorHandling": {
     "logErrors": true,
