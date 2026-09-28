@@ -977,13 +977,13 @@ function installVanillaSpeed(bot, config) {
     const bps = Math.min(7.5, Math.max(1.0, toNumber(advanced.vanillaSpeedBps, 7.192)))
     const targetPerTick = bps / 20.0
 
-    const yaw = bot.entity.yaw
-    const dirX = -Math.sin(yaw)
-    const dirZ = Math.cos(yaw)
-
     const velX = bot.entity.velocity?.x || 0
     const velZ = bot.entity.velocity?.z || 0
     const currentSpeed = Math.hypot(velX, velZ)
+    if (currentSpeed < 0.01) return
+
+    const dirX = velX / currentSpeed
+    const dirZ = velZ / currentSpeed
 
     if (currentSpeed < targetPerTick) {
       const boost = targetPerTick - currentSpeed
@@ -991,7 +991,8 @@ function installVanillaSpeed(bot, config) {
       const nextZ = pos.z + dirZ * boost
 
       const Vec3Pos = pos.constructor
-      const blockBelow = bot.blockAt(new Vec3Pos(Math.floor(nextX), Math.floor(pos.y) - 1, Math.floor(nextZ)))
+      const checkY = Math.floor(pos.y - 0.1)
+      const blockBelow = bot.blockAt(new Vec3Pos(Math.floor(nextX), checkY, Math.floor(nextZ)))
       if (blockBelow && blockBelow.name !== 'air') {
         pos.x = nextX
         pos.z = nextZ
