@@ -974,9 +974,16 @@ function installVanillaSpeed(bot, config) {
   const advanced = config.advanced || {}
   let setbackCooldownUntil = 0
 
-  bot._client.on('position', () => {
-    const fallbackMs = Math.max(1000, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 3000))
-    setbackCooldownUntil = Date.now() + fallbackMs
+  bot._client.on('position', (packet) => {
+    const pos = bot.entity?.position
+    if (!pos || !Number.isFinite(packet?.x) || !Number.isFinite(packet?.z)) return
+    const isRelative = typeof packet.flags === 'object' ? Boolean(packet.flags.x || packet.flags.z) : Boolean(packet.flags & 5)
+    if (isRelative) return
+    const delta = Math.hypot(packet.x - pos.x, packet.z - pos.z)
+    if (delta > 1.5) {
+      const fallbackMs = Math.max(500, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 1500))
+      setbackCooldownUntil = Date.now() + fallbackMs
+    }
   })
 
   bot.on('physicsTick', () => {
@@ -990,7 +997,7 @@ function installVanillaSpeed(bot, config) {
       if (!isPositionInsidePlatformHorizontalBounds(pos, config)) return
     }
 
-    if (advanced.vanillaSpeedOnlyOnGround !== false && !bot.entity?.onGround) return
+    if (advanced.vanillaSpeedOnlyOnGround === true && !bot.entity?.onGround) return
     if (bot.controlState?.sneak) return
     if (!bot.controlState?.forward && !bot.controlState?.sprint) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
@@ -1017,6 +1024,10 @@ function installVanillaSpeed(bot, config) {
       if (blockBelow && blockBelow.name !== 'air') {
         pos.x = nextX
         pos.z = nextZ
+        if (bot.entity.velocity) {
+          bot.entity.velocity.x = dirX * targetPerTick
+          bot.entity.velocity.z = dirZ * targetPerTick
+        }
       }
     }
   })
