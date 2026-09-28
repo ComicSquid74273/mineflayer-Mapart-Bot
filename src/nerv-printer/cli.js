@@ -972,32 +972,38 @@ function installVanillaSpeed(bot, config) {
   bot.__nervVanillaSpeedInstalled = true
 
   const advanced = config.advanced || {}
-  let setbackCooldownUntil = 0
+  let prevX = null
+  let prevZ = null
 
-  bot._client.on('position', (packet) => {
-    const pos = bot.entity?.position
-    if (!pos || !Number.isFinite(packet?.x) || !Number.isFinite(packet?.z)) return
-    const isRelative = typeof packet.flags === 'object' ? Boolean(packet.flags.x || packet.flags.z) : Boolean(packet.flags & 5)
-    if (isRelative) return
-    const delta = Math.hypot(packet.x - pos.x, packet.z - pos.z)
-    if (delta > 1.5) {
-      const fallbackMs = Math.max(500, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 1500))
-      setbackCooldownUntil = Date.now() + fallbackMs
-    }
+  bot._client.on('position', () => {
+    prevX = null
+    prevZ = null
   })
 
   bot.on('physicsTick', () => {
     if (advanced.vanillaSpeedEnabled === false) return
-    if (Date.now() < setbackCooldownUntil) return
 
     const pos = bot.entity?.position
     if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.z)) return
+
+    if (prevX == null || prevZ == null) {
+      prevX = pos.x
+      prevZ = pos.z
+      return
+    }
+
+    const movedX = pos.x - prevX
+    const movedZ = pos.z - prevZ
+    prevX = pos.x
+    prevZ = pos.z
+
+    const movedDist = Math.hypot(movedX, movedZ)
+    if (movedDist < 0.01) return
 
     if (advanced.vanillaSpeedPlatformOnly !== false) {
       if (!isPositionInsidePlatformHorizontalBounds(pos, config)) return
     }
 
-    if (advanced.vanillaSpeedOnlyOnGround === true && !bot.entity?.onGround) return
     if (bot.controlState?.sneak) return
     if (!bot.controlState?.forward && !bot.controlState?.sprint) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
@@ -1005,16 +1011,10 @@ function installVanillaSpeed(bot, config) {
     const bps = Math.min(7.5, Math.max(1.0, toNumber(advanced.vanillaSpeedBps, 7.192)))
     const targetPerTick = bps / 20.0
 
-    const velX = bot.entity.velocity?.x || 0
-    const velZ = bot.entity.velocity?.z || 0
-    const currentSpeed = Math.hypot(velX, velZ)
-    if (currentSpeed < 0.01) return
-
-    const dirX = velX / currentSpeed
-    const dirZ = velZ / currentSpeed
-
-    if (currentSpeed < targetPerTick) {
-      const boost = targetPerTick - currentSpeed
+    if (movedDist < targetPerTick) {
+      const boost = targetPerTick - movedDist
+      const dirX = movedX / movedDist
+      const dirZ = movedZ / movedDist
       const nextX = pos.x + dirX * boost
       const nextZ = pos.z + dirZ * boost
 
@@ -1024,6 +1024,8 @@ function installVanillaSpeed(bot, config) {
       if (blockBelow && blockBelow.name !== 'air') {
         pos.x = nextX
         pos.z = nextZ
+        prevX = nextX
+        prevZ = nextZ
       }
     }
   })
