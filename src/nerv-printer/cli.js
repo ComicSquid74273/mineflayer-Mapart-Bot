@@ -15785,9 +15785,10 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       }
       await applyAdaptiveLatencyBackoff(bot, config, 'before-place-block', { pauseMovement: true })
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
+        const forceLook = printer.rotate === true ? true : 'ignore'
         await bot._genericPlace(attempt.block, attempt.face, {
           swingArm: 'right',
-          forceLook: true
+          forceLook
         })
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
