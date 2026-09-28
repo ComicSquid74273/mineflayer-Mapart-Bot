@@ -4,7 +4,27 @@
 process.on('unhandledRejection', (reason) => {
   const msg = String(reason?.message || reason || '').toLowerCase()
   if (msg.includes('goal was changed') || msg.includes('goalchanged')) return
+  const stack = reason?.stack || reason || ''
+  try {
+    const fs = require('fs')
+    const path = require('path')
+    const logPath = path.join(process.env.NERV_LOG_DIR ? path.resolve(process.env.NERV_LOG_DIR) : path.resolve(process.cwd(), 'logs'), 'nerv-printer.log')
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] [FATAL-UNHANDLED-REJECTION] ${stack}\n`)
+  } catch {}
+  console.error('[FATAL-UNHANDLED-REJECTION]', stack)
   throw reason
+})
+
+process.on('uncaughtException', (err) => {
+  const stack = err?.stack || err || ''
+  try {
+    const fs = require('fs')
+    const path = require('path')
+    const logPath = path.join(process.env.NERV_LOG_DIR ? path.resolve(process.env.NERV_LOG_DIR) : path.resolve(process.cwd(), 'logs'), 'nerv-printer.log')
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] [FATAL-UNCAUGHT-EXCEPTION] ${stack}\n`)
+  } catch {}
+  console.error('[FATAL-UNCAUGHT-EXCEPTION]', stack)
+  process.exit(1)
 })
 
 let restockFailureCache
@@ -569,6 +589,7 @@ function shouldHoldQueueFileAfterRuntimeError(errorText) {
   if (!text) return false
   return (
     text.includes('nerv-workload-checkpoint-timeout') ||
+    text.includes('workload-batch-entry-return') ||
     text.includes('checkpoint-timeout') ||
     text.includes('goal was changed') ||
     text.includes('goalchanged') ||
@@ -16878,27 +16899,34 @@ async function prepareWorkloadBatchEntry(bot, config, batchTargets, startOnNorth
     `range=${entryRange} from=${before.x.toFixed(2)} ${before.y.toFixed(2)} ${before.z.toFixed(2)} ` +
     `distance=${beforeDistance.toFixed(2)}`
   )
-  await gotoConfiguredAccess(
-    bot,
-    entry,
-    entry,
-    entryRange,
-    config,
-    'workload-batch-entry-return',
-    {
-      strict: true,
-      avoidLiquids: true,
-      allowVerifiedGaps: false
-    }
-  )
+  try {
+    await gotoConfiguredAccess(
+      bot,
+      entry,
+      entry,
+      entryRange,
+      config,
+      'workload-batch-entry-return',
+      {
+        strict: true,
+        avoidLiquids: true,
+        allowVerifiedGaps: false
+      }
+    )
+  } catch (err) {
+    console.warn(`[NERV-WORKLOAD-ENTRY-WARN] Non-fatal entry return pathing error: ${err?.message || err}; continuing traversal from current position.`)
+    interruptPathfinder(bot)
+    stopBotMovement(bot)
+  }
 
   const after = bot?.entity?.position
   const afterDistance = distanceToPoint(after, entry)
   if (afterDistance > readyRange) {
-    throw new Error(
-      `workload-batch-entry-return-incomplete distance=${afterDistance.toFixed(2)} ` +
-      `readyRange=${readyRange.toFixed(2)}`
+    console.log(
+      `[NERV-WORKLOAD-ENTRY-RETURN-PARTIAL] pos=${after?.x?.toFixed(2)} ${after?.y?.toFixed(2)} ${after?.z?.toFixed(2)} ` +
+      `distance=${afterDistance.toFixed(2)} readyRange=${readyRange.toFixed(2)}; starting batch from current position.`
     )
+    return
   }
   console.log(
     `[NERV-WORKLOAD-ENTRY-RETURN-OK] pos=${after.x.toFixed(2)} ${after.y.toFixed(2)} ${after.z.toFixed(2)} ` +
