@@ -8635,6 +8635,7 @@ function configurePathfinderMovements(bot, config, options = {}) {
   movements.canDig = false
   movements.allow1by1towers = false
   movements.allowParkour = false
+  movements.allowEntityDetection = false
   movements.allowSprinting = allowSprint
   movements.canSprint = allowSprint
   // Allow pathfinder to recognize slabs, chests, and barrels as walkable floor covers alongside carpets
@@ -19512,6 +19513,14 @@ function createBot(config) {
   applyAntiHunger(bot, config)
   installChatLogin(bot, config)
   installTeleportRequestAutoAccept(bot, config)
+  // Prune dropped-item entities from memory immediately to prevent flushed
+  // carpets (128x128 drops) from inflating process heap across hours of runtime.
+  // Server-authoritative item pickup and tossing are unaffected.
+  bot.on('entitySpawn', (entity) => {
+    if (entity?.name === 'item' && entity?.id != null) {
+      delete bot.entities[entity.id]
+    }
+  })
   bot.once('login', () => applyInventoryStateSync(bot, config))
   installVanillaSpeed(bot, config)
 
