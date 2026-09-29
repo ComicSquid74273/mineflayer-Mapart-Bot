@@ -16,6 +16,10 @@ process.on('unhandledRejection', (reason) => {
 })
 
 process.on('uncaughtException', (err) => {
+  // Ignore broken-pipe errors caused by writes to closed standard output streams (e.g. systemd null output)
+  if (err?.code === 'EPIPE' || String(err?.message || '').includes('write EPIPE')) {
+    return
+  }
   const stack = err?.stack || err || ''
   try {
     const fs = require('fs')
@@ -19517,6 +19521,17 @@ function createBot(config) {
   console.log(`[BOT] username=${username} target=${options.host}:${options.port} auth=${botCfg.auth || 'offline'} version=${botCfg.version || 'auto'}${proxyText}`)
 
   const bot = mineflayer.createBot(options)
+
+  // Velocity / 6b6t registry_data guard: on modern Minecraft (1.20.5+),
+  // backend server transfers send segmented registry_data where some entries
+  // lack a valid NBT value payload. Prismarine-registry crashes on nbt.simplify(undefined).
+  // Prepend a listener to filter out malformed entries before the game plugin receives them.
+  bot._client.prependListener('registry_data', (packet) => {
+    const codec = packet?.codec || packet
+    if (Array.isArray(codec?.entries)) {
+      codec.entries = codec.entries.filter((entry) => entry && entry.value != null)
+    }
+  })
 
   installConfigurationTransferGuard(bot, {
     logger: (message) => console.log(message)
