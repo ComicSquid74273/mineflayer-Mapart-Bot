@@ -4292,7 +4292,27 @@ function rememberRecentServerMessage(bot, message, source = 'chat') {
   if (!text) return
   const lower = text.toLowerCase()
   const loginPromptSeen = lower.includes('please login with the command') || lower.includes('/login <password>')
-  if (lower.includes('welcome to 6b6t.org')) {
+  const serverRestartNotice = lower.includes('6b6t is starting up') ||
+    lower.includes('you can wait here') ||
+    lower.includes('server shutting down') ||
+    lower.includes('server restarts in') ||
+    lower.includes('we\'ve sent you back to the backup server') ||
+    lower.includes('6b6t will soon come back online')
+  const workerTransferNotice = lower.includes("you're now playing on worker-") ||
+    lower.includes('connected through proxy-') ||
+    lower.includes('welcome to 6b6t.org')
+
+  if (serverRestartNotice) {
+    bot.__nervServerRestartHoldActive = true
+    bot.__nervServerRestartHoldAt = Date.now()
+    bot.__nervFinalWorldWelcomeSeen = false
+    console.log(`[SERVER-REBOOT-GUARD] 6b6t restart/transfer detected: "${text}". Pausing watchdog reconnect loops and /home commands.`)
+  } else if (workerTransferNotice) {
+    if (bot.__nervServerRestartHoldActive) {
+      console.log(`[SERVER-REBOOT-GUARD] Destination worker confirmed: "${text}". Resuming normal platform validation.`)
+    }
+    bot.__nervServerRestartHoldActive = false
+    bot.__nervServerRestartHoldAt = 0
     bot.__nervFinalWorldWelcomeSeen = true
   } else if (loginPromptSeen || lower.includes('enter the server through the portal')) {
     bot.__nervFinalWorldWelcomeSeen = false
@@ -5174,6 +5194,11 @@ function startPlatformStallReconnectWatchdog(bot, config) {
       return
     }
     if (bot.__nervPlatformWaterHoldActive || bot.__nervPlatformWaterHoldPromise) {
+      resetBaseline(bot?.entity?.position, lastProgressToken)
+      return
+    }
+    // Suppress stall-reconnect during 6b6t server restart/backup lobby hold
+    if (bot.__nervServerRestartHoldActive) {
       resetBaseline(bot?.entity?.position, lastProgressToken)
       return
     }
@@ -24658,6 +24683,8 @@ function isBotReadyForPlatformHomeCommand(bot, config) {
 function shouldRequestPlatformRecoveryTpa(bot, config, runtime) {
   if (isDeliveryMode(config)) return false
   if (bot.__nervAllowOffPlatformNavigation) return false
+  // Suppress /home while 6b6t server restart/backup lobby hold is active
+  if (bot.__nervServerRestartHoldActive) return false
   // A vertical hazard inside the platform footprint is a local route bug, not
   // a lost-world condition. Hold movement for diagnosis; do not mask it with
   // repeated /home requests or consume the server teleport cooldown.
@@ -24994,6 +25021,11 @@ async function waitForPlatformReady(bot, config, reason = 'platform-hold', optio
         continue
       }
       activeStuckMs += elapsedSinceLastCheck
+      // Do not count time spent waiting in 6b6t server restart/backup lobby toward stuck timeout
+      if (bot.__nervServerRestartHoldActive) {
+        activeStuckMs = 0
+        lastStuckCheckAt = Date.now()
+      }
       if (activeStuckMs > stuckTimeoutMs) {
         console.log(`[PLATFORM-HOLD] Still off-platform after ${Math.round(stuckTimeoutMs / 1000)}s active hold; leaving the live session untouched for recovery and diagnosis.`)
         activeStuckMs = 0
