@@ -618,7 +618,7 @@ function shouldUseStraightWorkloadCheckpoint(action, enabled = true) {
 function configureStepHeight(bot, config = {}) {
   if (!bot?.physics) return null
   const configured = Number(config?.advanced?.vanillaStepHeight)
-  const stepHeight = Math.max(0.6, Math.min(1.1, Number.isFinite(configured) ? configured : 1.1))
+  const stepHeight = Math.max(0.6, Math.min(1.25, Number.isFinite(configured) ? configured : 1.25))
   bot.physics.stepHeight = stepHeight
   return stepHeight
 }
@@ -659,12 +659,11 @@ function playerPositionOverlapsBlockCollision(bot, position, options = {}) {
           const maxY = y + Number(shape[4])
           const maxZ = z + Number(shape[5])
           if (![minX, minY, minZ, maxX, maxY, maxZ].every(Number.isFinite)) return true
-          // Ignore floor/chest/soul-sand support blocks underfoot: if the shape starts
+          // Ignore floor/soul-sand support blocks underfoot: if the shape starts
           // below the player's feet (minY < player.minY - 0.2) and only slightly enters
-          // the bottom of the bounding box (maxY <= player.minY + 0.30), it is supporting
+          // the bottom of the bounding box (maxY <= player.minY + 0.05), it is supporting
           // floor at the current elevation, not a wall or obstacle ahead.
-          // Tolerance 0.30 accommodates standing on chests (top 0.875) next to full blocks (top 1.0, delta 0.125).
-          if (minY < player.minY - 0.2 && maxY <= player.minY + 0.30) continue
+          if (minY < player.minY - 0.2 && maxY <= player.minY + 0.05) continue
           if (
             player.minX < maxX - epsilon && player.maxX > minX + epsilon &&
             player.minY < maxY - epsilon && player.maxY > minY + epsilon &&

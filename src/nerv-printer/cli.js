@@ -1037,6 +1037,23 @@ function installVanillaSpeed(bot, config) {
         if (lowerBlock && lowerBlock.name !== 'air') return
       }
 
+      // Step-up edge: destination block surface is higher than current feet elevation —
+      // yield to native physics so the engine can step up cleanly without horizontal clipping
+      if (blockBelow && blockBelow.name !== 'air') {
+        const shapes = Array.isArray(blockBelow.shapes) ? blockBelow.shapes : []
+        let blockTop = blockBelow.position.y
+        if (shapes.length > 0) {
+          let maxShape = -Infinity
+          for (const s of shapes) {
+            if (Array.isArray(s) && Number.isFinite(s[4])) maxShape = Math.max(maxShape, s[4])
+          }
+          if (Number.isFinite(maxShape)) blockTop += maxShape
+        } else if (blockBelow.boundingBox === 'block') {
+          blockTop += 1.0
+        }
+        if (blockTop > pos.y + 0.001) return
+      }
+
       if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
         pos.x = nextPos.x
         pos.z = nextPos.z
@@ -8667,17 +8684,13 @@ function configurePathfinderMovements(bot, config, options = {}) {
   movements.allowEntityDetection = false
   movements.allowSprinting = allowSprint
   movements.canSprint = allowSprint
-  // Allow pathfinder to recognize slabs, chests, and barrels as walkable floor covers alongside carpets
+  // Allow pathfinder to recognize slabs as walkable floor covers alongside carpets
   if (bot.registry?.blocksArray) {
     for (const b of bot.registry.blocksArray) {
       if (b.name.endsWith('_slab')) {
         movements.carpets.add(b.id)
       }
     }
-  }
-  for (const name of ['chest', 'trapped_chest', 'ender_chest', 'barrel']) {
-    const b = bot.registry?.blocksByName?.[name]
-    if (b) movements.carpets.add(b.id)
   }
   // Machine/platform navigation must never turn a missing walk node into a
   // bridge-placement path. Pathfinder approaches those placement nodes by
@@ -25290,7 +25303,7 @@ function logStartupSummary(config, reconnect) {
     `[STARTUP] connection=${connection.selected || connection.active || 'default'} host=${bot.host || '127.0.0.1'} port=${toNumber(bot.port, 25565)} inputMode=${String(files.inputMode || 'auto')}`
   )
   console.log(
-    `[STARTUP] allowJump=false stepHeight=${Math.max(0.6, Math.min(1.1, toNumber(config.advanced?.vanillaStepHeight, 1.1)))} offset=(${toNumber(offset.x, 0)},${toNumber(offset.y, 0)},${toNumber(offset.z, -1)}) resume=${files.resumeProgress !== false}`
+    `[STARTUP] allowJump=false stepHeight=${Math.max(0.6, Math.min(1.25, toNumber(config.advanced?.vanillaStepHeight, 1.25)))} offset=(${toNumber(offset.x, 0)},${toNumber(offset.y, 0)},${toNumber(offset.z, -1)}) resume=${files.resumeProgress !== false}`
   )
   console.log(
     `[STARTUP] reconnect enabled=${reconnect.enabled} delayMs=${reconnect.delayMs} maxAttempts=${reconnect.maxAttempts}`
