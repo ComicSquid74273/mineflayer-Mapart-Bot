@@ -24,6 +24,7 @@ function mergeBotConfigDefaults(configPath) {
   if (adv.latencySafeModeResumeMs === undefined || adv.latencySafeModeResumeMs === 85) adv.latencySafeModeResumeMs = 280
   if (adv.dumpInventoryStableMs === undefined || adv.dumpInventoryStableMs === 400 || adv.dumpInventoryStableMs === 2500) adv.dumpInventoryStableMs = 1200
   if (adv.machineAccessSprintMode === undefined || adv.machineAccessSprintMode === 'disabled') adv.machineAccessSprintMode = 'enabled'
+  if (adv.machineAccessPreciseVerticalTolerance === undefined || adv.machineAccessPreciseVerticalTolerance < 1.25) adv.machineAccessPreciseVerticalTolerance = 1.25
   if (adv.inventoryRefillRows === undefined || adv.inventoryRefillRows < 4) adv.inventoryRefillRows = 4
   if (adv.autoEatTargetHunger === undefined || adv.autoEatTargetHunger < 18) adv.autoEatTargetHunger = 20
   if (adv.autoEatMinHunger === undefined || adv.autoEatMinHunger < 16) adv.autoEatMinHunger = 16

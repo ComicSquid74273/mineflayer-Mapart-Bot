@@ -8910,7 +8910,10 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
       const activeJump = jump || shouldStepDownJump
       bot.__nervAllowActiveJump = activeJump
       bot.setControlState('jump', activeJump)
-      bot.setControlState('sprint', sprint && !latencyState.shouldDisableSprint)
+      const isDynamicSprint = typeof options.shouldSprint === 'function'
+        ? options.shouldSprint(pos, point)
+        : sprint
+      bot.setControlState('sprint', isDynamicSprint && !latencyState.shouldDisableSprint)
       bot.setControlState('forward', true)
       await delay(tickMs)
       if (latencyState.delayMs > 0) {
@@ -17762,10 +17765,37 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     const drainStart = Date.now()
     const placeRangeSq = placeRange * placeRange
     const Vec3Drain = bot.entity.position.constructor
+    const botPos = bot.entity.position
+
+    // Actively attempt to place any nearby unplaced targets in activeCols
+    const nearbyUnplaced = batchTargets.filter((target) => {
+      if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) return false
+      const key = getTargetKey(target)
+      if (seen.has(key) || stallSkipped.has(key)) return false
+      const actual = bot.blockAt(new Vec3Drain(target.position.x, target.position.y, target.position.z))
+      if (actual?.name === target.blockName) {
+        markTargetPlacedInWorld(target, key)
+        return false
+      }
+      const dx = botPos.x - (target.position.x + 0.5)
+      const dy = botPos.y - (target.position.y + 0.5)
+      const dz = botPos.z - (target.position.z + 0.5)
+      return dx * dx + dy * dy + dz * dz <= placeRangeSq
+    })
+
+    for (const target of nearbyUnplaced) {
+      try {
+        const result = await placeNervScannerTarget(bot, config, target)
+        if (result.state === 'placed') {
+          placed += 1
+          markTargetPlacedInWorld(target, getTargetKey(target))
+        }
+      } catch { }
+    }
+
     while (Date.now() - drainStart < drainTimeoutMs) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       const now = Date.now()
-      const botPos = bot.entity.position
       const hasNearbyPending = batchTargets.some((target) => {
         const key = getTargetKey(target)
         if (seen.has(key) || stallSkipped.has(key)) return false
@@ -17933,6 +17963,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   })())
 
   try {
+    // Actively place entrance row targets before forward sprint begins
+    await drainActiveColumnTargets(250)
+
     for (const checkpoint of checkpoints) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (emergencyRestockBlock) break
@@ -17970,6 +18003,18 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         checkpointMoveInProgress = true
         try {
           if (useStraightCheckpoint) {
+            const startMovePos = beforeMove ? { x: beforeMove.x, y: beforeMove.y, z: beforeMove.z } : null
+            const legDistance = startMovePos ? horizontalDistance(startMovePos, checkpoint.position) : 0
+            const shouldSprintDynamic = (pos, goal) => {
+              if (!shouldSprint || !pos) return false
+              if (legDistance > 16 && startMovePos) {
+                const distFromStart = horizontalDistance(pos, startMovePos)
+                const distToGoal = horizontalDistance(pos, goal)
+                if (distFromStart < 2.0 || distToGoal < 2.5) return false
+              }
+              return true
+            }
+
             await walkStraightToPointWithHardTimeout(
               bot,
               checkpoint.position,
@@ -17979,6 +18024,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               {
                 config,
                 sprint: shouldSprint,
+                shouldSprint: shouldSprintDynamic,
                 jump: false,
                 tickMs: straightCheckpointTickMs,
                 shouldPauseTimeout: () => !isWorkloadPlatformReady(),
@@ -21026,11 +21072,13 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
-      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 2 : 0
+      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 4 : 0
+      const isTrailing = currentGoal ? (currentGoal.z > botZ ? tz <= botZ : tz >= botZ) : false
+      const trailingBonus = isTrailing ? 2 : 0
       const heldName = String(bot.heldItem?.name || '')
       const heldCount = Number(bot.heldItem?.count || 0)
       const heldBonus = (heldName && heldCount > 0 && target.blockName === heldName) ? 1 : 0
-      const priority = repairPriority + heldBonus
+      const priority = repairPriority + trailingBonus + heldBonus
 
       if (priority > bestPriority || (priority === bestPriority && distance2 < bestDistance2)) {
         // Only do blockAt for the current best candidate to skip expensive world reads
@@ -24895,7 +24943,7 @@ function isMachineElevationReady(bot, config) {
   const currentY = Number(bot?.entity?.position?.y)
   const tolerance = Math.max(
     0.1,
-    toNumber(config?.advanced?.machineAccessPreciseVerticalTolerance, 0.75)
+    toNumber(config?.advanced?.machineAccessPreciseVerticalTolerance, 1.25)
   )
   return Number.isFinite(currentY) && Math.abs(currentY - expectedY) <= tolerance
 }
