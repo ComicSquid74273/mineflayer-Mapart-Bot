@@ -8637,13 +8637,17 @@ function configurePathfinderMovements(bot, config, options = {}) {
   movements.allowParkour = false
   movements.allowSprinting = allowSprint
   movements.canSprint = allowSprint
-  // Allow pathfinder to recognize slabs as walkable floor covers alongside carpets
+  // Allow pathfinder to recognize slabs, chests, and barrels as walkable floor covers alongside carpets
   if (bot.registry?.blocksArray) {
     for (const b of bot.registry.blocksArray) {
       if (b.name.endsWith('_slab')) {
         movements.carpets.add(b.id)
       }
     }
+  }
+  for (const name of ['chest', 'trapped_chest', 'ender_chest', 'barrel']) {
+    const b = bot.registry?.blocksByName?.[name]
+    if (b) movements.carpets.add(b.id)
   }
   // Machine/platform navigation must never turn a missing walk node into a
   // bridge-placement path. Pathfinder approaches those placement nodes by

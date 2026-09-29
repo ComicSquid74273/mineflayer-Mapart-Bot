@@ -67,6 +67,7 @@ function createLiquidProximityExclusion(bot, radius = 1) {
 function isWalkableFloorCover(block) {
   const name = String(block?.name || '').toLowerCase()
   if (name === 'carpet' || name.endsWith('_carpet')) return true
+  if (name === 'chest' || name === 'trapped_chest' || name === 'ender_chest' || name === 'barrel') return true
   if (!name.endsWith('_slab')) return false
 
   let slabType = ''
