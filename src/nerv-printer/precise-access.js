@@ -221,7 +221,8 @@ function assertSafeDirectMachineRoutePoint(bot, position, target, options = {}) 
       }
     }
     const feetFloorCover = isWalkableFloorCover(feet)
-    if (floor.boundingBox !== 'block' && !feetFloorCover) {
+    const floorCover = isWalkableFloorCover(floor)
+    if (floor.boundingBox !== 'block' && !floorCover && !feetFloorCover) {
       throw new Error(
         `direct-machine-route-missing-floor ${floor.name || 'unknown'} at ${x},${feetY - 1},${z} ` +
         `feet=${feet.name || 'unknown'}`
