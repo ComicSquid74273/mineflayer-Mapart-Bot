@@ -7919,10 +7919,11 @@ function shouldWaitForRequiredMaterialRestock(config) {
 
 function getRequiredMaterialTargetCount(bot, blockName, requestedPulls = 1, neededByBlock = null) {
   const have = countInventoryItems(bot, blockName)
-  if (neededByBlock instanceof Map && neededByBlock.has(blockName)) {
-    return Math.max(0, toNumber(neededByBlock.get(blockName), have))
-  }
   const stackSize = Math.max(1, toNumber(bot?.registry?.itemsByName?.[blockName]?.stackSize, 64))
+  if (neededByBlock instanceof Map && neededByBlock.has(blockName)) {
+    const rawNeeded = Math.max(0, toNumber(neededByBlock.get(blockName), have))
+    return Math.max(have, Math.ceil(rawNeeded / stackSize) * stackSize)
+  }
   return have + (Math.max(1, toNumber(requestedPulls, 1)) * stackSize)
 }
 
@@ -9051,10 +9052,9 @@ async function reachDumpStation(bot, config, station, range = 0.5) {
   const standPoint = getDumpStationStandPoint(stationPos)
   if (!standPoint) return false
 
-  const dumpPreciseTolerance = Math.max(0.05, toNumber(config.advanced?.dumpPreciseTolerance, 0.2))
-  const dumpGoalRange = Math.max(range, toNumber(config.advanced?.dumpGoalRange, 1))
-  const dist = bot.entity.position.distanceTo(new bot.entity.position.constructor(Number(standPoint.x), Number(standPoint.y), Number(standPoint.z)))
-  if (dist <= dumpPreciseTolerance) {
+  const dumpGoalRange = Math.max(1.2, toNumber(config.advanced?.dumpGoalRange, 1.2))
+  const dist = horizontalDistance(bot.entity.position, standPoint)
+  if (dist <= dumpGoalRange) {
     await maintainDumpAim(bot, config, station)
     return true
   }
@@ -14724,18 +14724,24 @@ function selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrd
   const selectedCols = colBatch.slice(0, Math.min(lineLimit, colBatch.length))
   const selectedMaterials = new Set()
   const selectedTargets = []
+  const rowWidth = Math.max(1, toNumber(config.printer?.linesPerRun, 4))
 
-  for (const row of rowOrder) {
-    for (const col of selectedCols) {
-      const target = byColRow.get(`${col}:${row}`)
-      if (!target) continue
+  for (let laneStart = 0; laneStart < selectedCols.length; laneStart += rowWidth) {
+    const laneCols = selectedCols.slice(laneStart, laneStart + rowWidth)
+    const isEvenLane = Math.floor(laneStart / rowWidth) % 2 === 0
+    const laneRowOrder = isEvenLane ? rowOrder : [...rowOrder].reverse()
+    for (const row of laneRowOrder) {
+      for (const col of laneCols) {
+        const target = byColRow.get(`${col}:${row}`)
+        if (!target) continue
 
-      const material = target.blockName
-      const isKnownMaterial = selectedMaterials.has(material)
-      if (!isKnownMaterial && selectedMaterials.size >= maxMaterialTypes) continue
+        const material = target.blockName
+        const isKnownMaterial = selectedMaterials.has(material)
+        if (!isKnownMaterial && selectedMaterials.size >= maxMaterialTypes) continue
 
-      selectedMaterials.add(material)
-      selectedTargets.push(target)
+        selectedMaterials.add(material)
+        selectedTargets.push(target)
+      }
     }
   }
 
@@ -14748,7 +14754,7 @@ function selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrd
 
 function getInventoryManagedLinesPerRun(config, linesPerRun) {
   const advanced = config.advanced || {}
-  const refillRows = Math.max(1, toNumber(advanced.inventoryRefillRows, 2))
+  const refillRows = Math.max(1, toNumber(advanced.inventoryRefillRows, 4))
   const rowWidth = Math.max(1, toNumber(linesPerRun, 1))
   return Math.max(1, rowWidth * refillRows)
 }
@@ -15040,7 +15046,7 @@ async function tossDumpStacksConfirmed(bot, config, requestedStacks, options = {
     }
   }
 
-  const stableMs = Math.max(50, toNumber(config.advanced?.dumpInventoryStableMs, 400))
+  const stableMs = Math.max(50, toNumber(config.advanced?.dumpInventoryStableMs, 1200))
   const result = await waitForSettledDumpInventory(bot, before, attempted, {
     pollMs: Math.max(25, toNumber(config.advanced?.dumpInventoryPollMs, 50)),
     stableMs,
@@ -15475,8 +15481,11 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
         const dumpSlots = plan.dumpSlots.slice(0, dumpsNeeded)
         console.log(`[NERV-DUMP] Dumping ${dumpSlots.length}/${plan.dumpSlots.length} slot(s) before restock: ${formatDumpSlots(dumpSlots)}`)
         const dumped = await dumpNervInventorySlots(bot, config, dumpSlots, 'nervPredumpBeforeRefill')
-        if (dumped <= 0) return false
-        await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+        if (dumped <= 0) {
+          console.warn(`[NERV-DUMP-WARN] Predump could not dump ${dumpsNeeded} slot(s); continuing restock with available capacity.`)
+        } else {
+          await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+        }
         continue
       }
     }
@@ -16976,23 +16985,26 @@ function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0) 
   const minZ = Math.min(...batchTargets.map((target) => target.position.z))
   const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
   const activeCols = new Set(batchTargets.map((target) => target.col))
-  const cp1 = { x: leadX + 0.5, y: leadY, z: minZ + 0.5 }
-  const cp2 = { x: leadX + 0.5, y: leadY, z: maxZ + 0.5 }
+  // Offset entry by 0.5 blocks before start row so the first carpet is in front of the bot
+  // (> minPlaceDistance 0.8) and placed under forward gaze without hitbox collision.
+  // Extend exit by 0.5 blocks past end row so the final carpet is fully placed before turn.
+  const northPos = { x: leadX + 0.5, y: leadY, z: minZ - 0.5 }
+  const southPos = { x: leadX + 0.5, y: leadY, z: maxZ + 1.5 }
 
   if (segmentSize <= 0 || maxZ - minZ <= segmentSize) {
     return startOnNorthSide
-      ? [{ position: cp1, action: '', activeCols }, { position: cp2, action: 'lineEnd', activeCols }]
-      : [{ position: cp2, action: '', activeCols }, { position: cp1, action: 'lineEnd', activeCols }]
+      ? [{ position: northPos, action: '', activeCols }, { position: southPos, action: 'lineEnd', activeCols }]
+      : [{ position: southPos, action: '', activeCols }, { position: northPos, action: 'lineEnd', activeCols }]
   }
 
   const startZ = startOnNorthSide ? minZ : maxZ
   const endZ = startOnNorthSide ? maxZ : minZ
   const dir = startOnNorthSide ? 1 : -1
-  const checkpoints = [{ position: { x: leadX + 0.5, y: leadY, z: startZ + 0.5 }, action: '', activeCols }]
+  const checkpoints = [{ position: { x: leadX + 0.5, y: leadY, z: startZ - dir * 0.5 }, action: '', activeCols }]
   for (let z = startZ + dir * segmentSize; dir > 0 ? z < endZ : z > endZ; z += dir * segmentSize) {
     checkpoints.push({ position: { x: leadX + 0.5, y: leadY, z: z + 0.5 }, action: 'inline-repair', activeCols })
   }
-  checkpoints.push({ position: { x: leadX + 0.5, y: leadY, z: endZ + 0.5 }, action: 'lineEnd', activeCols })
+  checkpoints.push({ position: { x: leadX + 0.5, y: leadY, z: endZ + dir * 1.5 }, action: 'lineEnd', activeCols })
   return checkpoints
 }
 
@@ -17240,7 +17252,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   return { placed, already, skipped, seen: seen.size + latencySafeSeen, missing }
 }
 
-async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true) {
+async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true, options = {}) {
   if (!batchTargets.length) {
     return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
   }
@@ -17264,7 +17276,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
   const optimisticRetryMs = Math.max(25, toNumber(advanced.scannerOptimisticRetryMs, Math.max(120, pollMs * 4)))
   const inlineRepairEnabled = advanced.scannerInlineRepairEnabled === true
-  const lineEndSettleMs = Math.max(0, toNumber(advanced.scannerLineEndSettleMs, 0))
+  const lineEndSettleMs = Math.max(0, toNumber(advanced.scannerLineEndSettleMs, 250))
   const missRecoveryEnabled = advanced.scannerMissRecoveryEnabled !== false
   const missRecoveryThreshold = Math.max(1, toNumber(advanced.scannerMissRecoveryThreshold, 3))
   const missRecoveryBacktrackBlocks = Math.max(1, toNumber(advanced.scannerMissRecoveryBacktrackBlocks, 3))
@@ -18179,14 +18191,17 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   if (allowEmergencyRestock && emergencyRestockBlock) {
     console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; stopping movement, refilling, and retrying remaining targets once.`)
     const unresolvedBeforeRestock = getUnresolvedTraversalTargets()
-    const traversalNeededByBlock = estimateNeededFromLookahead(unresolvedBeforeRestock.length ? unresolvedBeforeRestock : batchTargets)
+    const fullWindowTargets = Array.isArray(options?.windowTargets) && options.windowTargets.length > 0
+      ? options.windowTargets
+      : (unresolvedBeforeRestock.length ? unresolvedBeforeRestock : batchTargets)
+    const traversalNeededByBlock = estimateNeededFromLookahead(fullWindowTargets)
     const restocked = await waitForRequiredMaterialRestock(bot, config, emergencyRestockBlock, 1, traversalNeededByBlock, emergencyRestockReason || 'workload-emergency-restock')
     const hasEmergencyMaterial = restocked || countInventoryItems(bot, emergencyRestockBlock) > 0
-    if (hasEmergencyMaterial && unresolvedBeforeRestock.length > 0) {
-      await ensureMaterialsForTargets(bot, config, unresolvedBeforeRestock, {
+    if (hasEmergencyMaterial && fullWindowTargets.length > 0) {
+      await ensureMaterialsForTargets(bot, config, fullWindowTargets, {
         force: true,
         windowed: true,
-        materials: [...new Set(unresolvedBeforeRestock.map((target) => target.blockName).filter(Boolean))]
+        materials: [...new Set(fullWindowTargets.map((target) => target.blockName).filter(Boolean))]
       })
     }
     if (hasEmergencyMaterial) {
@@ -19174,8 +19189,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       windowed: true,
       cols: inventoryWindow.cols,
       materials: inventoryWindow.materials,
-      
-      dumpAllUnneededBeforeRestock: true
+      dumpAllUnneededBeforeRestock: false
     })
     if (!materialsReady) {
       console.log('[NERV-INVENTORY-WARN] Could not fully clean/refill inventory for this window; continuing with current inventory. Emergency restocks will handle any shortfalls.')
@@ -19212,7 +19226,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         await ensureFoodBeforeTraversal(bot, config, `litematic-batch cols=${colBatch.join(',')}`)
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
         await prepareHotbarForBatch(bot, config, batchTargets)
-        const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
+        const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide, true, { windowTargets: inventoryWindow.targets })
         placed += result.placed
         already += result.already
         skipped += result.skipped
@@ -19259,7 +19273,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
         await prepareHotbarForBatch(bot, config, batchTargets)
         const result = scannerWorkloadMode === 'time'
-          ? await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
+          ? await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide, true, { windowTargets: inventoryWindow.targets })
           : await runNervScannerPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
         placed += result.placed
         already += result.already
@@ -25517,7 +25531,7 @@ function runSingleSession(config, sessionNumber) {
     if (lobbyHostFailoverSettings.enabled && is6b6tConfig(config) && get6b6tHosts(config).length > 1 && isLobbyPortalEnabled(config)) {
       let lobbyHostFailoverState = {}
       lobbyHostFailoverTimer = setInterval(() => {
-        if (settled || successfulStartup || bot.__nervSessionActive === false) return
+        if (settled || successfulStartup || bot.__nervSessionActive === false || bot.__nervServerRestartHoldActive === true) return
         const matchedRegion = getMatchedLobbyHostFailoverRegion(
           bot?.entity?.position,
           getLobbyPortalConfig(config),
@@ -27513,11 +27527,11 @@ async function runWorkerReconnectLoop(workerConfig, assignment, reconnect) {
       }
 
       const retryDelayMs = getReconnectDelayForSession(session, reconnect)
-      if (runtimeHosts.length > 1 && session.successfulStartup !== true && (!pinnedHostActive || forceHostReconnect)) {
+      if (runtimeHosts.length > 1 && forceHostReconnect) {
         const previousHost = runtimeHosts[runtimeHostIndex]
         runtimeHostIndex = nextHostIndex(runtimeHosts, runtimeHostIndex)
-        console.log(`[6B6T-HOSTS] ${assignment.name} switching host after failed startup: ${previousHost} -> ${runtimeHosts[runtimeHostIndex]}`)
-        if (forceHostReconnect) failedPinnedHosts.add(previousHost)
+        console.log(`[6B6T-HOSTS] ${assignment.name} switching host after unrecoverable network failure: ${previousHost} -> ${runtimeHosts[runtimeHostIndex]}`)
+        failedPinnedHosts.add(previousHost)
         saveHostState(assignment.name, createPersistedHostState(runtimeHosts, runtimeHostIndex))
       }
 

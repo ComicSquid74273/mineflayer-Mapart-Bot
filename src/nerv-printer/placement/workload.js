@@ -29,12 +29,15 @@ function createPlacementWorkload(deps) {
     const minZ = Math.min(...batchTargets.map((target) => target.position.z))
     const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
     const activeCols = new Set(batchTargets.map((target) => target.col))
-    const cp1 = { x: leadX + 0.5, y: leadY, z: minZ + 0.5 }
-    const cp2 = { x: leadX + 0.5, y: leadY, z: maxZ + 0.5 }
+    // Offset entry by 0.5 blocks before start row so the first carpet is in front of the bot
+    // (> minPlaceDistance 0.8) and placed under forward gaze without hitbox collision.
+    // Extend exit by 0.5 blocks past end row so the final carpet is fully placed before turn.
+    const northPos = { x: leadX + 0.5, y: leadY, z: minZ - 0.5 }
+    const southPos = { x: leadX + 0.5, y: leadY, z: maxZ + 1.5 }
 
     return startOnNorthSide
-      ? [{ position: cp1, action: '', activeCols }, { position: cp2, action: 'lineEnd', activeCols }]
-      : [{ position: cp2, action: '', activeCols }, { position: cp1, action: 'lineEnd', activeCols }]
+      ? [{ position: northPos, action: '', activeCols }, { position: southPos, action: 'lineEnd', activeCols }]
+      : [{ position: southPos, action: '', activeCols }, { position: northPos, action: 'lineEnd', activeCols }]
   }
 
   function getMissingTargets(bot, batchTargets) {

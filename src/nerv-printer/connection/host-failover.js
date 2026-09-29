@@ -197,8 +197,8 @@ function createHostConnectionFailureSession(error) {
 
 function isHostFailoverSession(session) {
   const endReason = String(session?.endReason || '').toLowerCase()
-  if (endReason === 'host-connection-error' || endReason.startsWith('host-failover-')) return true
-  return isHostConnectionError(`${session?.lastError || ''} ${session?.kickedReason || ''}`)
+  if (endReason === 'host-connection-error') return true
+  return isHostConnectionError(`${session?.lastError || ''} ${session?.kickedReason || ''} ${session?.endReason || ''}`)
 }
 
 module.exports = {
