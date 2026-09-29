@@ -12002,7 +12002,7 @@ async function gotoPostPrintPoint(bot, config, point, label, range = 1, options 
     bot,
     point,
     point,
-    Math.min(0.35, Math.max(0.1, toNumber(range, 1))),
+    Math.max(0.1, toNumber(range, 1)),
     config,
     label,
     accessOptions
@@ -13789,7 +13789,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
       const center = getMapCenterPosition(config)
       await waitForPlatformReady(bot, config, 'postprint-fill-map', postPrintDeadlineOptions('fill_map'))
       try {
-        await gotoPostPrintPoint(bot, config, center, 'postprint-fill-map-center', 1, postPrintDeadlineOptions('fill_map'))
+        await gotoPostPrintPoint(bot, config, center, 'postprint-fill-map-center', 2, postPrintDeadlineOptions('fill_map'))
       } catch (err) {
         return failPostPrint('fill_map', `Could not reach map center before map activation: ${err?.message || err}`)
       }
