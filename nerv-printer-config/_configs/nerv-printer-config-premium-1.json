@@ -291,8 +291,8 @@
       "z": -1
     },
     "linesPerRun": 4,
-    "placeRange": 4,
-    "minPlaceDistance": 0.8,
+    "placeRange": 5,
+    "minPlaceDistance": 0.35,
     "ignoredBlocks": [],
     "placeDelayMs": 0,
     "rotate": false,

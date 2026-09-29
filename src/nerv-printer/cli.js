@@ -17077,7 +17077,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   if (!batchTargets.length) return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0 }
 
   const printer = config.printer || {}
-  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 5))
   if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
     console.log(`[NERV-SCANNER-LATENCY-SAFE] MC ping high; switching ${batchTargets.length} target(s) to one-by-one confirmed placement.`)
     const safe = await runLatencySafePlacementBatch(bot, config, batchTargets, placeRange, 'NERV-SCANNER-LATENCY-SAFE')
@@ -17259,7 +17259,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   const printer = config.printer || {}
   const advanced = config.advanced || {}
-  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 5))
   if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
     console.log(`[NERV-WORKLOAD-LATENCY-SAFE] MC ping high; switching ${batchTargets.length} target(s) to one-by-one confirmed placement.`)
     const safe = await runLatencySafePlacementBatch(bot, config, batchTargets, placeRange, 'NERV-WORKLOAD-LATENCY-SAFE')
@@ -17703,7 +17703,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       if (activeCols instanceof Set && !activeCols.has(target.col)) return false
       if (stallSkipped.has(getTargetKey(target))) return false
       const actual = bot.blockAt(new Vec3Current(target.position.x, target.position.y, target.position.z))
-      return actual?.name !== target.blockName
+      if (!actual) return false
+      return actual.name !== target.blockName
     })
   }
   const getUnresolvedTraversalTargets = () => {
@@ -17711,7 +17712,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     return batchTargets.filter((target) => {
       if (stallSkipped.has(getTargetKey(target))) return false
       const actual = bot.blockAt(new Vec3Current(target.position.x, target.position.y, target.position.z))
-      return actual?.name !== target.blockName
+      if (!actual) return false
+      return actual.name !== target.blockName
     })
   }
   const scanNearbyRepairAlerts = () => {
@@ -18113,7 +18115,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
           if (stillMissed.length > 0) {
             console.log(`[NERV-WORKLOAD-MISS-RECOVERY] ${stillMissed.length} still unresolved after backtrack; running targeted repair.`)
-            const repaired = await repairTargetsInBatches(bot, config, stillMissed, Math.max(1, toNumber(printer.placeRange, 4)), 'NERV-MISS-REPAIR')
+            const repaired = await repairTargetsInBatches(bot, config, stillMissed, Math.max(1, toNumber(printer.placeRange, 5)), 'NERV-MISS-REPAIR')
             placed += repaired.placed
             already += repaired.already
             skipped += repaired.skipped
@@ -18137,7 +18139,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           currentAction = 'lineEnd-repair'
           try {
             console.log(`[NERV-WORKLOAD-LINEEND-REPAIR] unresolved=${rowErrors.length}; repairing before next traversal leg.`)
-            const repaired = await repairTargetsInBatches(bot, config, rowErrors, Math.max(1, toNumber(printer.placeRange, 4)), 'NERV-WORKLOAD-LINEEND')
+            const repaired = await repairTargetsInBatches(bot, config, rowErrors, Math.max(1, toNumber(printer.placeRange, 5)), 'NERV-WORKLOAD-LINEEND')
             placed += repaired.placed
             already += repaired.already
             skipped += repaired.skipped
@@ -18799,7 +18801,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     checkRuntimeStop()
   }
 
-  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 5))
   const cliPostPrintTestOnly = hasCliFlag('--test-post-print') || hasCliFlag('--post-print-test-only')
   const cliPostPrintFullTest = hasCliFlag('--test-post-print-full') || hasCliFlag('--post-print-test-full')
   const postPrintTestOnly = printer.postPrintTestOnly === true || cliPostPrintTestOnly || cliPostPrintFullTest
@@ -18907,10 +18909,11 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-verification')
       checkRuntimeStop()
       const actual = bot.blockAt(new Vec3Verify(target.position.x, target.position.y, target.position.z))
-      if (actual?.name !== target.blockName) {
+      if (!actual) continue
+      if (actual.name !== target.blockName) {
         errorList.push(target)
         if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
-          const reason = (!actual || actual.name === 'air') ? 'missing' : `wrong-${actual.name}`
+          const reason = actual.name === 'air' ? 'missing' : `wrong-${actual.name}`
           console.log(`[LINEEND-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
         }
       } else {
@@ -18936,7 +18939,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-final-scan')
       checkRuntimeStop()
       const actual = bot.blockAt(new Vec3_Final(target.position.x, target.position.y, target.position.z))
-      if (!actual || actual.name !== target.blockName) fullMapErrors.push(target)
+      if (actual && actual.name !== target.blockName) fullMapErrors.push(target)
     }
     errorList.length = 0
     errorList.push(...fullMapErrors)
@@ -20747,7 +20750,7 @@ async function runMovingPlaceTest(bot, config) {
   const calibratedTargets = calibrateTargetsForWorld(bot, input.targets, config)
   const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const northToSouth = printer.northToSouth !== false
-  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 5))
   const tickMs = Math.max(10, toNumber(printer.fastTraversalTickMs, 40))
   const maxPerTick = Math.max(1, toNumber(printer.maxPlacementsPerTick, 1))
   const targetCount = Math.max(1, toNumber(config.advanced?.movingPlaceTestTargetCount, 64))
@@ -20980,9 +20983,9 @@ function buildNervScannerCheckpoints(targets, config, maxGroupsOverride = null) 
 
 function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processed = new Set(), activeCols = null, priorityKeys = null) {
   const printer = config.printer || {}
-  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 5))
   const placeRange2 = placeRange * placeRange
-  const minPlaceDistance = Math.max(0, toNumber(printer.minPlaceDistance, 0.8))
+  const minPlaceDistance = Math.max(0, toNumber(printer.minPlaceDistance, 0.35))
   const minPlaceDistance2 = minPlaceDistance * minPlaceDistance
   const bandWidth = Math.max(1, toNumber(printer.linesPerRun, 3))
   const goalBlockX = !(activeCols instanceof Set && activeCols.size > 0) && Number.isFinite(currentGoal?.x)
@@ -21620,7 +21623,7 @@ async function runRepairTest(bot, config) {
   const linesPerRun = Math.max(1, toNumber(printer.linesPerRun, 3))
   const northToSouth = printer.northToSouth !== false
   const orderedTargets = orderTargetsLineByLine(calibratedTargets, linesPerRun, northToSouth)
-  const placeRange = Math.max(1, toNumber(printer.placeRange, 4))
+  const placeRange = Math.max(1, toNumber(printer.placeRange, 5))
   const maxPasses = Math.max(1, toNumber(config.advanced?.repairTestMaxPasses, 3))
   const waitAfterMs = Math.max(0, toNumber(config.advanced?.repairTestWaitAfterMs, 5000))
 

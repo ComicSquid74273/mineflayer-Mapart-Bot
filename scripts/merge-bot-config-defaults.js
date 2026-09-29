@@ -11,6 +11,8 @@ function mergeBotConfigDefaults(configPath) {
 
   printer.allowJump = false
   printer.sprintMode = 'always'
+  if (printer.placeRange === undefined || printer.placeRange < 5) printer.placeRange = 5
+  if (printer.minPlaceDistance === undefined || printer.minPlaceDistance > 0.35) printer.minPlaceDistance = 0.35
   if (adv.vanillaSpeedEnabled === undefined) adv.vanillaSpeedEnabled = true
   if (adv.vanillaSpeedBps === undefined) adv.vanillaSpeedBps = 7.192
   if (adv.vanillaStepHeight === undefined || adv.vanillaStepHeight < 1.25) adv.vanillaStepHeight = 1.25
