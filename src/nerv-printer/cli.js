@@ -10183,8 +10183,9 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
         toNumber(runtimeConfig?.advanced?.machineAccessStrictLocalRadius, 12)
       )
     : Number.POSITIVE_INFINITY
+  const isStaged = options.staged === true
   const ingressDistance = horizontalDistance(bot?.entity?.position, goalPos)
-  if (!strict && ingressDistance > 32) {
+  if (!strict && !isStaged && ingressDistance > 32) {
     const segmentLength = 24
     const segments = Math.ceil(ingressDistance / segmentLength)
     const startPos = bot?.entity?.position ? { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z } : null
@@ -10207,7 +10208,7 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
           3,
           config,
           `${reason}:stage-${i}`,
-          { strict: false, avoidLiquids }
+          { strict: false, avoidLiquids, staged: true }
         )
       }
     }
