@@ -28,6 +28,8 @@ const {
   getWorkloadCheckpointMoveTimeoutMs,
   shouldUseStraightWorkloadCheckpoint,
   findSupportedUpperPlatformEgress,
+  configureStepHeight,
+  playerPositionOverlapsBlockCollision,
   normalizeCarpetSurfacePosition,
   normalizeMachineAccessSprintMode,
   createMachinePathSprintRecovery,
@@ -965,6 +967,49 @@ test('an incomplete cartography checkpoint without its filled map rewinds even a
   assert.equal(getIncompleteCartographyResumeStep('cartography', true, steps), 'cartography')
   assert.equal(getIncompleteCartographyResumeStep('rename_store', false, steps), 'withdraw')
   assert.equal(getIncompleteCartographyResumeStep('fill_map', false, steps), 'fill_map')
+})
+
+test('Meteor-style step height defaults to and caps at 1.1 without jumping', () => {
+  const bot = { physics: { stepHeight: 0.6 } }
+
+  assert.equal(configureStepHeight(bot, {}), 1.1)
+  assert.equal(bot.physics.stepHeight, 1.1)
+  assert.equal(configureStepHeight(bot, { advanced: { vanillaStepHeight: 0.9 } }), 0.9)
+  assert.equal(configureStepHeight(bot, { advanced: { vanillaStepHeight: 1.25 } }), 1.1)
+  assert.equal(configureStepHeight({}, {}), null)
+})
+
+test('vanilla speed collision guard rejects carpet, slab, and full-block overlap', () => {
+  const blocks = new Map()
+  const block = (name, x, y, z, shapes = []) => ({
+    name,
+    position: new Vec3(x, y, z),
+    shapes
+  })
+  blocks.set('2:1:0', block('white_carpet', 2, 1, 0, [[0, 0, 0, 1, 0.0625, 1]]))
+  blocks.set('3:1:0', block('smooth_stone_slab', 3, 1, 0, [[0, 0, 0, 1, 0.5, 1]]))
+  blocks.set('4:1:0', block('obsidian', 4, 1, 0, [[0, 0, 0, 1, 1, 1]]))
+  const bot = {
+    entity: { height: 1.8 },
+    blockAt(position) {
+      return blocks.get(`${position.x}:${position.y}:${position.z}`) || block('air', position.x, position.y, position.z)
+    }
+  }
+
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(1.69, 1, 0.5)), false)
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(1.71, 1, 0.5)), true)
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(2.71, 1, 0.5)), true)
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(3.71, 1, 0.5)), true)
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(2.5, 1.5, 0.5)), false)
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(3.5, 2, 0.5)), false)
+})
+
+test('vanilla speed collision guard fails closed for unloaded blocks', () => {
+  const bot = {
+    entity: { height: 1.8 },
+    blockAt() { return null }
+  }
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(10.5, 64, 10.5)), true)
 })
 
 test('machine access normalizes a transfer position embedded in a carpet collision surface', () => {

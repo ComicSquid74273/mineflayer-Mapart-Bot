@@ -615,6 +615,62 @@ function shouldUseStraightWorkloadCheckpoint(action, enabled = true) {
     normalizedAction === 'sprint'
 }
 
+function configureStepHeight(bot, config = {}) {
+  if (!bot?.physics) return null
+  const configured = Number(config?.advanced?.vanillaStepHeight)
+  const stepHeight = Math.max(0.6, Math.min(1.1, Number.isFinite(configured) ? configured : 1.1))
+  bot.physics.stepHeight = stepHeight
+  return stepHeight
+}
+
+function playerPositionOverlapsBlockCollision(bot, position, options = {}) {
+  const Vec3 = position?.constructor
+  if (!Vec3 || typeof bot?.blockAt !== 'function') return true
+  if (![position.x, position.y, position.z].every(Number.isFinite)) return true
+
+  const halfWidth = Math.max(0.01, Number(options.halfWidth) || 0.3)
+  const height = Math.max(0.01, Number(options.height) || Number(bot?.entity?.height) || 1.8)
+  const epsilon = Math.max(0, Number(options.epsilon) || 1e-7)
+  const player = {
+    minX: position.x - halfWidth,
+    minY: position.y,
+    minZ: position.z - halfWidth,
+    maxX: position.x + halfWidth,
+    maxY: position.y + height,
+    maxZ: position.z + halfWidth
+  }
+
+  for (let y = Math.floor(player.minY); y <= Math.floor(player.maxY); y += 1) {
+    for (let z = Math.floor(player.minZ); z <= Math.floor(player.maxZ); z += 1) {
+      for (let x = Math.floor(player.minX); x <= Math.floor(player.maxX); x += 1) {
+        let block = null
+        try {
+          block = bot.blockAt(new Vec3(x, y, z), false)
+        } catch {
+          return true
+        }
+        if (!block) return true
+        for (const shape of Array.isArray(block.shapes) ? block.shapes : []) {
+          if (!Array.isArray(shape) || shape.length < 6) continue
+          const minX = x + Number(shape[0])
+          const minY = y + Number(shape[1])
+          const minZ = z + Number(shape[2])
+          const maxX = x + Number(shape[3])
+          const maxY = y + Number(shape[4])
+          const maxZ = z + Number(shape[5])
+          if (![minX, minY, minZ, maxX, maxY, maxZ].every(Number.isFinite)) return true
+          if (
+            player.minX < maxX - epsilon && player.maxX > minX + epsilon &&
+            player.minY < maxY - epsilon && player.maxY > minY + epsilon &&
+            player.minZ < maxZ - epsilon && player.maxZ > minZ + epsilon
+          ) return true
+        }
+      }
+    }
+  }
+  return false
+}
+
 function normalizeCarpetSurfacePosition(bot, options = {}) {
   const position = bot?.entity?.position
   const Vec3 = position?.constructor
@@ -1049,6 +1105,8 @@ module.exports = {
   getWorkloadCheckpointMoveTimeoutMs,
   shouldUseStraightWorkloadCheckpoint,
   findSupportedUpperPlatformEgress,
+  configureStepHeight,
+  playerPositionOverlapsBlockCollision,
   normalizeCarpetSurfacePosition,
   normalizeMachineAccessSprintMode,
   createMachinePathSprintRecovery,

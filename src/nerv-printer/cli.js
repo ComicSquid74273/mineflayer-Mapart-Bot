@@ -166,6 +166,8 @@ const {
   getWorkloadCheckpointMoveTimeoutMs,
   shouldUseStraightWorkloadCheckpoint,
   findSupportedUpperPlatformEgress,
+  configureStepHeight,
+  playerPositionOverlapsBlockCollision,
   normalizeCarpetSurfacePosition,
   normalizeMachineAccessSprintMode,
   createMachinePathSprintRecovery,
@@ -975,6 +977,8 @@ function installVanillaSpeed(bot, config) {
   let prevX = null
   let prevZ = null
 
+  bot.once('inject_allowed', () => configureStepHeight(bot, config))
+
   bot._client.on('position', () => {
     prevX = null
     prevZ = null
@@ -1015,17 +1019,15 @@ function installVanillaSpeed(bot, config) {
       const boost = targetPerTick - movedDist
       const dirX = movedX / movedDist
       const dirZ = movedZ / movedDist
-      const nextX = pos.x + dirX * boost
-      const nextZ = pos.z + dirZ * boost
-
-      const Vec3Pos = pos.constructor
+      const nextPos = pos.offset(dirX * boost, 0, dirZ * boost)
       const checkY = Math.floor(pos.y - 0.1)
-      const blockBelow = bot.blockAt(new Vec3Pos(Math.floor(nextX), checkY, Math.floor(nextZ)))
-      if (blockBelow && blockBelow.name !== 'air') {
-        pos.x = nextX
-        pos.z = nextZ
-        prevX = nextX
-        prevZ = nextZ
+      const blockBelow = bot.blockAt(new pos.constructor(Math.floor(nextPos.x), checkY, Math.floor(nextPos.z)))
+
+      if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
+        pos.x = nextPos.x
+        pos.z = nextPos.z
+        prevX = nextPos.x
+        prevZ = nextPos.z
       }
     }
   })
@@ -5528,7 +5530,7 @@ function createDefaultConfig() {
       startOnSpawn: true,
       startDelayMs: 1500,
       startCornerMode: 'mapCorner',
-      allowJump: true,
+      allowJump: false,
       placeWhileSprinting: false,
       postPrintTestOnly: false,
       postPrintTestRuns: 1,
@@ -5777,6 +5779,7 @@ function createDefaultConfig() {
       debugPrints: false,
       vanillaSpeedEnabled: true,
       vanillaSpeedBps: 7.192,
+      vanillaStepHeight: 1.1,
       vanillaSpeedInLiquids: false,
       vanillaSpeedOnlyOnGround: true,
       vanillaSpeedPlatformOnly: true,
@@ -8615,17 +8618,13 @@ function getMachineAccessSprintMode(config) {
 
 function configurePathfinderMovements(bot, config, options = {}) {
   ensureUsableEntityState(bot, config, 'configure-pathfinder', { allowPlatformSeed: false, log: false })
-  const printer = config.printer || {}
-  const allowJump = options.allowJump != null
-    ? options.allowJump === true
-    : printer.allowJump !== false
   const allowSprint = options.allowSprint != null
     ? options.allowSprint === true
     : getPrinterSprintMode(config) !== 'off'
   const movements = new Movements(bot)
   movements.canDig = false
   movements.allow1by1towers = false
-  movements.allowParkour = allowJump
+  movements.allowParkour = false
   movements.allowSprinting = allowSprint
   movements.canSprint = allowSprint
   // Machine/platform navigation must never turn a missing walk node into a
@@ -8637,7 +8636,7 @@ function configurePathfinderMovements(bot, config, options = {}) {
   const maxStepY = Number(options.maxStepY)
   if (Number.isFinite(minStepY) || Number.isFinite(maxStepY)) {
     movements.exclusionAreasStep.push(createStepElevationExclusion(minStepY, maxStepY))
-    movements.maxDropDown = allowJump ? 1 : 0
+    movements.maxDropDown = 0
   }
   if (Number.isFinite(Number(options.maxDropDown))) {
     movements.maxDropDown = Math.max(0, Number(options.maxDropDown))
@@ -9961,7 +9960,7 @@ function setMachineAccessPathSprintMode(bot, config, mode, sprintAllowed, moveme
     configurePathfinderMovements(bot, config, {
       ...movementOptions,
       allowSprint: !forceWalk,
-      allowJump: movementOptions.allowJump !== undefined ? movementOptions.allowJump : (config.printer?.allowJump !== false),
+      allowJump: false,
       maxDropDown: 0,
     })
   }
@@ -11953,7 +11952,7 @@ async function gotoPostPrintPoint(bot, config, point, label, range = 1, options 
         {
           strict: false,
           avoidLiquids: true,
-          allowJump: config?.printer?.allowJump !== false,
+          allowJump: false,
           timeoutMs
         }
       )
@@ -20530,7 +20529,6 @@ function runSingleDumpTestSession(config) {
       }
 
       printerStarted = true
-      const allowJump = printer.allowJump !== false
 
       console.log('[TEST-DUMP] Connected.')
 
@@ -20730,7 +20728,6 @@ function runSingleMovingPlaceTestSession(config) {
       }
 
       printerStarted = true
-      const allowJump = printer.allowJump !== false
 
       console.log('[TEST-MOVE-PLACE] Connected.')
 
@@ -21206,7 +21203,6 @@ function runSingleNervScannerTestSession(config) {
       }
 
       printerStarted = true
-      const allowJump = printer.allowJump !== false
 
       console.log('[TEST-NERV-SCANNER] Connected.')
 
@@ -21281,7 +21277,6 @@ function runSingleNervWorkloadTestSession(config) {
       }
 
       printerStarted = true
-      const allowJump = printer.allowJump !== false
 
       console.log('[TEST-NERV-WORKLOAD] Connected.')
 
@@ -21644,7 +21639,6 @@ function runSingleInventoryCycleTestSession(config) {
       }
 
       printerStarted = true
-      const allowJump = printer.allowJump !== false
 
       console.log('[TEST-INVENTORY-CYCLE] Connected.')
 
@@ -21719,7 +21713,6 @@ function runSingleRepairTestSession(config) {
       }
 
       printerStarted = true
-      const allowJump = printer.allowJump !== false
 
       console.log('[TEST-REPAIR] Connected.')
 
@@ -25213,7 +25206,7 @@ function logStartupSummary(config, reconnect) {
     `[STARTUP] connection=${connection.selected || connection.active || 'default'} host=${bot.host || '127.0.0.1'} port=${toNumber(bot.port, 25565)} inputMode=${String(files.inputMode || 'auto')}`
   )
   console.log(
-    `[STARTUP] allowJump=${printer.allowJump !== false} offset=(${toNumber(offset.x, 0)},${toNumber(offset.y, 0)},${toNumber(offset.z, -1)}) resume=${files.resumeProgress !== false}`
+    `[STARTUP] allowJump=false stepHeight=${Math.max(0.6, Math.min(1.1, toNumber(config.advanced?.vanillaStepHeight, 1.1)))} offset=(${toNumber(offset.x, 0)},${toNumber(offset.y, 0)},${toNumber(offset.z, -1)}) resume=${files.resumeProgress !== false}`
   )
   console.log(
     `[STARTUP] reconnect enabled=${reconnect.enabled} delayMs=${reconnect.delayMs} maxAttempts=${reconnect.maxAttempts}`
@@ -25593,8 +25586,6 @@ function runSingleSession(config, sessionNumber) {
       bot.__nervPlatformWatchdogActive = true
       dashboardRuntime?.setLastError('')
       dashboardRuntime?.setReconnectState('idle')
-      const allowJump = printer.allowJump !== false
-
       console.log(`[SPAWN] Connected. session=${sessionNumber}`)
 
       ensurePathfinderMovementsConfigured()
@@ -25611,15 +25602,11 @@ function runSingleSession(config, sessionNumber) {
           bot.setControlState('sprint', false)
         }
 
-        if (!allowJump && bot.__nervCarpetRecoveryJumpActive !== true) {
-          bot.setControlState('jump', false)
-        }
+        bot.setControlState('jump', false)
       })
 
       bot.setControlState('sprint', getPrinterSprintMode(config) === 'always')
-      if (!allowJump) {
-        bot.setControlState('jump', false)
-      }
+      bot.setControlState('jump', false)
 
       if (isDeliveryMode(config)) {
         console.log('[STATE] Delivery mode active. Entering delivery managed loop (waiting for dashboard commands).')

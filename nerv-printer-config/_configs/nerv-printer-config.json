@@ -561,6 +561,7 @@
     "debugPrints": true,
     "vanillaSpeedEnabled": true,
     "vanillaSpeedBps": 7.192,
+    "vanillaStepHeight": 1.1,
     "vanillaSpeedInLiquids": false,
     "vanillaSpeedOnlyOnGround": true,
     "vanillaSpeedPlatformOnly": true,
