@@ -978,6 +978,9 @@ function installVanillaSpeed(bot, config) {
   let prevZ = null
 
   bot.once('inject_allowed', () => configureStepHeight(bot, config))
+  // Re-apply stepHeight on login/spawn in case physics resets (reconnect, respawn)
+  bot.on('login', () => configureStepHeight(bot, config))
+  bot.on('spawn', () => configureStepHeight(bot, config))
 
   bot._client.on('position', () => {
     prevX = null
@@ -16928,7 +16931,7 @@ async function prepareWorkloadBatchEntry(bot, config, batchTargets, startOnNorth
       config,
       'workload-batch-entry-return',
       {
-        strict: true,
+        strict: false,
         avoidLiquids: true,
         allowVerifiedGaps: false
       }
