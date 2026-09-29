@@ -1028,7 +1028,16 @@ function installVanillaSpeed(bot, config) {
       const dirZ = movedZ / movedDist
       const nextPos = pos.offset(dirX * boost, 0, dirZ * boost)
       const Vec3 = pos.constructor
-      const checkY = Math.floor(pos.y - 0.1)
+
+      // Adapt elevation when crossing carpet boundaries (bare floor <-> carpet surface)
+      const destFeet = bot.blockAt(new Vec3(Math.floor(nextPos.x), Math.floor(pos.y), Math.floor(nextPos.z)))
+      if (destFeet && (destFeet.name === 'carpet' || destFeet.name.endsWith('_carpet'))) {
+        nextPos.y = Math.floor(pos.y) + (1 / 16)
+      } else if (destFeet && (destFeet.name === 'air' || destFeet.boundingBox === 'empty') && pos.y > Math.floor(pos.y) + 0.001) {
+        nextPos.y = Math.floor(pos.y)
+      }
+
+      const checkY = Math.floor(nextPos.y - 0.1)
       const blockBelow = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY, Math.floor(nextPos.z)))
       // Step-down edge: floor at destination is air but solid ground exists
       // one block lower — yield to native physics for the height transition
@@ -1057,6 +1066,7 @@ function installVanillaSpeed(bot, config) {
 
       if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
         pos.x = nextPos.x
+        pos.y = nextPos.y
         pos.z = nextPos.z
         prevX = nextPos.x
         prevZ = nextPos.z
@@ -8875,11 +8885,21 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
       }
 
       const pos = bot?.entity?.position
+      const isAboveGoal = pos && Number.isFinite(Number(point.y)) && (pos.y - Number(point.y)) > 0.2
+      const distH = pos ? horizontalDistance(pos, point) : 0
+
       if (Vec3 && pos) {
         try {
-          await bot.lookAt(new Vec3(Number(point.x), Number(pos.y) + 1.62, Number(point.z)), true)
+          if (!isAboveGoal || distH > 0.6) {
+            await bot.lookAt(new Vec3(Number(point.x), Number(pos.y) + 1.62, Number(point.z)), true)
+          }
         } catch { }
       }
+
+      // When standing on an elevated block (Y+1) above lower destination within 0.8 blocks,
+      // pulse jump forward so native physics immediately clears the ledge and drops down
+      const shouldStepDownJump = isAboveGoal && distH <= 0.8 && activeElapsedMs >= 150 && (activeElapsedMs % 400 < tickMs * 2)
+      bot.setControlState('jump', jump || shouldStepDownJump)
       bot.setControlState('sprint', sprint && !latencyState.shouldDisableSprint)
       bot.setControlState('forward', true)
       await delay(tickMs)
@@ -17897,7 +17917,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           }
         )
         const checkpointAcceptRange = checkpointBuffer + checkpointTimeoutAcceptExtraRange
-        const checkpointIsCloseEnough = () => distanceToPoint(bot?.entity?.position, checkpoint.position) <= checkpointAcceptRange
+        const checkpointIsCloseEnough = () => {
+          const currentPos = bot?.entity?.position
+          if (!currentPos) return false
+          const distH = horizontalDistance(currentPos, checkpoint.position)
+          const dy = Math.abs(currentPos.y - checkpoint.position.y)
+          return distH <= checkpointAcceptRange && dy <= 0.6
+        }
         const useStraightCheckpoint = shouldWalkCheckpointStraight(checkpoint)
         const movementMode = useStraightCheckpoint ? 'straight' : 'pathfinder'
         console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs} mode=${movementMode}`)
