@@ -1004,5 +1004,17 @@ From `package.json`:
 }
 ```
 
+## 11. Production Fleet Memory & Systemd Sizing
+
+When deploying fleet configurations (e.g. 10–20 bots concurrently), each Mineflayer bot process must be capped to prevent unbounded V8 heap growth during long sessions or after 128×128 water-flushing events:
+
+1. **Node.js Heap Cap**: Pass `--max-old-space-size=500` to Node in the systemd service template:
+   ```ini
+   ExecStart=/usr/bin/node --max-old-space-size=500 /home/ubuntu/%i/nerv-printer.js --connection=6b6t --wait-for-command
+   ```
+   This restricts each bot to a 500 MB ceiling. V8 triggers garbage collection aggressively before heap expansion, keeping total fleet memory across 19 bots under ~9.5 GB and leaving ample RAM for the OS, dashboard, and disk buffers on a 16 GB host.
+
+2. **Swap Recommendation**: Always configure a minimum 4 GB swap file on the host (`swapon --show`) to absorb temporary memory bursts during fleet updates, git checkouts, or chunk loading without triggering an out-of-memory kernel lockup.
+
 Inspired From Nerv-Printer By Julflips. 
 

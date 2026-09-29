@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/mapart-bot
-ExecStart=/usr/bin/node /home/ubuntu/mapart-bot/nerv-printer.js --connection=6b6t --disable-logs
+ExecStart=/usr/bin/node --max-old-space-size=500 /home/ubuntu/mapart-bot/nerv-printer.js --connection=6b6t --disable-logs
 Restart=always
 RestartSec=15
 Environment=NODE_ENV=production
