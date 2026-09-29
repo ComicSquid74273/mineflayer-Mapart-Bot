@@ -201,6 +201,7 @@ const {
   extractVerificationCode,
   extractVerificationUrl
 } = require('./token-verification')
+const { installMovementDiagnostics } = require('../shared/movement-diagnostics')
 
 const placementWorkload = createPlacementWorkload({
   toNumber,
@@ -8842,6 +8843,7 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
   let lastCheckAt = Date.now()
 
   try {
+    bot.__nervCurrentMovementController = 'straight'
     try { bot.pathfinder?.stop?.() } catch { }
     try { bot.pathfinder?.setGoal?.(null) } catch { }
     bot.setControlState('back', false)
@@ -8899,7 +8901,9 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
       // When standing on an elevated block (Y+1) above lower destination,
       // pulse jump forward so native physics immediately clears the ledge and drops down
       const shouldStepDownJump = isAboveGoal && activeElapsedMs >= 150 && (activeElapsedMs % 400 < tickMs * 2)
-      bot.setControlState('jump', jump || shouldStepDownJump)
+      const activeJump = jump || shouldStepDownJump
+      bot.__nervAllowActiveJump = activeJump
+      bot.setControlState('jump', activeJump)
       bot.setControlState('sprint', sprint && !latencyState.shouldDisableSprint)
       bot.setControlState('forward', true)
       await delay(tickMs)
@@ -8912,6 +8916,8 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
 
     throw new Error(`${label}-session-ended`)
   } finally {
+    bot.__nervCurrentMovementController = null
+    bot.__nervAllowActiveJump = false
     bot.setControlState('forward', false)
     bot.setControlState('back', false)
     bot.setControlState('left', false)
@@ -10231,12 +10237,12 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
       for (let i = 1; i < segments; i += 1) {
         assertRuntimeContinue(bot, runtimeConfig, `${reason}:staged-ingress-${i}`)
         const ratio = (i * segmentLength) / ingressDistance
+        const isSameAisle = Math.abs(startPos.z - goalPos.z) <= 3
         const intermediatePos = {
           x: startPos.x + (goalPos.x - startPos.x) * ratio,
           y: goalPos.y,
-          // Always use the goal's open aisle Z so staging stays in the clear corridor
-          // instead of cutting through the chest/mechanism line between groups.
-          z: Number.isFinite(Number(goalPos.z)) ? Number(goalPos.z) : (startPos.z + (goalPos.z - startPos.z) * ratio)
+          // Stay on the aisle Z if already in the aisle; otherwise interpolate both X and Z
+          z: isSameAisle ? goalPos.z : (startPos.z + (goalPos.z - startPos.z) * ratio)
         }
         await gotoConfiguredAccess(
           bot,
@@ -10536,10 +10542,9 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
 
         const mode = sprintRecovery.getState().mode
         setMachineAccessPathSprintMode(bot, runtimeConfig, mode, sprintAllowed, strict
-          // Pathfinder applies step exclusions to both the foot and head-space
-          // blocks. Permit exactly the configured foot level plus its head room;
-          // the next block up (a climb) and the block below (a drop) stay excluded.
-          ? { minStepY: routeStepY, maxStepY: routeStepY + 1, avoidLiquids }
+          // Pathfinder applies step exclusions to floor (y-1), feet (y), head (y+1),
+          // and jump headroom (y+2). Permit exactly routeStepY - 1 to routeStepY + 2.
+          ? { minStepY: routeStepY - 1, maxStepY: routeStepY + 2, avoidLiquids }
           : { avoidLiquids })
         pendingSprintRestart = null
 
@@ -19617,6 +19622,7 @@ function createBot(config) {
   })
   bot.once('login', () => applyInventoryStateSync(bot, config))
   installVanillaSpeed(bot, config)
+  installMovementDiagnostics(bot, { botName: config?.username })
 
   return bot
 }
@@ -25739,7 +25745,7 @@ function runSingleSession(config, sessionNumber) {
           bot.setControlState('sprint', false)
         }
 
-        if (!bot.pathfinder?.isMoving?.()) {
+        if (!bot.pathfinder?.isMoving?.() && bot.__nervAllowActiveJump !== true) {
           bot.setControlState('jump', false)
         }
       })

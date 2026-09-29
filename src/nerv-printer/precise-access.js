@@ -1160,6 +1160,10 @@ function planSafeFlatMachineRoute(bot, position, target, options = {}) {
       }
       previousDirection = direction
     }
+    const endCell = cells[endIndex]
+    if (endCell && startIndex < endIndex && (Math.abs(finalPoint.x - (endCell.x + 0.5)) > 0.05 || Math.abs(finalPoint.z - (endCell.z + 0.5)) > 0.05)) {
+      addWalkPoint(new Vec3(endCell.x + 0.5, expectedY, endCell.z + 0.5))
+    }
     addWalkPoint(finalPoint)
   }
   const terminal = cells[cells.length - 1]
@@ -1328,7 +1332,7 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
       if (yawDiff > 0.26 || !isMovingForward) {
         stopHorizontalControls(bot)
         if (typeof bot.look === 'function') {
-          bot.look(desiredYaw, 0, true)
+          await bot.look(desiredYaw, 0, true)
         } else {
           await bot.lookAt(new Vec3(Number(target.x), aimY, Number(target.z)), true)
         }
@@ -1339,7 +1343,7 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
         isMovingForward = true
       } else {
         if (yawDiff > 0.05 && typeof bot.look === 'function') {
-          bot.look(desiredYaw, 0, true)
+          await bot.look(desiredYaw, 0, true)
         }
         if (allowSprint && !bot.getControlState?.('sprint')) {
           try { bot.setControlState('sprint', true) } catch { }

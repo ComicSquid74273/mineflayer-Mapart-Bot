@@ -969,13 +969,13 @@ test('an incomplete cartography checkpoint without its filled map rewinds even a
   assert.equal(getIncompleteCartographyResumeStep('fill_map', false, steps), 'fill_map')
 })
 
-test('Meteor-style step height defaults to and caps at 1.1 without jumping', () => {
+test('Meteor-style step height defaults to and caps at 1.25 without jumping', () => {
   const bot = { physics: { stepHeight: 0.6 } }
 
-  assert.equal(configureStepHeight(bot, {}), 1.1)
-  assert.equal(bot.physics.stepHeight, 1.1)
+  assert.equal(configureStepHeight(bot, {}), 1.25)
+  assert.equal(bot.physics.stepHeight, 1.25)
   assert.equal(configureStepHeight(bot, { advanced: { vanillaStepHeight: 0.9 } }), 0.9)
-  assert.equal(configureStepHeight(bot, { advanced: { vanillaStepHeight: 1.25 } }), 1.1)
+  assert.equal(configureStepHeight(bot, { advanced: { vanillaStepHeight: 1.5 } }), 1.25)
   assert.equal(configureStepHeight({}, {}), null)
 })
 

@@ -12,7 +12,7 @@ const {
 } = require('../src/nerv-printer/support-candidates')
 
 const primary = {
-  blockPos: { x: -624, y: -7, z: -966 },
+  blockPos: { x: -624, y: -8, z: -965 },
   openPos: { x: -624, y: -8, z: -962 }
 }
 const fallback = {
@@ -111,7 +111,7 @@ test('active legacy layout contains only relative primary support coordinates', 
     openPos: { x: -620, y: -8, z: -962 }
   })
   assert.deepEqual(config.xpBottleChests[0], {
-    blockPos: { x: -616, y: -7, z: -966 },
+    blockPos: { x: -616, y: -8, z: -965 },
     openPos: { x: -616, y: -8, z: -962 }
   })
   assert.equal(config.foodChests.length, 1)

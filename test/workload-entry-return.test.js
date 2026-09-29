@@ -17,7 +17,7 @@ test('workload batch entry returns through verified machine navigation after res
   assert.match(helper, /buildNervUCheckpoints\(batchTargets, startOnNorthSide/)
   assert.match(helper, /await gotoConfiguredAccess\(/)
   assert.match(helper, /'workload-batch-entry-return'/)
-  assert.match(helper, /strict: true/)
+  assert.match(helper, /strict: false/)
   assert.match(helper, /allowVerifiedGaps: false/)
 })
 

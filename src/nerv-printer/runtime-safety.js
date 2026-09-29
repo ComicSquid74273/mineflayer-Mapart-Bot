@@ -650,7 +650,6 @@ function playerPositionOverlapsBlockCollision(bot, position, options = {}) {
           return true
         }
         if (!block) return true
-        if (isCarpetBlockName(block.name)) continue
         for (const shape of Array.isArray(block.shapes) ? block.shapes : []) {
           if (!Array.isArray(shape) || shape.length < 6) continue
           const minX = x + Number(shape[0])
@@ -660,11 +659,12 @@ function playerPositionOverlapsBlockCollision(bot, position, options = {}) {
           const maxY = y + Number(shape[4])
           const maxZ = z + Number(shape[5])
           if (![minX, minY, minZ, maxX, maxY, maxZ].every(Number.isFinite)) return true
-          // Ignore floor/soul-sand support blocks underfoot: if the shape starts
+          // Ignore floor/chest/soul-sand support blocks underfoot: if the shape starts
           // below the player's feet (minY < player.minY - 0.2) and only slightly enters
-          // the bottom of the bounding box (maxY <= player.minY + 0.05), it is supporting
+          // the bottom of the bounding box (maxY <= player.minY + 0.15), it is supporting
           // floor at the current elevation, not a wall or obstacle ahead.
-          if (minY < player.minY - 0.2 && maxY <= player.minY + 0.05) continue
+          // Tolerance 0.15 accommodates standing on chests (top 0.875) next to full blocks (top 1.0, delta 0.125).
+          if (minY < player.minY - 0.2 && maxY <= player.minY + 0.15) continue
           if (
             player.minX < maxX - epsilon && player.maxX > minX + epsilon &&
             player.minY < maxY - epsilon && player.maxY > minY + epsilon &&
@@ -684,14 +684,29 @@ function normalizeCarpetSurfacePosition(bot, options = {}) {
   if (![position.x, position.y, position.z].every(Number.isFinite)) return null
 
   const blockY = Math.floor(position.y)
-  let block = null
-  try {
-    block = bot.blockAt(new Vec3(Math.floor(position.x), blockY, Math.floor(position.z)))
-  } catch {
-    return null
+  const halfWidth = Math.max(0.01, Number(options.halfWidth) || 0.3)
+  let carpetBlock = null
+
+  // Check center cell first, then any cell covered by the player's bounding box footprint
+  const cells = [
+    { x: Math.floor(position.x), z: Math.floor(position.z) },
+    { x: Math.floor(position.x - halfWidth), z: Math.floor(position.z - halfWidth) },
+    { x: Math.floor(position.x + halfWidth), z: Math.floor(position.z - halfWidth) },
+    { x: Math.floor(position.x - halfWidth), z: Math.floor(position.z + halfWidth) },
+    { x: Math.floor(position.x + halfWidth), z: Math.floor(position.z + halfWidth) }
+  ]
+
+  for (const cell of cells) {
+    try {
+      const b = bot.blockAt(new Vec3(cell.x, blockY, cell.z), false)
+      if (b && isCarpetBlockName(b.name)) {
+        carpetBlock = b
+        break
+      }
+    } catch { }
   }
-  const name = String(block?.name || '')
-  if (name !== 'carpet' && !name.endsWith('_carpet')) return null
+
+  if (!carpetBlock) return null
 
   const surfaceY = blockY + Math.max(0.01, Number(options.carpetHeight) || (1 / 16))
   const tolerance = Math.max(0.001, Number(options.tolerance) || 0.002)
@@ -703,7 +718,7 @@ function normalizeCarpetSurfacePosition(bot, options = {}) {
     bot.entity.velocity.y = 0
   }
   return {
-    block,
+    block: carpetBlock,
     previousY,
     surfaceY
   }
