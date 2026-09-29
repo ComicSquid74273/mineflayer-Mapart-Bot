@@ -14434,7 +14434,7 @@ async function runPostPrintWorkflow(bot, config, context = {}) {
 
     try {
       await waitForPlatformReady(bot, config, 'postprint-center', postPrintDeadlineOptions('center'))
-      await gotoPostPrintPoint(bot, config, center, 'postprint-center', 1, postPrintDeadlineOptions('center'))
+      await gotoPostPrintPoint(bot, config, center, 'postprint-center', 3, postPrintDeadlineOptions('center'))
       const centerWaitMs = Math.max(0, toNumber(advanced.postPrintCenterWaitMs, 3000))
       if (centerWaitMs > 0) {
         console.log(`[POSTPRINT] Waiting at center for ${centerWaitMs}ms.`)
