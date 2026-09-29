@@ -10350,6 +10350,7 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
           settledTolerance: Math.max(waypointTolerance, safeCellSettledTolerance),
           maxStartDistance: Math.max(2, waypointDistance + 0.5),
           timeoutMs: Math.max(500, waypointTimeoutMs),
+          sprint: sprintAllowed,
           // A reachable-side interaction is valid only after the position
           // remains server-stable. Without this hold, a delayed server
           // reconciliation can move the bot out of reach just after the click.

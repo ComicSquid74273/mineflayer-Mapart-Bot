@@ -1004,6 +1004,26 @@ test('vanilla speed collision guard rejects carpet, slab, and full-block overlap
   assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(3.5, 2, 0.5)), false)
 })
 
+test('vanilla speed collision guard permits underfoot floor support when standing below integer Y', () => {
+  const blocks = new Map()
+  const block = (name, x, y, z, shapes = []) => ({
+    name,
+    position: new Vec3(x, y, z),
+    shapes
+  })
+  // Floor at y=135, top at 136.0; player at 135.88 (standing on chest/soul-sand level)
+  blocks.set('10:135:20', block('obsidian', 10, 135, 20, [[0, 0, 0, 1, 1, 1]]))
+  const bot = {
+    entity: { height: 1.8 },
+    blockAt(position) {
+      return blocks.get(`${position.x}:${position.y}:${position.z}`) || block('air', position.x, position.y, position.z)
+    }
+  }
+
+  // Player at y=135.88 over the floor at y=135 should NOT collide with the floor underfoot
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(10.5, 135.88, 20.5)), false)
+})
+
 test('vanilla speed collision guard fails closed for unloaded blocks', () => {
   const bot = {
     entity: { height: 1.8 },

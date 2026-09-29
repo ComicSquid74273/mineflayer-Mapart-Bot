@@ -1224,9 +1224,11 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
     ? options.isComplete
     : null
   const requireCompletionPredicate = isComplete != null && options.requireCompletionPredicate === true
+  const allowSprint = options.sprint !== false
   const startedAt = Date.now()
   const startDistance = horizontalDistance(bot?.entity?.position, target)
   let reachedDistance = startDistance
+  let isMovingForward = false
 
   if (!Number.isFinite(startDistance)) {
     throw new Error('precise-access-position-unavailable')
@@ -1310,18 +1312,33 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
       }
       const eyeHeight = Number(bot?.entity?.eyeHeight)
       const aimY = Number(position.y) + (Number.isFinite(eyeHeight) ? eyeHeight : 1.62)
-      // Never keep forward pressed while Mineflayer asynchronously turns. The
-      // old loop left it held between polling iterations, so a slow lookAt
-      // could rotate the bot through the target while it continued walking and
-      // turn an initially valid 1-block approach into a 5-block divergence.
-      stopHorizontalControls(bot)
-      await bot.lookAt(new Vec3(Number(target.x), aimY, Number(target.z)), true)
-      bot.setControlState('forward', true)
-      try {
-        await wait(pollMs)
-      } finally {
-        bot.setControlState('forward', false)
+      const dx = Number(target.x) - Number(position.x)
+      const dz = Number(target.z) - Number(position.z)
+      const desiredYaw = Math.atan2(-dx, -dz)
+      const currentYaw = Number(bot?.entity?.yaw)
+      const yawDiff = Number.isFinite(currentYaw)
+        ? Math.abs(((desiredYaw - currentYaw) % (Math.PI * 2) + Math.PI * 3) % (Math.PI * 2) - Math.PI)
+        : Math.PI
+
+      // If a significant reorientation is required (>15 deg), pause movement
+      // to avoid rotating through the target into adjacent hazards.
+      // When already roughly facing the target, keep forward and sprint
+      // continuously asserted so physics momentum and vanilla speed booster apply.
+      if (yawDiff > 0.26 || !isMovingForward) {
+        stopHorizontalControls(bot)
+        await bot.lookAt(new Vec3(Number(target.x), aimY, Number(target.z)), true)
+        bot.setControlState('forward', true)
+        if (allowSprint) {
+          try { bot.setControlState('sprint', true) } catch { }
+        }
+        isMovingForward = true
+      } else {
+        await bot.lookAt(new Vec3(Number(target.x), aimY, Number(target.z)), true)
+        if (allowSprint && !bot.getControlState?.('sprint')) {
+          try { bot.setControlState('sprint', true) } catch { }
+        }
       }
+      await wait(pollMs)
     }
   } finally {
     stopHorizontalControls(bot)
