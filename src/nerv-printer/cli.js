@@ -10052,6 +10052,9 @@ function setMachineAccessPathSprintMode(bot, config, mode, sprintAllowed, moveme
       maxDropDown: 1,
     })
   }
+  if (bot?.pathfinder) {
+    bot.pathfinder.enablePathShortcut = true
+  }
   try {
     bot.setControlState('sprint', !forceWalk)
   } catch { }

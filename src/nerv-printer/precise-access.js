@@ -1327,14 +1327,20 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
       // continuously asserted so physics momentum and vanilla speed booster apply.
       if (yawDiff > 0.26 || !isMovingForward) {
         stopHorizontalControls(bot)
-        await bot.lookAt(new Vec3(Number(target.x), aimY, Number(target.z)), true)
+        if (typeof bot.look === 'function') {
+          bot.look(desiredYaw, 0, true)
+        } else {
+          await bot.lookAt(new Vec3(Number(target.x), aimY, Number(target.z)), true)
+        }
         bot.setControlState('forward', true)
         if (allowSprint) {
           try { bot.setControlState('sprint', true) } catch { }
         }
         isMovingForward = true
       } else {
-        await bot.lookAt(new Vec3(Number(target.x), aimY, Number(target.z)), true)
+        if (yawDiff > 0.05 && typeof bot.look === 'function') {
+          bot.look(desiredYaw, 0, true)
+        }
         if (allowSprint && !bot.getControlState?.('sprint')) {
           try { bot.setControlState('sprint', true) } catch { }
         }
