@@ -1014,8 +1014,6 @@ function installVanillaSpeed(bot, config) {
     if (bot.controlState?.sneak) return
     if (!bot.controlState?.forward && !bot.controlState?.sprint) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
-    // Skip boost while airborne so native physics handles step-down gravity
-    if (advanced.vanillaSpeedOnlyOnGround !== false && !bot.entity?.onGround) return
 
     const bps = Math.min(7.5, Math.max(1.0, toNumber(advanced.vanillaSpeedBps, 7.192)))
     const targetPerTick = bps / 20.0
@@ -1025,17 +1023,14 @@ function installVanillaSpeed(bot, config) {
       const dirX = movedX / movedDist
       const dirZ = movedZ / movedDist
       const nextPos = pos.offset(dirX * boost, 0, dirZ * boost)
-      // Check floor at destination: scan down up to 1.1 blocks (stepHeight) for solid ground
       const Vec3 = pos.constructor
       const checkY = Math.floor(pos.y - 0.1)
-      let blockBelow = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY, Math.floor(nextPos.z)))
-      // If no floor at current level, check one block lower (step-down scenario)
+      const blockBelow = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY, Math.floor(nextPos.z)))
+      // Step-down edge: floor at destination is air but solid ground exists
+      // one block lower — yield to native physics for the height transition
       if (blockBelow && blockBelow.name === 'air') {
         const lowerBlock = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY - 1, Math.floor(nextPos.z)))
-        if (lowerBlock && lowerBlock.name !== 'air') {
-          // Floor is lower ahead — let native physics handle the step-down
-          return
-        }
+        if (lowerBlock && lowerBlock.name !== 'air') return
       }
 
       if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
