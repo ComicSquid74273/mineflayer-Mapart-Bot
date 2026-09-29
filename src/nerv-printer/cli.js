@@ -10166,7 +10166,9 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
         const intermediatePos = {
           x: startPos.x + (goalPos.x - startPos.x) * ratio,
           y: goalPos.y,
-          z: startPos.z + (goalPos.z - startPos.z) * ratio
+          // Always use the goal's open aisle Z so staging stays in the clear corridor
+          // instead of cutting through the chest/mechanism line between groups.
+          z: Number.isFinite(Number(goalPos.z)) ? Number(goalPos.z) : (startPos.z + (goalPos.z - startPos.z) * ratio)
         }
         await gotoConfiguredAccess(
           bot,
