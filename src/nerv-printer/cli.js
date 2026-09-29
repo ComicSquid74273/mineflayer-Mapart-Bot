@@ -11990,7 +11990,7 @@ async function gotoPostPrintPoint(bot, config, point, label, range = 1, options 
     timeoutMs = Math.max(1000, Math.min(timeoutMs, Number(options.timeoutMs)))
   }
   const accessOptions = {
-    strict: true,
+    strict: options.strict ?? (Number(range) < 1),
     allowBlockReach: false,
     avoidLiquids: true,
     verifiedFlatOnly: true,
