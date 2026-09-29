@@ -973,6 +973,32 @@ function installAdaptiveLatencyGuard(bot, config) {
   wrapAsyncAction('dig', 'dig', { pauseMovement: true })
 }
 
+function getFloorTopAt(bot, x, z, currentY) {
+  const Vec3 = bot?.entity?.position?.constructor
+  if (!Vec3 || typeof bot?.blockAt !== 'function') return null
+  const feetY = Math.floor(currentY)
+  for (let y = feetY; y >= feetY - 2; y--) {
+    let block = null
+    try {
+      block = bot.blockAt(new Vec3(Math.floor(x), y, Math.floor(z)), false)
+    } catch {
+      return null
+    }
+    if (!block || block.name === 'air') continue
+    const shapes = Array.isArray(block.shapes) ? block.shapes : []
+    if (shapes.length > 0) {
+      let maxShape = -Infinity
+      for (const s of shapes) {
+        if (Array.isArray(s) && Number.isFinite(s[4])) maxShape = Math.max(maxShape, s[4])
+      }
+      if (Number.isFinite(maxShape)) return y + maxShape
+    } else if (block.boundingBox === 'block') {
+      return y + 1.0
+    }
+  }
+  return null
+}
+
 function installVanillaSpeed(bot, config) {
   if (!bot || bot.__nervVanillaSpeedInstalled) return
   bot.__nervVanillaSpeedInstalled = true
@@ -1029,41 +1055,15 @@ function installVanillaSpeed(bot, config) {
       const nextPos = pos.offset(dirX * boost, 0, dirZ * boost)
       const Vec3 = pos.constructor
 
-      // Adapt elevation when crossing carpet boundaries (bare floor <-> carpet surface)
-      const destFeet = bot.blockAt(new Vec3(Math.floor(nextPos.x), Math.floor(pos.y), Math.floor(nextPos.z)))
-      if (destFeet && (destFeet.name === 'carpet' || destFeet.name.endsWith('_carpet'))) {
-        nextPos.y = Math.floor(pos.y) + (1 / 16)
-      } else if (destFeet && (destFeet.name === 'air' || destFeet.boundingBox === 'empty') && pos.y > Math.floor(pos.y) + 0.001) {
-        nextPos.y = Math.floor(pos.y)
+      const destFloorTop = getFloorTopAt(bot, nextPos.x, nextPos.z, pos.y)
+      if (destFloorTop != null) {
+        if (destFloorTop > pos.y + 0.1) return // step-up > 0.1: yield to native physics
+        if (destFloorTop < pos.y - 0.1) return // step-down > 0.1: yield to native physics
+        nextPos.y = destFloorTop // flat or sub-0.1 carpet transition: snap elevation to surface
       }
 
       const checkY = Math.floor(nextPos.y - 0.1)
       const blockBelow = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY, Math.floor(nextPos.z)))
-      // Step-down edge: floor at destination is air but solid ground exists
-      // one block lower — yield to native physics for the height transition
-      if (blockBelow && blockBelow.name === 'air') {
-        const lowerBlock = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY - 1, Math.floor(nextPos.z)))
-        if (lowerBlock && lowerBlock.name !== 'air') return
-      }
-
-      // Step-up edge: destination block surface is higher than current feet elevation —
-      // yield to native physics so the engine can step up cleanly without horizontal clipping.
-      // Small height differences <= 0.1 (such as 0.0625 carpet layers) are traversed without yielding.
-      if (blockBelow && blockBelow.name !== 'air') {
-        const shapes = Array.isArray(blockBelow.shapes) ? blockBelow.shapes : []
-        let blockTop = blockBelow.position.y
-        if (shapes.length > 0) {
-          let maxShape = -Infinity
-          for (const s of shapes) {
-            if (Array.isArray(s) && Number.isFinite(s[4])) maxShape = Math.max(maxShape, s[4])
-          }
-          if (Number.isFinite(maxShape)) blockTop += maxShape
-        } else if (blockBelow.boundingBox === 'block') {
-          blockTop += 1.0
-        }
-        if (blockTop > pos.y + 0.1) return
-      }
-
       if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
         pos.x = nextPos.x
         pos.y = nextPos.y
@@ -8896,9 +8896,9 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
         } catch { }
       }
 
-      // When standing on an elevated block (Y+1) above lower destination within 0.8 blocks,
+      // When standing on an elevated block (Y+1) above lower destination,
       // pulse jump forward so native physics immediately clears the ledge and drops down
-      const shouldStepDownJump = isAboveGoal && distH <= 0.8 && activeElapsedMs >= 150 && (activeElapsedMs % 400 < tickMs * 2)
+      const shouldStepDownJump = isAboveGoal && activeElapsedMs >= 150 && (activeElapsedMs % 400 < tickMs * 2)
       bot.setControlState('jump', jump || shouldStepDownJump)
       bot.setControlState('sprint', sprint && !latencyState.shouldDisableSprint)
       bot.setControlState('forward', true)
