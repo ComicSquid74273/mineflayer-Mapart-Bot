@@ -1272,6 +1272,11 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
   try { bot?.pathfinder?.setGoal?.(null) } catch { }
   stopHorizontalControls(bot)
 
+  let lastMoveX = bot?.entity?.position?.x ?? 0
+  let lastMoveZ = bot?.entity?.position?.z ?? 0
+  let lastAdvanceAt = Date.now()
+  bot.__nervCurrentMovementController = 'precise'
+
   try {
     while (Date.now() - startedAt < timeoutMs) {
       const position = bot?.entity?.position
@@ -1349,9 +1354,29 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
           try { bot.setControlState('sprint', true) } catch { }
         }
       }
+      const movedSinceAdvance = Math.hypot(position.x - lastMoveX, position.z - lastMoveZ)
+      if (movedSinceAdvance >= 0.05) {
+        lastMoveX = position.x
+        lastMoveZ = position.z
+        lastAdvanceAt = Date.now()
+      } else if (isMovingForward && Date.now() - lastAdvanceAt >= 300) {
+        // Stalled against block lip or corner: pulse jump to unstick
+        bot.__nervAllowActiveJump = true
+        try { bot.setControlState('jump', true) } catch { }
+        setTimeout(() => {
+          try {
+            bot.setControlState('jump', false)
+            bot.__nervAllowActiveJump = false
+          } catch { }
+        }, 80)
+        lastAdvanceAt = Date.now()
+      }
       await wait(pollMs)
     }
   } finally {
+    bot.__nervCurrentMovementController = null
+    bot.__nervAllowActiveJump = false
+    try { bot.setControlState('jump', false) } catch { }
     stopHorizontalControls(bot)
   }
 

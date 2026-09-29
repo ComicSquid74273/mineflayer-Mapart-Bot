@@ -45,7 +45,7 @@ const DEFAULT_DUPER_BROKEN_REPAIR_CHECK_MS = 15 * 60 * 1000
 // retry) can throttle it without a code change.
 const DUPER_KEEPALIVE_COLORS = new Set(['white_carpet', 'light_gray_carpet', 'gray_carpet'])
 const RESET_DUPER_OPENPOS_OFFSET = { x: 78.5, y: 1, z: -0.5 }
-const DEFAULT_DUPER_KEEPALIVE_CROSS_INTERVAL_MS = 0
+const DEFAULT_DUPER_KEEPALIVE_CROSS_INTERVAL_MS = 60000
 const lastDuperKeepAliveCrossAtByBot = new Map()
 const PROCESS_STARTED_AT = new Date().toISOString()
 const PROCESS_INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -8108,25 +8108,30 @@ async function crossResetDuperOpenPosIfDue(bot, config, blockName, reason) {
   const openPos = getResetDuperLeverOpenPos(config)
   if (!openPos) return
   const botKey = bot?.username || config?.bot?.username || 'bot'
-  // Optional minimum spacing between crosses; default 0 means cross on every retry.
   const intervalMs = Math.max(0, toNumber(advanced.duperKeepAliveCrossIntervalMs, DEFAULT_DUPER_KEEPALIVE_CROSS_INTERVAL_MS))
+  const now = Date.now()
   if (intervalMs > 0) {
-    const now = Date.now()
     if (now - (lastDuperKeepAliveCrossAtByBot.get(botKey) || 0) < intervalMs) return
-    lastDuperKeepAliveCrossAtByBot.set(botKey, now)
   }
   const startPos = bot?.entity?.position
     ? { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z }
     : null
+  if (!startPos) return
+
   const range = Math.max(0.5, toNumber(advanced.duperKeepAliveCrossRange, 1))
-  const timeoutMs = Math.max(2000, toNumber(advanced.duperKeepAliveCrossTimeoutMs, 15000))
+  const timeoutMs = Math.max(2000, toNumber(advanced.duperKeepAliveCrossTimeoutMs, 10000))
   // Target a few blocks to the +x side of openPos (open floor), not the exact lever stand
   // spot. This is reliably reachable so the cross won't fail, while still loading the duper.
   const offsetX = toNumber(advanced.duperKeepAliveCrossOffsetX, 4)
   const crossPoint = { x: openPos.x + offsetX, y: openPos.y, z: openPos.z }
+  const distToCross = Math.hypot(startPos.x - crossPoint.x, startPos.z - crossPoint.z)
+  // If already within 24 blocks, duper chunk is already loaded; if >36 blocks, crossing abandons current chest bank
+  if (distToCross <= 24 || distToCross > 36) return
+
+  lastDuperKeepAliveCrossAtByBot.set(botKey, now)
   try {
     await gotoGoalWithHardTimeout(bot, new GoalNear(crossPoint.x, crossPoint.y, crossPoint.z, range), timeoutMs, 'duper-keepalive', { config })
-    console.log(`[DUPER-KEEPALIVE] ${blockName}: reached duper keep-alive point (${crossPoint.x},${crossPoint.y},${crossPoint.z}) [openPos +${offsetX}x] to keep duper loaded. reason=${reason}`)
+    console.log(`[DUPER-KEEPALIVE] ${blockName}: reached duper keep-alive point (${crossPoint.x.toFixed(1)},${crossPoint.y.toFixed(1)},${crossPoint.z.toFixed(1)}) to keep duper loaded. reason=${reason}`)
   } catch (err) {
     console.log(`[DUPER-KEEPALIVE-WARN] ${blockName}: cross failed (${err?.message || err}); continuing restock wait.`)
   } finally {
@@ -10244,15 +10249,28 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
           // Stay on the aisle Z if already in the aisle; otherwise interpolate both X and Z
           z: isSameAisle ? goalPos.z : (startPos.z + (goalPos.z - startPos.z) * ratio)
         }
-        await gotoConfiguredAccess(
-          bot,
-          intermediatePos,
-          null,
-          3,
-          config,
-          `${reason}:stage-${i}`,
-          { strict: false, avoidLiquids, staged: true }
-        )
+        try {
+          await gotoConfiguredAccess(
+            bot,
+            intermediatePos,
+            null,
+            3,
+            config,
+            `${reason}:stage-${i}`,
+            { strict: false, avoidLiquids, staged: true, timeoutMs: 12000 }
+          )
+        } catch (err) {
+          const currentDist = horizontalDistance(bot?.entity?.position, goalPos)
+          if (currentDist < ingressDistance - 4) {
+            console.log(
+              `[MACHINE-PATH-STAGED] Staging segment ${i} timed out but advanced from ` +
+              `${ingressDistance.toFixed(1)} to ${currentDist.toFixed(1)} blocks; continuing.`
+            )
+            if (currentDist <= 32) break
+            continue
+          }
+          throw err
+        }
       }
     }
   }
