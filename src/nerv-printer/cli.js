@@ -1038,7 +1038,8 @@ function installVanillaSpeed(bot, config) {
       }
 
       // Step-up edge: destination block surface is higher than current feet elevation —
-      // yield to native physics so the engine can step up cleanly without horizontal clipping
+      // yield to native physics so the engine can step up cleanly without horizontal clipping.
+      // Small height differences <= 0.1 (such as 0.0625 carpet layers) are traversed without yielding.
       if (blockBelow && blockBelow.name !== 'air') {
         const shapes = Array.isArray(blockBelow.shapes) ? blockBelow.shapes : []
         let blockTop = blockBelow.position.y
@@ -1051,7 +1052,7 @@ function installVanillaSpeed(bot, config) {
         } else if (blockBelow.boundingBox === 'block') {
           blockTop += 1.0
         }
-        if (blockTop > pos.y + 0.001) return
+        if (blockTop > pos.y + 0.1) return
       }
 
       if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
@@ -10028,7 +10029,7 @@ function setMachineAccessPathSprintMode(bot, config, mode, sprintAllowed, moveme
       ...movementOptions,
       allowSprint: !forceWalk,
       allowJump: false,
-      maxDropDown: 0,
+      maxDropDown: 1,
     })
   }
   try {
@@ -17305,7 +17306,16 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       bot.setControlState('back', false)
       bot.setControlState('left', false)
       bot.setControlState('right', false)
-      await bot.pathfinder.goto(new GoalNear(pos.x, pos.y, pos.z, anchorRange))
+      await gotoGoalWithHardTimeout(
+        bot,
+        new GoalNear(pos.x, pos.y, pos.z, anchorRange),
+        15000,
+        'workload-restock-return',
+        {
+          config,
+          isGoalSatisfied: () => distanceToPoint(bot?.entity?.position, pos) <= anchorRange
+        }
+      )
       return true
     } catch (err) {
       console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] target=${pos.x} ${pos.y} ${pos.z} -> ${err?.message || err}`)
@@ -17873,7 +17883,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         currentAction = checkpoint.action
         currentActiveCols = checkpoint.activeCols
         const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
-        const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && currentAction === 'sprint')
+        const repairSprint = advanced.repairSprintMode === 'true' || advanced.repairSprintMode === true
+        const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && (currentAction === 'sprint' || (repairSprint && currentAction === 'inline-repair')))
         bot.setControlState('sprint', shouldSprint)
         const beforeMove = bot.entity.position
         checkpointMoveTimeoutMs = getWorkloadCheckpointMoveTimeoutMs(

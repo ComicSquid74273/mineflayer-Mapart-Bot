@@ -650,6 +650,7 @@ function playerPositionOverlapsBlockCollision(bot, position, options = {}) {
           return true
         }
         if (!block) return true
+        if (isCarpetBlockName(block.name)) continue
         for (const shape of Array.isArray(block.shapes) ? block.shapes : []) {
           if (!Array.isArray(shape) || shape.length < 6) continue
           const minX = x + Number(shape[0])

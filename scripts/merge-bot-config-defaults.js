@@ -12,7 +12,7 @@ function mergeBotConfigDefaults(configPath) {
   printer.allowJump = false
   if (adv.vanillaSpeedEnabled === undefined) adv.vanillaSpeedEnabled = true
   if (adv.vanillaSpeedBps === undefined) adv.vanillaSpeedBps = 7.192
-  if (adv.vanillaStepHeight === undefined) adv.vanillaStepHeight = 1.25
+  if (adv.vanillaStepHeight === undefined || adv.vanillaStepHeight < 1.25) adv.vanillaStepHeight = 1.25
   if (adv.vanillaSpeedInLiquids === undefined) adv.vanillaSpeedInLiquids = false
   if (adv.vanillaSpeedOnlyOnGround === undefined) adv.vanillaSpeedOnlyOnGround = true
   if (adv.vanillaSpeedPlatformOnly === undefined) adv.vanillaSpeedPlatformOnly = true
