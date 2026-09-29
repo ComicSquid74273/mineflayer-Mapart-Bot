@@ -8627,6 +8627,14 @@ function configurePathfinderMovements(bot, config, options = {}) {
   movements.allowParkour = false
   movements.allowSprinting = allowSprint
   movements.canSprint = allowSprint
+  // Allow pathfinder to recognize slabs as walkable floor covers alongside carpets
+  if (bot.registry?.blocksArray) {
+    for (const b of bot.registry.blocksArray) {
+      if (b.name.endsWith('_slab')) {
+        movements.carpets.add(b.id)
+      }
+    }
+  }
   // Machine/platform navigation must never turn a missing walk node into a
   // bridge-placement path. Pathfinder approaches those placement nodes by
   // sneaking backward to an edge, which is indistinguishable from the carpet
@@ -8636,10 +8644,12 @@ function configurePathfinderMovements(bot, config, options = {}) {
   const maxStepY = Number(options.maxStepY)
   if (Number.isFinite(minStepY) || Number.isFinite(maxStepY)) {
     movements.exclusionAreasStep.push(createStepElevationExclusion(minStepY, maxStepY))
-    movements.maxDropDown = 0
+    movements.maxDropDown = 1
   }
   if (Number.isFinite(Number(options.maxDropDown))) {
     movements.maxDropDown = Math.max(0, Number(options.maxDropDown))
+  } else if (!Number.isFinite(minStepY) && !Number.isFinite(maxStepY)) {
+    movements.maxDropDown = 1
   }
   if (options.avoidLiquids === true) {
     addLiquidBlocksToAvoid(movements, bot.registry)
@@ -10120,7 +10130,7 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
     : goalRange
   const pathReadyDistance = strict ? Math.min(readyDistance, preciseApproachRange) : readyDistance
   const routeVerticalTolerance = strict
-    ? Math.max(0.1, toNumber(runtimeConfig?.advanced?.machineAccessPreciseVerticalTolerance, 0.75))
+    ? Math.max(0.1, toNumber(runtimeConfig?.advanced?.machineAccessPreciseVerticalTolerance, 1.25))
     : Number.POSITIVE_INFINITY
   const routeStepY = strict ? Math.floor(Number(goalPos.y)) : null
   const strictLocalRadius = strict
@@ -25603,7 +25613,9 @@ function runSingleSession(config, sessionNumber) {
           bot.setControlState('sprint', false)
         }
 
-        bot.setControlState('jump', false)
+        if (!bot.pathfinder?.isMoving?.()) {
+          bot.setControlState('jump', false)
+        }
       })
 
       bot.setControlState('sprint', getPrinterSprintMode(config) === 'always')
