@@ -15485,8 +15485,8 @@ async function ensureMaterialsForTargets(bot, config, targets, options = {}) {
           console.warn(`[NERV-DUMP-WARN] Predump could not dump ${dumpsNeeded} slot(s); continuing restock with available capacity.`)
         } else {
           await delay(toNumber(advanced.inventoryActionDelayMs, 100))
+          continue
         }
-        continue
       }
     }
 
