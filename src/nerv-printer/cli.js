@@ -7035,7 +7035,7 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
 
     try {
       await bot.clickWindow(source.slot, destIndex, 2)
-      await delay(15)
+      await waitForHotbarItem(bot, destIndex, mat, 1000, 25)
     } catch {
       // Non-fatal if a clickWindow fails during pre-staging
     }
@@ -18114,10 +18114,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           markTargetPlacedInWorld(target, key)
           placedCount += 1
         } else {
-          break
+          seen.add(key)
         }
       } catch {
-        break
+        seen.add(key)
       }
     }
     return placedCount
