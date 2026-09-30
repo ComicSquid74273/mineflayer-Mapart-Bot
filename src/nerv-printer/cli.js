@@ -10289,7 +10289,7 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
         const isSameAisle = Math.abs(startPos.z - goalPos.z) <= 3
         const intermediatePos = {
           x: startPos.x + (goalPos.x - startPos.x) * ratio,
-          y: goalPos.y,
+          y: Number.isFinite(startPos.y) ? startPos.y : goalPos.y,
           // Stay on the aisle Z if already in the aisle; otherwise interpolate both X and Z
           z: isSameAisle ? goalPos.z : (startPos.z + (goalPos.z - startPos.z) * ratio)
         }
