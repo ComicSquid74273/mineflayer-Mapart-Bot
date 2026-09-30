@@ -15887,7 +15887,9 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         ? Math.max(20, toNumber(config.advanced?.repairFastConfirmMs, Math.max(160, toNumber(config.advanced?.scannerPlaceConfirmMs, 80) * 2)))
         : 0)
     : Math.max(0, toNumber(config.advanced?.scannerPlaceConfirmMs, Math.max(45, toNumber(config.advanced?.scannerWorkloadPollMs, 10) * 4)))
-  const effectiveConfirmMs = getLatencyAdjustedTimeoutMs(bot, config, fastConfirmMs, fastConfirmMs)
+  const currentPing = getBotLatencyMs(bot) || 0
+  const pingSafeMs = currentPing > 0 ? Math.ceil(currentPing * 1.5) + 120 : 0
+  const effectiveConfirmMs = Math.max(fastConfirmMs, pingSafeMs, getLatencyAdjustedTimeoutMs(bot, config, fastConfirmMs, fastConfirmMs))
   const fastConfirmPollMs = Math.max(5, toNumber(
     requiresFastConfirmation ? config.advanced?.repairFastConfirmPollMs : config.advanced?.scannerPlaceConfirmPollMs,
     toNumber(config.advanced?.scannerPlaceConfirmPollMs, 15)
