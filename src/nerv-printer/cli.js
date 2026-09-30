@@ -14791,8 +14791,12 @@ function selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrd
 
 function getInventoryManagedLinesPerRun(config, linesPerRun) {
   const advanced = config.advanced || {}
-  const refillRows = Math.max(1, toNumber(advanced.inventoryRefillRows, 4))
+  const configuredRefillRows = Math.max(1, toNumber(advanced.inventoryRefillRows, 4))
   const rowWidth = Math.max(1, toNumber(linesPerRun, 1))
+  const itemsPerLane = rowWidth * 128
+  const maxLanes = Math.floor(2176 / itemsPerLane)
+  const evenMaxLanes = Math.max(2, maxLanes - (maxLanes % 2))
+  const refillRows = Math.min(configuredRefillRows, evenMaxLanes)
   return Math.max(1, rowWidth * refillRows)
 }
 
@@ -17015,18 +17019,19 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 
 function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0) {
   const orderedCols = [...new Set(batchTargets.map((target) => target.col))]
-  const leadCol = orderedCols[0]
-  const leadTarget = batchTargets.find((target) => target.col === leadCol) || batchTargets[0]
-  const leadX = toNumber(leadTarget?.position?.x, Math.min(...batchTargets.map((target) => target.position.x)))
-  const leadY = toNumber(leadTarget?.position?.y, Math.min(...batchTargets.map((target) => target.position.y)))
+  const walkColIndex = Math.floor((orderedCols.length - 1) / 2)
+  const walkCol = orderedCols[walkColIndex]
+  const walkTarget = batchTargets.find((target) => target.col === walkCol) || batchTargets[0]
+  const walkX = toNumber(walkTarget?.position?.x, Math.min(...batchTargets.map((target) => target.position.x)))
+  const walkY = toNumber(walkTarget?.position?.y, Math.min(...batchTargets.map((target) => target.position.y)))
   const minZ = Math.min(...batchTargets.map((target) => target.position.z))
   const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
   const activeCols = new Set(batchTargets.map((target) => target.col))
   // Offset entry by 0.5 blocks before start row so the first carpet is in front of the bot
   // (> minPlaceDistance 0.8) and placed under forward gaze without hitbox collision.
   // Extend exit by 0.5 blocks past end row so the final carpet is fully placed before turn.
-  const northPos = { x: leadX + 0.5, y: leadY, z: minZ - 0.5 }
-  const southPos = { x: leadX + 0.5, y: leadY, z: maxZ + 1.5 }
+  const northPos = { x: walkX + 0.5, y: walkY, z: minZ - 0.5 }
+  const southPos = { x: walkX + 0.5, y: walkY, z: maxZ + 1.5 }
   const entryPos = startOnNorthSide ? northPos : southPos
   const exitPos = startOnNorthSide ? southPos : northPos
 
@@ -17042,7 +17047,7 @@ function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0) 
   const dir = startOnNorthSide ? 1 : -1
   const checkpoints = [{ position: entryPos, action: '', activeCols }]
   for (let z = startZ + dir * segmentSize; dir > 0 ? z < endZ : z > endZ; z += dir * segmentSize) {
-    checkpoints.push({ position: { x: leadX + 0.5, y: leadY, z: z + 0.5 }, action: 'inline-repair', activeCols })
+    checkpoints.push({ position: { x: walkX + 0.5, y: walkY, z: z + 0.5 }, action: 'inline-repair', activeCols })
   }
   checkpoints.push({ position: exitPos, action: 'lineEnd', activeCols })
   return checkpoints
