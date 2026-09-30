@@ -1013,13 +1013,18 @@ function installVanillaSpeed(bot, config) {
   bot.on('login', () => configureStepHeight(bot, config))
   bot.on('spawn', () => configureStepHeight(bot, config))
 
+  let lastSetbackAt = 0
+  const setbackCooldownMs = Math.max(1000, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 3000))
+
   bot._client.on('position', () => {
     prevX = null
     prevZ = null
+    lastSetbackAt = Date.now()
   })
 
   bot.on('physicsTick', () => {
     if (advanced.vanillaSpeedEnabled === false) return
+    if (Date.now() - lastSetbackAt < setbackCooldownMs) return
 
     const pos = bot.entity?.position
     if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.z)) return
@@ -1051,7 +1056,9 @@ function installVanillaSpeed(bot, config) {
     if (!isMoving) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
 
-    const bps = Math.min(7.5, Math.max(1.0, toNumber(advanced.vanillaSpeedBps, 7.192)))
+    const allowJump = config?.printer?.allowJump === true
+    const maxSafeBps = allowJump ? 7.192 : 5.612
+    const bps = Math.min(maxSafeBps, Math.max(1.0, toNumber(advanced.vanillaSpeedBps, maxSafeBps)))
     const targetPerTick = bps / 20.0
 
     if (movedDist < targetPerTick) {
