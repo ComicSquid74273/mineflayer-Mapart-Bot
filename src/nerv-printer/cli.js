@@ -16784,22 +16784,29 @@ async function repairTargetsInBatches(bot, config, targets, placeRange, label = 
     const batch = selection.batch
     remaining = selection.remaining
 
-    const batchStartOnNorthSide = chooseNearestWorkloadEntrySide(bot, batch)
-    await prepareWorkloadBatchEntry(bot, config, batch, batchStartOnNorthSide)
-    const foodReady = await ensureFoodBeforeTraversal(bot, config, `repair-batch-${batchAttempt}`)
-    if (!foodReady) {
-      remaining = [...batch, ...remaining]
-      console.log(`[${label}-FOOD-WAIT] Food did not become ready; retrying this same batch without consuming a repair attempt.`)
-      await delay(Math.max(250, toNumber(advanced.repairFoodCheckMs, 1000)))
-      continue
-    }
-    await prepareWorkloadBatchEntry(bot, config, batch, batchStartOnNorthSide)
+    const isLineEndRepair = label === 'NERV-WORKLOAD-LINEEND'
+    const haveAllMaterials = batch.every((t) => countInventoryItems(bot, t.blockName) > 0)
 
-    console.log(`[${label}-BATCH] batch=${batchAttempt} size=${batch.length} remainingAfterBatch=${remaining.length}`)
-    if (String(advanced.repairRestockMode || 'fast').toLowerCase() === 'nerv') {
-      await ensureMaterialsForTargets(bot, config, batch)
+    if (!isLineEndRepair || !haveAllMaterials) {
+      const batchStartOnNorthSide = chooseNearestWorkloadEntrySide(bot, batch)
+      await prepareWorkloadBatchEntry(bot, config, batch, batchStartOnNorthSide)
+      const foodReady = await ensureFoodBeforeTraversal(bot, config, `repair-batch-${batchAttempt}`)
+      if (!foodReady) {
+        remaining = [...batch, ...remaining]
+        console.log(`[${label}-FOOD-WAIT] Food did not become ready; retrying this same batch without consuming a repair attempt.`)
+        await delay(Math.max(250, toNumber(advanced.repairFoodCheckMs, 1000)))
+        continue
+      }
+      await prepareWorkloadBatchEntry(bot, config, batch, batchStartOnNorthSide)
+
+      console.log(`[${label}-BATCH] batch=${batchAttempt} size=${batch.length} remainingAfterBatch=${remaining.length}`)
+      if (String(advanced.repairRestockMode || 'fast').toLowerCase() === 'nerv') {
+        await ensureMaterialsForTargets(bot, config, batch)
+      } else {
+        await ensureRepairMaterialsForTargets(bot, config, batch)
+      }
     } else {
-      await ensureRepairMaterialsForTargets(bot, config, batch)
+      console.log(`[${label}-BATCH] batch=${batchAttempt} size=${batch.length} remainingAfterBatch=${remaining.length} (in-lane; materials carried, skipping chest detour)`)
     }
 
     const repairGroups = classifyRepairTargets(bot, config, batch)
@@ -17811,21 +17818,37 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
   const getUnresolvedTargetsForActiveCols = (activeCols) => {
     const Vec3Current = bot.entity.position.constructor
+    const now = Date.now()
     return batchTargets.filter((target) => {
       if (activeCols instanceof Set && !activeCols.has(target.col)) return false
-      if (stallSkipped.has(getTargetKey(target))) return false
+      const key = getTargetKey(target)
+      if (seen.has(key) || stallSkipped.has(key)) return false
+      const pendingExpiry = pendingUntil.get(key)
+      if (pendingExpiry !== undefined && pendingExpiry > now) return false
       const actual = bot.blockAt(new Vec3Current(target.position.x, target.position.y, target.position.z))
       if (!actual) return false
-      return actual.name !== target.blockName
+      if (actual.name === target.blockName) {
+        markTargetPlacedInWorld(target, key)
+        return false
+      }
+      return true
     })
   }
   const getUnresolvedTraversalTargets = () => {
     const Vec3Current = bot.entity.position.constructor
+    const now = Date.now()
     return batchTargets.filter((target) => {
-      if (stallSkipped.has(getTargetKey(target))) return false
+      const key = getTargetKey(target)
+      if (seen.has(key) || stallSkipped.has(key)) return false
+      const pendingExpiry = pendingUntil.get(key)
+      if (pendingExpiry !== undefined && pendingExpiry > now) return false
       const actual = bot.blockAt(new Vec3Current(target.position.x, target.position.y, target.position.z))
       if (!actual) return false
-      return actual.name !== target.blockName
+      if (actual.name === target.blockName) {
+        markTargetPlacedInWorld(target, key)
+        return false
+      }
+      return true
     })
   }
   const scanNearbyRepairAlerts = () => {
@@ -18163,7 +18186,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       }
 
       if (checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
-        await drainActiveColumnTargets(lineEndSettleMs)
+        await drainActiveColumnTargets(Math.max(400, lineEndSettleMs))
       }
 
       if (missRecoveryEnabled && !emergencyRestockBlock && prevCheckpointPos) {
