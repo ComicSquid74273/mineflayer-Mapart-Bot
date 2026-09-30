@@ -16809,8 +16809,11 @@ async function repairTargetsInBatches(bot, config, targets, placeRange, label = 
 
     const isLineEndRepair = label === 'NERV-WORKLOAD-LINEEND'
     const haveAllMaterials = batch.every((t) => countInventoryItems(bot, t.blockName) > 0)
+    const foodState = getFoodTraversalState(bot, config)
+    const needsFood = Boolean(foodState?.chestTraversalNeeded)
+    const canSkipDetour = isLineEndRepair && haveAllMaterials && !needsFood
 
-    if (!isLineEndRepair || !haveAllMaterials) {
+    if (!canSkipDetour) {
       const batchStartOnNorthSide = chooseNearestWorkloadEntrySide(bot, batch)
       await prepareWorkloadBatchEntry(bot, config, batch, batchStartOnNorthSide)
       const foodReady = await ensureFoodBeforeTraversal(bot, config, `repair-batch-${batchAttempt}`)
@@ -16823,10 +16826,12 @@ async function repairTargetsInBatches(bot, config, targets, placeRange, label = 
       await prepareWorkloadBatchEntry(bot, config, batch, batchStartOnNorthSide)
 
       console.log(`[${label}-BATCH] batch=${batchAttempt} size=${batch.length} remainingAfterBatch=${remaining.length}`)
-      if (String(advanced.repairRestockMode || 'fast').toLowerCase() === 'nerv') {
-        await ensureMaterialsForTargets(bot, config, batch)
-      } else {
-        await ensureRepairMaterialsForTargets(bot, config, batch)
+      if (!haveAllMaterials) {
+        if (String(advanced.repairRestockMode || 'fast').toLowerCase() === 'nerv') {
+          await ensureMaterialsForTargets(bot, config, batch)
+        } else {
+          await ensureRepairMaterialsForTargets(bot, config, batch)
+        }
       }
     } else {
       console.log(`[${label}-BATCH] batch=${batchAttempt} size=${batch.length} remainingAfterBatch=${remaining.length} (in-lane; materials carried, skipping chest detour)`)
