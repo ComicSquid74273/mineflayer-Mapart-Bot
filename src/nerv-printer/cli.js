@@ -17972,8 +17972,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           markTargetPlacedInWorld(target, key)
           return false
         }
-        const pendingExpiry = pendingUntil.get(key)
-        if (pendingExpiry !== undefined && pendingExpiry > now + drainTimeoutMs) return false
+        if (!pendingUntil.has(key)) return false
         const dx = botPos.x - (target.position.x + 0.5)
         const dy = botPos.y - (target.position.y + 0.5)
         const dz = botPos.z - (target.position.z + 0.5)
@@ -18476,6 +18475,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     already,
     skipped,
     seen: seen.size + latencySafeSeen,
+    seenSet: seen,
     missing,
     hardStops,
     rawAllowed: rawAllowedTotal,
@@ -19483,7 +19483,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           const batchErrorKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
           for (const target of batchTargets) {
             const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-            if (batchErrorKeys.has(key)) continue
+            if (batchErrorKeys.has(key) || result.seenSet?.has(key)) continue
             const actual = bot.blockAt(new Vec3Batch(target.position.x, target.position.y, target.position.z))
             if (!actual) continue
             if (actual.name !== target.blockName) {
