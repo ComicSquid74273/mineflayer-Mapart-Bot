@@ -7623,8 +7623,13 @@ async function restockMaterialUnlocked(bot, config, blockName, requestedPulls = 
         const fullStackChestTotal = chestSlots
           .filter((entry) => toNumber(entry.count, 0) >= stackSize)
           .reduce((sum, entry) => sum + stackSize, 0)
-        const fullStackPullNeed = stillNeedTotal > 0 ? Math.ceil(stillNeedTotal / stackSize) * stackSize : 0
-        const willPullTotal = Math.min(fullStackChestTotal, fullStackPullNeed, fullStackCapacityBeforePull)
+        const partialChestTotal = chestSlots
+          .reduce((sum, entry) => sum + toNumber(entry.count, 0), 0)
+        const hasFullStacks = fullStackChestTotal > 0
+        const effectiveChestTotal = hasFullStacks ? fullStackChestTotal : partialChestTotal
+        const pullNeed = stillNeedTotal > 0 ? (hasFullStacks ? Math.ceil(stillNeedTotal / stackSize) * stackSize : stillNeedTotal) : 0
+        const effectiveCapacity = hasFullStacks ? fullStackCapacityBeforePull : capacityBeforePull
+        const willPullTotal = Math.min(effectiveChestTotal, pullNeed, effectiveCapacity)
         retryTargetCount = haveAtStart + willPullTotal
 
         if (willPullTotal <= 0) {
@@ -7673,10 +7678,10 @@ async function restockMaterialUnlocked(bot, config, blockName, requestedPulls = 
           try {
             const useNervWindow = attemptStrategy === 'nerv-window'
             const burstNeed = Math.min(amountStillNeeded, currentCapacity)
-            const burstStacksRequested = Math.max(1, Math.min(fastBurstStacks, Math.floor(burstNeed / stackSize)))
+            const burstStacksRequested = Math.max(1, Math.min(fastBurstStacks, Math.ceil(burstNeed / stackSize)))
             const windowBefore = countWindowInventoryItems(container, itemId, blockName)
             const burst = await quickMoveChestItemStacks(bot, container, itemId, burstNeed, stackSize, burstStacksRequested, {
-              onlyFullStacks: true,
+              onlyFullStacks: hasFullStacks,
               timeoutMs: syncWaitMs,
               pollMs: sameChestRetryPollMs,
               waitForSlot: !useNervWindow,
@@ -11834,7 +11839,7 @@ async function quickMoveChestItemStacks(bot, window, itemId, amountNeeded, stack
     if (count <= 0) continue
     if (onlyFullStacks && count < stackSize) continue
     const plannedCount = onlyFullStacks ? stackSize : count
-    if (amountNeeded - movedEstimate < plannedCount) break
+    if (onlyFullStacks ? (amountNeeded - movedEstimate < plannedCount) : (amountNeeded - movedEstimate <= 0)) break
     await applyAdaptiveLatencyBackoff(bot, config, `quick-move-chest-slot-${entry.slot}`)
     await quickMoveWindowSlotItemWithTrackedState(bot, window, entry.slot, findEmptyWindowInventorySlot(window), {
       forceFullSync: true
