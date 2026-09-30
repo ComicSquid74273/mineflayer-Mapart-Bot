@@ -17412,6 +17412,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
   bot.__nervActiveBatchTargets = batchTargets
+  bot.__nervTraversalDirection = startOnNorthSide ? 'south' : 'north'
   let active = true
   let currentGoal = checkpoints[0].position
   let currentAction = checkpoints[0].action
@@ -18286,6 +18287,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   } finally {
     active = false
     delete bot.__nervActiveBatchTargets
+    delete bot.__nervTraversalDirection
     await placementLoop
   }
 
@@ -21152,17 +21154,19 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
       const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 40 : 0
+      let isMovingSouth = bot?.__nervTraversalDirection === 'south'
+      let isMovingNorth = bot?.__nervTraversalDirection === 'north'
+      if (!isMovingSouth && !isMovingNorth && currentGoal && Number.isFinite(currentGoal.z)) {
+        isMovingSouth = currentGoal.z > botZ + 0.1
+        isMovingNorth = currentGoal.z < botZ - 0.1
+      }
       let rowUrgency = 0
-      if (currentGoal && Number.isFinite(currentGoal.z)) {
-        const isMovingSouth = currentGoal.z > botZ + 0.1
-        const isMovingNorth = currentGoal.z < botZ - 0.1
-        if (isMovingSouth) {
-          const zRel = target.position.z - Math.floor(botZ)
-          rowUrgency = Math.max(1, Math.min(15, 10 - zRel))
-        } else if (isMovingNorth) {
-          const zRel = Math.floor(botZ) - target.position.z
-          rowUrgency = Math.max(1, Math.min(15, 10 - zRel))
-        }
+      if (isMovingSouth) {
+        const zRel = target.position.z - Math.floor(botZ)
+        rowUrgency = Math.max(1, Math.min(15, 10 - zRel))
+      } else if (isMovingNorth) {
+        const zRel = Math.floor(botZ) - target.position.z
+        rowUrgency = Math.max(1, Math.min(15, 10 - zRel))
       }
 
       const heldName = String(bot.heldItem?.name || '')
