@@ -16222,7 +16222,27 @@ async function repairTargets(bot, config, targets, placeRange) {
     const [target] = remaining.splice(bestIndex, 1)
     try {
       if (Math.sqrt(bestDist) > Math.max(1, placeRange - 0.25)) {
-        await bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, repairGoalRange))
+        const laneWidth = Math.max(1, toNumber(printer.linesPerRun, 3))
+        const isSameLane = Math.abs(bot.entity.position.x - (target.position.x + 0.5)) <= Math.max(5.5, laneWidth + 1.5)
+        if (isSameLane) {
+          const straightPos = { x: target.position.x + 0.5, y: bot.entity.position.y, z: target.position.z + 0.5 }
+          await walkStraightToPointWithHardTimeout(
+            bot,
+            straightPos,
+            repairGoalRange,
+            10000,
+            'repair-straight-move',
+            { config, sprint: shouldSprintDuringRepair(config), jump: false }
+          )
+        } else {
+          await gotoGoalWithHardTimeout(
+            bot,
+            new GoalNear(target.position.x, target.position.y, target.position.z, repairGoalRange),
+            15000,
+            'repair-move',
+            { config }
+          )
+        }
       }
 
       const result = await placeTarget(bot, config, target, true)
