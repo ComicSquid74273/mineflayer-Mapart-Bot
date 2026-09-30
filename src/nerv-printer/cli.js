@@ -15849,6 +15849,7 @@ async function waitForTargetBlockPlaced(bot, targetPos, blockName, waitMs = 0, p
 
 function fastBreakInstantBlock(bot, block) {
   if (!block?.position || !bot?._client?.write) return false
+  if (!String(block?.name || '').endsWith('_carpet')) return false
   const pos = block.position
   try {
     bot._client.write('block_dig', {
