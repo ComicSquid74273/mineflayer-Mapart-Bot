@@ -21230,28 +21230,26 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
-      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 40 : 0
+      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 10000 : 0
       let isMovingSouth = bot?.__nervTraversalDirection === 'south'
       let isMovingNorth = bot?.__nervTraversalDirection === 'north'
       if (!isMovingSouth && !isMovingNorth && currentGoal && Number.isFinite(currentGoal.z)) {
         isMovingSouth = currentGoal.z > botZ + 0.1
         isMovingNorth = currentGoal.z < botZ - 0.1
       }
-      let rowUrgency = 0
+      let zRel = 0
       if (isMovingSouth) {
-        const zRel = target.position.z - Math.floor(botZ)
-        rowUrgency = zRel >= 0 ? Math.max(1, 15 - zRel * 2) : (zRel === -1 ? 6 : 1)
+        zRel = target.position.z - Math.floor(botZ)
       } else if (isMovingNorth) {
-        const zRel = Math.floor(botZ) - target.position.z
-        rowUrgency = zRel >= 0 ? Math.max(1, 15 - zRel * 2) : (zRel === -1 ? 6 : 1)
+        zRel = Math.floor(botZ) - target.position.z
       }
+      // Strict forward row ordering: closest row ahead has highest priority,
+      // ensuring all columns of row N are placed before row N+1 can ever be placed.
+      // Eliminates skipping closer rows and dropping boundary/lane carpets.
+      const rowPriority = zRel >= 0 ? (1000 - zRel * 100) : 50
+      const priority = repairPriority + rowPriority - distance2
 
-      const heldName = String(bot.heldItem?.name || '')
-      const heldCount = Number(bot.heldItem?.count || 0)
-      const heldBonus = (heldName && heldCount > 0 && target.blockName === heldName) ? 4 : 0
-      const priority = repairPriority + rowUrgency * 2 + heldBonus
-
-      if (priority > bestPriority || (priority === bestPriority && distance2 < bestDistance2)) {
+      if (priority > bestPriority) {
         // Only do blockAt for the current best candidate to skip expensive world reads
         const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
         if (actual?.name === target.blockName) {
