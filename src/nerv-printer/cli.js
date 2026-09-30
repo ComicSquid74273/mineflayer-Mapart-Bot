@@ -16625,7 +16625,8 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
         continue
       }
 
-      const isSameLane = Math.abs(bot.entity.position.x - (target.position.x + 0.5)) <= 3.5
+      const laneWidth = Math.max(1, toNumber(printer.linesPerRun, 3))
+      const isSameLane = Math.abs(bot.entity.position.x - (target.position.x + 0.5)) <= Math.max(5.5, laneWidth + 1.5)
       try {
         if (isSameLane) {
           const straightPos = { x: target.position.x + 0.5, y: bot.entity.position.y, z: target.position.z + 0.5 }
@@ -18101,24 +18102,23 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   const placeReachableActiveTargets = async (maxPlacements = 30) => {
     let placedCount = 0
+    const attempted = new Set()
     while (placedCount < maxPlacements) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (emergencyRestockBlock) break
-      const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, seen, currentActiveCols)
+      const excludeKeys = new Set([...seen, ...attempted])
+      const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, excludeKeys, currentActiveCols)
       if (!target) break
       const key = getTargetKey(target)
+      attempted.add(key)
       try {
         const result = await placeNervScannerTarget(bot, config, target)
         if (result.state === 'placed' || result.state === 'already') {
           placed += 1
           markTargetPlacedInWorld(target, key)
           placedCount += 1
-        } else {
-          seen.add(key)
         }
-      } catch {
-        seen.add(key)
-      }
+      } catch { }
     }
     return placedCount
   }
