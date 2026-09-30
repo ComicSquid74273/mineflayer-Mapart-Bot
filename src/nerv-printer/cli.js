@@ -17402,7 +17402,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const stallRecoveryConfirmMs = Math.max(20, toNumber(advanced.placementStallRecoveryConfirmMs, Math.max(160, toNumber(advanced.scannerPlaceConfirmMs, 80) * 2)))
   const stallRecoverySettleMs = Math.max(0, toNumber(advanced.placementStallRecoverySettleMs, 120))
   const stallRecoveryCooldownMs = Math.max(0, toNumber(advanced.placementStallRecoveryCooldownMs, 750))
-  const inlineSegmentBlocks = Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, Math.max(2, placeRange - 1)))
+  const inlineSegmentBlocks = inlineRepairEnabled
+    ? Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, Math.max(2, placeRange - 1)))
+    : 0
   const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks)
   const batchMinZ = Math.min(...batchTargets.map((target) => target.position.z))
   const batchMaxZ = Math.max(...batchTargets.map((target) => target.position.z))
