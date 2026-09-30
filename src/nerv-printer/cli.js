@@ -18050,6 +18050,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   })())
 
   try {
+    // Settle and place entrance row targets before forward movement starts
+    await drainActiveColumnTargets(200)
+
     for (const checkpoint of checkpoints) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (emergencyRestockBlock) break
@@ -21153,15 +21156,24 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
-      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 4 : 0
-      const isTrailing = currentGoal && Number.isFinite(currentGoal.z)
-        ? (currentGoal.z > botZ + 0.2 ? tz <= botZ + 0.2 : (currentGoal.z < botZ - 0.2 ? tz >= botZ - 0.2 : false))
-        : false
-      const trailingBonus = isTrailing ? 2 : 0
+      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 40 : 0
+      let rowUrgency = 0
+      if (currentGoal && Number.isFinite(currentGoal.z)) {
+        const isMovingSouth = currentGoal.z > botZ + 0.1
+        const isMovingNorth = currentGoal.z < botZ - 0.1
+        if (isMovingSouth) {
+          const zRel = target.position.z - Math.floor(botZ)
+          rowUrgency = Math.max(1, Math.min(15, 10 - zRel))
+        } else if (isMovingNorth) {
+          const zRel = Math.floor(botZ) - target.position.z
+          rowUrgency = Math.max(1, Math.min(15, 10 - zRel))
+        }
+      }
+
       const heldName = String(bot.heldItem?.name || '')
       const heldCount = Number(bot.heldItem?.count || 0)
       const heldBonus = (heldName && heldCount > 0 && target.blockName === heldName) ? 1 : 0
-      const priority = repairPriority + trailingBonus + heldBonus
+      const priority = repairPriority + rowUrgency * 2 + heldBonus
 
       if (priority > bestPriority || (priority === bestPriority && distance2 < bestDistance2)) {
         // Only do blockAt for the current best candidate to skip expensive world reads
