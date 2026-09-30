@@ -17416,7 +17416,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const maxCatchup = Math.max(1, toNumber(advanced.scannerMaxCatchupPlacements, 30))
   const pollMs = Math.max(0, toNumber(advanced.scannerWorkloadPollMs, 0))
   const retryCooldownMs = Math.max(0, toNumber(advanced.scannerRetryCooldownMs, 30))
-  const optimisticRetryMs = Math.max(25, toNumber(advanced.scannerOptimisticRetryMs, Math.max(120, pollMs * 4)))
+  const optimisticRetryMs = Math.max(25, toNumber(advanced.scannerOptimisticRetryMs, 2500))
   const inlineRepairEnabled = advanced.scannerInlineRepairEnabled === true
   const lineEndSettleMs = Math.max(0, toNumber(advanced.scannerLineEndSettleMs, 250))
   const missRecoveryEnabled = advanced.scannerMissRecoveryEnabled !== false
@@ -18099,9 +18099,34 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
   })())
 
+  const placeReachableActiveTargets = async (maxPlacements = 30) => {
+    let placedCount = 0
+    while (placedCount < maxPlacements) {
+      assertRuntimeContinue(bot, config, 'stopping-during-placement')
+      if (emergencyRestockBlock) break
+      const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, seen, currentActiveCols)
+      if (!target) break
+      const key = getTargetKey(target)
+      try {
+        const result = await placeNervScannerTarget(bot, config, target)
+        if (result.state === 'placed' || result.state === 'already') {
+          placed += 1
+          markTargetPlacedInWorld(target, key)
+          placedCount += 1
+        } else {
+          break
+        }
+      } catch {
+        break
+      }
+    }
+    return placedCount
+  }
+
   try {
-    // Settle and place entrance row targets before forward movement starts
-    await drainActiveColumnTargets(200)
+    // Actively place entrance boundary row targets while stationary before forward movement starts
+    await placeReachableActiveTargets(40)
+    await drainActiveColumnTargets(150)
 
     for (const checkpoint of checkpoints) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
@@ -18215,6 +18240,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       }
 
       if (checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
+        // Actively place any remaining exit boundary row targets while stationary before settle
+        await placeReachableActiveTargets(40)
         await drainActiveColumnTargets(Math.max(400, lineEndSettleMs))
       }
 
@@ -21208,15 +21235,15 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       let rowUrgency = 0
       if (isMovingSouth) {
         const zRel = target.position.z - Math.floor(botZ)
-        rowUrgency = Math.max(1, Math.min(15, 10 - zRel))
+        rowUrgency = zRel >= 0 ? Math.max(1, 15 - zRel * 2) : (zRel === -1 ? 6 : 1)
       } else if (isMovingNorth) {
         const zRel = Math.floor(botZ) - target.position.z
-        rowUrgency = Math.max(1, Math.min(15, 10 - zRel))
+        rowUrgency = zRel >= 0 ? Math.max(1, 15 - zRel * 2) : (zRel === -1 ? 6 : 1)
       }
 
       const heldName = String(bot.heldItem?.name || '')
       const heldCount = Number(bot.heldItem?.count || 0)
-      const heldBonus = (heldName && heldCount > 0 && target.blockName === heldName) ? 1 : 0
+      const heldBonus = (heldName && heldCount > 0 && target.blockName === heldName) ? 4 : 0
       const priority = repairPriority + rowUrgency * 2 + heldBonus
 
       if (priority > bestPriority || (priority === bestPriority && distance2 < bestDistance2)) {
