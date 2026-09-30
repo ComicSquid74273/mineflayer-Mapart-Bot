@@ -16222,27 +16222,16 @@ async function repairTargets(bot, config, targets, placeRange) {
     const [target] = remaining.splice(bestIndex, 1)
     try {
       if (Math.sqrt(bestDist) > Math.max(1, placeRange - 0.25)) {
-        const laneWidth = Math.max(1, toNumber(printer.linesPerRun, 3))
-        const isSameLane = Math.abs(bot.entity.position.x - (target.position.x + 0.5)) <= Math.max(5.5, laneWidth + 1.5)
-        if (isSameLane) {
-          const straightPos = { x: target.position.x + 0.5, y: bot.entity.position.y, z: target.position.z + 0.5 }
-          await walkStraightToPointWithHardTimeout(
-            bot,
-            straightPos,
-            repairGoalRange,
-            10000,
-            'repair-straight-move',
-            { config, sprint: shouldSprintDuringRepair(config), jump: false }
-          )
-        } else {
-          await gotoGoalWithHardTimeout(
-            bot,
-            new GoalNear(target.position.x, target.position.y, target.position.z, repairGoalRange),
-            15000,
-            'repair-move',
-            { config }
-          )
-        }
+        const straightPos = { x: target.position.x + 0.5, y: bot.entity.position.y, z: target.position.z + 0.5 }
+        const moveTimeout = Math.max(5000, Math.ceil(distanceToPoint(bot.entity.position, straightPos) * 300))
+        await walkStraightToPointWithHardTimeout(
+          bot,
+          straightPos,
+          repairGoalRange,
+          moveTimeout,
+          'repair-move',
+          { config, sprint: shouldSprintDuringRepair(config), jump: false }
+        )
       }
 
       const result = await placeTarget(bot, config, target, true)
@@ -16647,29 +16636,17 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
         continue
       }
 
-      const laneWidth = Math.max(1, toNumber(printer.linesPerRun, 3))
-      const isSameLane = Math.abs(bot.entity.position.x - (target.position.x + 0.5)) <= Math.max(5.5, laneWidth + 1.5)
+      const straightPos = { x: target.position.x + 0.5, y: bot.entity.position.y, z: target.position.z + 0.5 }
+      const moveTimeout = Math.min(moveTimeoutMs, Math.max(5000, Math.ceil(distanceToPoint(bot.entity.position, straightPos) * 300)))
       try {
-        if (isSameLane) {
-          const straightPos = { x: target.position.x + 0.5, y: bot.entity.position.y, z: target.position.z + 0.5 }
-          await walkStraightToPointWithHardTimeout(
-            bot,
-            straightPos,
-            goalRange,
-            Math.min(moveTimeoutMs, 10000),
-            `${label}-straight-move`,
-            { config, sprint: shouldSprintDuringRepair(config), jump: false }
-          )
-        } else {
-          const repairMovePromise = bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
-          repairMovePromise.catch(() => {})
-          await Promise.race([
-            repairMovePromise,
-            delay(moveTimeoutMs).then(() => {
-              throw new Error(`repair move timeout after ${moveTimeoutMs}ms`)
-            })
-          ])
-        }
+        await walkStraightToPointWithHardTimeout(
+          bot,
+          straightPos,
+          goalRange,
+          moveTimeout,
+          `${label}-move`,
+          { config, sprint: shouldSprintDuringRepair(config), jump: false }
+        )
       } catch (err) {
         if (typeof bot.pathfinder?.stop === 'function') {
           try { bot.pathfinder.stop() } catch { }
