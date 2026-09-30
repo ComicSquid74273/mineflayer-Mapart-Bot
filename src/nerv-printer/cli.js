@@ -1042,8 +1042,13 @@ function installVanillaSpeed(bot, config) {
       if (!isPositionInsidePlatformHorizontalBounds(pos, config)) return
     }
 
-    if (bot.controlState?.sneak) return
-    if (!bot.controlState?.forward && !bot.controlState?.sprint) return
+    const isSneaking = typeof bot.getControlState === 'function' ? bot.getControlState('sneak') : Boolean(bot.controlState?.sneak)
+    if (isSneaking) return
+
+    const isMoving = typeof bot.getControlState === 'function'
+      ? (bot.getControlState('forward') || bot.getControlState('sprint'))
+      : Boolean(bot.controlState?.forward || bot.controlState?.sprint)
+    if (!isMoving) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
 
     const bps = Math.min(7.5, Math.max(1.0, toNumber(advanced.vanillaSpeedBps, 7.192)))
