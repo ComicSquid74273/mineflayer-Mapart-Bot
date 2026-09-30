@@ -10209,6 +10209,14 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
     )
   }
   const goalRange = Math.max(0.1, Number(range))
+  const optionPlanReach = Number(options.blockInteractionPlanReach)
+  const optionMaxReach = Number(options.blockInteractionMaxReach)
+  const interactionPlanReach = options.blockInteractionPlanReach != null && Number.isFinite(optionPlanReach)
+    ? Math.max(0.5, optionPlanReach)
+    : Math.max(0.5, toNumber(runtimeConfig?.advanced?.machineAccessBlockInteractionPlanReach, 4.4))
+  const interactionMaxReach = options.blockInteractionMaxReach != null && Number.isFinite(optionMaxReach)
+    ? Math.max(interactionPlanReach, optionMaxReach)
+    : Math.max(interactionPlanReach, toNumber(runtimeConfig?.advanced?.machineAccessBlockInteractionMaxReach, 4.45))
   const readyDistance = getMachineAccessReadyDistance(goalRange, strict, runtimeConfig)
   const preciseApproachRange = strict
     ? Math.max(0.35, toNumber(runtimeConfig?.advanced?.machineAccessPreciseApproachRange, 1.6))
@@ -10296,6 +10304,17 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
     await waitForPlatformReady(bot, config, `${reason}:after-ingress`, { expectedY: goalPos.y })
   }
   if (distanceToPoint(bot?.entity?.position, goalPos) <= readyDistance) {
+    if (allowBlockReach && position != null) {
+      const interactionDist = distanceToBlockInteraction(bot?.entity?.position, position)
+      if (interactionDist <= interactionMaxReach) {
+        if (config) assertLivePlatformReady(bot, config, `${reason}:post-goto-interaction`)
+        console.log(
+          `[MACHINE-PATH-INTERACTION] ${reason}: already near access and block within reach ` +
+          `distance=${interactionDist.toFixed(2)} max=${interactionMaxReach.toFixed(2)}.`
+        )
+        return
+      }
+    }
     if (strict) assertNearPoint(bot, goalPos, readyDistance, `${reason}:access-ready`)
     // Strict machine access still needs the fractional openPos alignment below.
     // Returning here used the broad GoalNear/quantization allowance as the final
@@ -10343,14 +10362,6 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
     const directMsPerBlock = Math.max(500, toNumber(runtimeConfig?.advanced?.machineAccessDirectMsPerBlock, 1200))
     const verticalTolerance = Math.max(0.1, toNumber(runtimeConfig?.advanced?.machineAccessPreciseVerticalTolerance, 0.75))
     const liquidProximityRadius = Math.max(0, Math.floor(toNumber(runtimeConfig?.advanced?.machineAccessLiquidProximityRadius, 0)))
-    const optionPlanReach = Number(options.blockInteractionPlanReach)
-    const optionMaxReach = Number(options.blockInteractionMaxReach)
-    const interactionPlanReach = options.blockInteractionPlanReach != null && Number.isFinite(optionPlanReach)
-      ? Math.max(0.5, optionPlanReach)
-      : Math.max(0.5, toNumber(runtimeConfig?.advanced?.machineAccessBlockInteractionPlanReach, 4.4))
-    const interactionMaxReach = options.blockInteractionMaxReach != null && Number.isFinite(optionMaxReach)
-      ? Math.max(interactionPlanReach, optionMaxReach)
-      : Math.max(interactionPlanReach, toNumber(runtimeConfig?.advanced?.machineAccessBlockInteractionMaxReach, 4.45))
     // A route waypoint is the center of a verified floor cell. Keep the
     // server-authoritative entity center strictly inside that same cell, but
     // allow the small collision/packet quantization offset observed live
@@ -10713,6 +10724,17 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
     if (config) assertLivePlatformReady(bot, config, `${reason}:post-goto-interaction`)
     return
   }
+  if (allowBlockReach && position != null) {
+    const interactionDist = distanceToBlockInteraction(bot?.entity?.position, position)
+    if (interactionDist <= interactionMaxReach) {
+      if (config) assertLivePlatformReady(bot, config, `${reason}:post-goto-interaction`)
+      console.log(
+        `[MACHINE-PATH-INTERACTION] ${reason}: block already within reach ` +
+        `distance=${interactionDist.toFixed(2)} max=${interactionMaxReach.toFixed(2)}.`
+      )
+      return
+    }
+  }
   if (strict) {
     const preciseTolerance = Math.max(0.05, toNumber(runtimeConfig?.advanced?.machineAccessPreciseTolerance, 0.2))
     const preciseSettledTolerance = verifiedFlatOnly
@@ -10731,6 +10753,9 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
       maxStartDistance: preciseApproachRange,
       timeoutMs: preciseTimeoutMs,
       settleMs: preciseSettleMs,
+      isComplete: (allowBlockReach && position != null)
+        ? (pos) => distanceToBlockInteraction(pos, position) <= interactionMaxReach
+        : null,
       validatePosition: (positionNow, targetNow) => assertSafeDirectMachineRoutePoint(
         bot,
         positionNow,
@@ -10746,7 +10771,16 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
     }
   }
   if (config) assertLivePlatformReady(bot, config, `${reason}:post-goto`)
-  if (strict) assertNearPoint(bot, goalPos, readyDistance, `${reason}:post-goto-access`)
+  if (strict) {
+    if (allowBlockReach && position != null) {
+      const interactionDist = distanceToBlockInteraction(bot?.entity?.position, position)
+      if (interactionDist > interactionMaxReach) {
+        assertNearPoint(bot, goalPos, readyDistance, `${reason}:post-goto-access`)
+      }
+    } else {
+      assertNearPoint(bot, goalPos, readyDistance, `${reason}:post-goto-access`)
+    }
+  }
 }
 
 async function waitForBlockAt(bot, position, options = {}) {

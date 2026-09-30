@@ -1335,6 +1335,10 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
       // to avoid rotating through the target into adjacent hazards.
       // When already roughly facing the target, keep forward and sprint
       // continuously asserted so physics momentum and vanilla speed booster apply.
+      // When approaching the final waypoint (distance <= 1.2m), walk on foot
+      // instead of sprinting so vanilla speed boost (7.2 bps) does not overshoot
+      // sub-cell precision targets.
+      const canSprint = allowSprint && distance > 1.2
       if (yawDiff > 0.26 || !isMovingForward) {
         stopHorizontalControls(bot)
         if (typeof bot.look === 'function') {
@@ -1343,7 +1347,7 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
           await bot.lookAt(new Vec3(Number(target.x), aimY, Number(target.z)), true)
         }
         bot.setControlState('forward', true)
-        if (allowSprint) {
+        if (canSprint) {
           try { bot.setControlState('sprint', true) } catch { }
         }
         isMovingForward = true
@@ -1351,8 +1355,12 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
         if (yawDiff > 0.05 && typeof bot.look === 'function') {
           await bot.look(desiredYaw, 0, true)
         }
-        if (allowSprint && !bot.getControlState?.('sprint')) {
-          try { bot.setControlState('sprint', true) } catch { }
+        if (canSprint) {
+          if (!bot.getControlState?.('sprint')) {
+            try { bot.setControlState('sprint', true) } catch { }
+          }
+        } else if (bot.getControlState?.('sprint')) {
+          try { bot.setControlState('sprint', false) } catch { }
         }
       }
       const movedSinceAdvance = Math.hypot(position.x - lastMoveX, position.z - lastMoveZ)
