@@ -6971,6 +6971,13 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 
   if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
 
+  const isMoving = typeof bot.getControlState === 'function' && bot.getControlState('forward')
+  const wasSprinting = typeof bot.getControlState === 'function' && bot.getControlState('sprint')
+  if (isMoving) {
+    bot.setControlState('forward', false)
+    bot.setControlState('sprint', false)
+  }
+
   try {
     await bot.clickWindow(source.slot, hotbarIndex, 2)
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
@@ -6980,6 +6987,11 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
     return await waitForSelectedMaterialReady(bot, blockName, timeoutMs + inventorySwapStableMs, pollMs, inventorySwapStableMs)
   } catch (err) {
     return false
+  } finally {
+    if (isMoving) {
+      bot.setControlState('forward', true)
+      if (wasSprinting) bot.setControlState('sprint', true)
+    }
   }
 }
 
@@ -7039,6 +7051,27 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
     } catch {
       // Non-fatal if a clickWindow fails during pre-staging
     }
+  }
+
+  // Fill any remaining hotbar slots (0-7) with backup stacks of the most frequent materials
+  for (const mat of sorted) {
+    let emptyIndex = -1
+    for (let i = 0; i < 8; i++) {
+      const stack = bot.inventory?.slots?.[36 + i]
+      if (!stack || Number(stack.count) <= 0 || !targetSet.has(stack.name)) {
+        emptyIndex = i
+        break
+      }
+    }
+    if (emptyIndex < 0) break
+
+    const source = findBestInventorySlotForItem(bot, mat)
+    if (!source || source.slot < 9 || source.slot > 35) continue
+
+    try {
+      await bot.clickWindow(source.slot, emptyIndex, 2)
+      await waitForHotbarItem(bot, emptyIndex, mat, 1000, 25)
+    } catch { }
   }
 }
 
