@@ -6781,17 +6781,53 @@ function findBestInventorySlotForItem(bot, blockName) {
     })[0] || null
 }
 
-function chooseMaterialHotbarIndex(bot, blockName) {
+function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
   const existing = findHotbarIndexForItem(bot, blockName)
   if (existing >= 0) return existing
 
   const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
-  for (let index = 0; index < 9; index += 1) {
+  // Only use hotbar slots 0 to 7. Keep slot 8 reserved for food / utility tool!
+  for (let index = 0; index < 8; index += 1) {
     if (!slots[getHotbarWindowSlot(index)]) return index
   }
 
+  // Lookahead: evict the hotbar item whose next use is farthest in the future (or never used again)
+  const targets = upcomingTargets || bot.__nervActiveBatchTargets || null
+  if (Array.isArray(targets) && targets.length > 0) {
+    const nextUseDistance = new Map()
+    for (let index = 0; index < 8; index += 1) {
+      const stack = slots[getHotbarWindowSlot(index)]
+      if (stack?.name) nextUseDistance.set(stack.name, -1) // -1 = never used
+    }
+
+    let dist = 0
+    for (const t of targets) {
+      const name = t?.blockName
+      if (name && nextUseDistance.has(name) && nextUseDistance.get(name) === -1) {
+        nextUseDistance.set(name, dist)
+      }
+      dist += 1
+    }
+
+    let bestIndex = 0
+    let bestDist = -2
+
+    for (let index = 0; index < 8; index += 1) {
+      const stack = slots[getHotbarWindowSlot(index)]
+      if (!stack?.name) return index
+      const d = nextUseDistance.get(stack.name) ?? -1
+      if (d === -1) return index // never used again in batch -> evict immediately!
+      if (d > bestDist) {
+        bestDist = d
+        bestIndex = index
+      }
+    }
+    return bestIndex
+  }
+
+  // Fallback: evict duplicate or most frequent stack in hotbar slots 0-7
   const byName = new Map()
-  for (let index = 0; index < 9; index += 1) {
+  for (let index = 0; index < 8; index += 1) {
     const stack = slots[getHotbarWindowSlot(index)]
     if (!stack?.name) continue
     const entry = byName.get(stack.name) || { name: stack.name, count: 0, index }
@@ -6804,9 +6840,9 @@ function chooseMaterialHotbarIndex(bot, blockName) {
     if (!replacement || entry.count > replacement.count) replacement = entry
   }
 
-  if (replacement) return Math.max(0, Math.min(8, replacement.index))
+  if (replacement) return Math.max(0, Math.min(7, replacement.index))
   const current = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0
-  return Math.max(0, Math.min(8, current))
+  return Math.max(0, Math.min(7, current))
 }
 
 function findNeutralHotbarIndex(bot, blockedItemNames = []) {
@@ -6960,7 +6996,7 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
   const targetSet = new Set(targetMaterials)
 
   const hotbarHas = new Set()
-  for (let i = 0; i < 9; i++) {
+  for (let i = 0; i < 8; i++) {
     const stack = slots[36 + i]
     if (stack?.name && Number(stack.count) > 0) {
       hotbarHas.add(stack.name)
@@ -15811,6 +15847,30 @@ async function waitForTargetBlockPlaced(bot, targetPos, blockName, waitMs = 0, p
   return isTargetBlockPlaced(bot, targetPos, blockName)
 }
 
+function fastBreakInstantBlock(bot, block) {
+  if (!block?.position || !bot?._client?.write) return false
+  const pos = block.position
+  try {
+    bot._client.write('block_dig', {
+      status: 0,
+      location: pos,
+      face: 1
+    })
+    bot.swingArm('right')
+    bot._client.write('block_dig', {
+      status: 2,
+      location: pos,
+      face: 1
+    })
+    if (typeof bot._updateBlockState === 'function') {
+      bot._updateBlockState(pos, 0)
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function placeTarget(bot, config, target, isRepairPass = false) {
   const printer = config.printer || {}
   const errors = config.errorHandling || {}
@@ -15857,10 +15917,13 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     }
 
     if (String(errors.errorAction || 'repair').toLowerCase() === 'repair') {
-      try {
-        await bot.dig(blockAtTarget, true)
-      } catch (err) {
-        return { state: 'skip', reason: `cannot-repair-${err?.message || err}` }
+      const broken = fastBreakInstantBlock(bot, blockAtTarget)
+      if (!broken) {
+        try {
+          await bot.dig(blockAtTarget, true)
+        } catch (err) {
+          return { state: 'skip', reason: `cannot-repair-${err?.message || err}` }
+        }
       }
     } else {
       return { state: 'skip', reason: 'misplaced-carpet' }
@@ -17347,6 +17410,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const batchMaxZ = Math.max(...batchTargets.map((target) => target.position.z))
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
+  bot.__nervActiveBatchTargets = batchTargets
   let active = true
   let currentGoal = checkpoints[0].position
   let currentAction = checkpoints[0].action
@@ -18217,6 +18281,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
   } finally {
     active = false
+    delete bot.__nervActiveBatchTargets
     await placementLoop
   }
 
