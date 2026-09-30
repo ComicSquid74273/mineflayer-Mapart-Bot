@@ -8910,7 +8910,10 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
       const activeJump = jump || shouldStepDownJump
       bot.__nervAllowActiveJump = activeJump
       bot.setControlState('jump', activeJump)
-      bot.setControlState('sprint', sprint && !latencyState.shouldDisableSprint)
+      const isDynamicSprint = typeof options.shouldSprint === 'function'
+        ? options.shouldSprint(pos, point)
+        : sprint
+      bot.setControlState('sprint', isDynamicSprint && !latencyState.shouldDisableSprint)
       bot.setControlState('forward', true)
       await delay(tickMs)
       if (latencyState.delayMs > 0) {
@@ -17024,21 +17027,24 @@ function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0) 
   // Extend exit by 0.5 blocks past end row so the final carpet is fully placed before turn.
   const northPos = { x: leadX + 0.5, y: leadY, z: minZ - 0.5 }
   const southPos = { x: leadX + 0.5, y: leadY, z: maxZ + 1.5 }
+  const entryPos = startOnNorthSide ? northPos : southPos
+  const exitPos = startOnNorthSide ? southPos : northPos
 
   if (segmentSize <= 0 || maxZ - minZ <= segmentSize) {
-    return startOnNorthSide
-      ? [{ position: northPos, action: '', activeCols }, { position: southPos, action: 'lineEnd', activeCols }]
-      : [{ position: southPos, action: '', activeCols }, { position: northPos, action: 'lineEnd', activeCols }]
+    return [
+      { position: entryPos, action: '', activeCols },
+      { position: exitPos, action: 'lineEnd', activeCols }
+    ]
   }
 
   const startZ = startOnNorthSide ? minZ : maxZ
   const endZ = startOnNorthSide ? maxZ : minZ
   const dir = startOnNorthSide ? 1 : -1
-  const checkpoints = [{ position: { x: leadX + 0.5, y: leadY, z: startZ - dir * 0.5 }, action: '', activeCols }]
+  const checkpoints = [{ position: entryPos, action: '', activeCols }]
   for (let z = startZ + dir * segmentSize; dir > 0 ? z < endZ : z > endZ; z += dir * segmentSize) {
     checkpoints.push({ position: { x: leadX + 0.5, y: leadY, z: z + 0.5 }, action: 'inline-repair', activeCols })
   }
-  checkpoints.push({ position: { x: leadX + 0.5, y: leadY, z: endZ + dir * 1.5 }, action: 'lineEnd', activeCols })
+  checkpoints.push({ position: exitPos, action: 'lineEnd', activeCols })
   return checkpoints
 }
 
@@ -17332,6 +17338,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const stallRecoveryCooldownMs = Math.max(0, toNumber(advanced.placementStallRecoveryCooldownMs, 750))
   const inlineSegmentBlocks = Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, Math.max(2, placeRange - 1)))
   const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks)
+  const batchMinZ = Math.min(...batchTargets.map((target) => target.position.z))
+  const batchMaxZ = Math.max(...batchTargets.map((target) => target.position.z))
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
   let active = true
@@ -18004,6 +18012,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         checkpointMoveInProgress = true
         try {
           if (useStraightCheckpoint) {
+            const shouldSprintDynamic = (pos) => {
+              if (!shouldSprint || !pos) return false
+              if (pos.z <= batchMinZ + 2.0 || pos.z >= batchMaxZ - 1.0) {
+                return false
+              }
+              return true
+            }
+
             await walkStraightToPointWithHardTimeout(
               bot,
               checkpoint.position,
@@ -18013,6 +18029,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               {
                 config,
                 sprint: shouldSprint,
+                shouldSprint: shouldSprintDynamic,
                 jump: false,
                 tickMs: straightCheckpointTickMs,
                 shouldPauseTimeout: () => !isWorkloadPlatformReady(),
@@ -21060,11 +21077,15 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
-      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 2 : 0
+      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 4 : 0
+      const isTrailing = currentGoal && Number.isFinite(currentGoal.z)
+        ? (currentGoal.z > botZ + 0.2 ? tz <= botZ + 0.2 : (currentGoal.z < botZ - 0.2 ? tz >= botZ - 0.2 : false))
+        : false
+      const trailingBonus = isTrailing ? 2 : 0
       const heldName = String(bot.heldItem?.name || '')
       const heldCount = Number(bot.heldItem?.count || 0)
       const heldBonus = (heldName && heldCount > 0 && target.blockName === heldName) ? 1 : 0
-      const priority = repairPriority + heldBonus
+      const priority = repairPriority + trailingBonus + heldBonus
 
       if (priority > bestPriority || (priority === bestPriority && distance2 < bestDistance2)) {
         // Only do blockAt for the current best candidate to skip expensive world reads
