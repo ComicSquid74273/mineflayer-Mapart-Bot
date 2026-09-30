@@ -18035,6 +18035,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (stallSkippedNow.length > 0) {
             break
           }
+          if (i < allowed - 1) {
+            await delay(Math.max(1, toNumber(advanced.scannerInterPlacementDelayMs, 3)))
+          }
         }
       }
 
