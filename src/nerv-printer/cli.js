@@ -1061,18 +1061,10 @@ function installVanillaSpeed(bot, config) {
       const nextPos = pos.offset(dirX * boost, 0, dirZ * boost)
       const Vec3 = pos.constructor
 
-      const destFloorTop = getFloorTopAt(bot, nextPos.x, nextPos.z, pos.y)
-      if (destFloorTop != null) {
-        if (destFloorTop > pos.y + 0.1) return // step-up > 0.1: yield to native physics
-        if (destFloorTop < pos.y - 0.1) return // step-down > 0.1: yield to native physics
-        nextPos.y = destFloorTop // flat or sub-0.1 carpet transition: snap elevation to surface
-      }
-
-      const checkY = Math.floor(nextPos.y - 0.1)
+      const checkY = Math.floor(pos.y - 0.1)
       const blockBelow = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY, Math.floor(nextPos.z)))
       if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
         pos.x = nextPos.x
-        pos.y = nextPos.y
         pos.z = nextPos.z
         prevX = nextPos.x
         prevZ = nextPos.z
