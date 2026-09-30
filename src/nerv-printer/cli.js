@@ -17127,8 +17127,8 @@ function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0) 
   // Offset entry by 0.5 blocks before start row so the first carpet is in front of the bot
   // (> minPlaceDistance 0.8) and placed under forward gaze without hitbox collision.
   // Extend exit by 0.5 blocks past end row so the final carpet is fully placed before turn.
-  const northPos = { x: walkX + 0.5, y: walkY, z: minZ - 0.5 }
-  const southPos = { x: walkX + 0.5, y: walkY, z: maxZ + 1.5 }
+  const northPos = { x: walkX + 0.5, y: walkY, z: minZ - 1.2 }
+  const southPos = { x: walkX + 0.5, y: walkY, z: maxZ + 2.2 }
   const entryPos = startOnNorthSide ? northPos : southPos
   const exitPos = startOnNorthSide ? southPos : northPos
 
@@ -18234,6 +18234,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       }
 
       if (latencySafeInterrupted) break
+
+      if ((checkpoint === checkpoints[0] || checkpoint.action === '') && !emergencyRestockBlock) {
+        // Actively place entrance boundary row targets while stationary before forward sprint starts
+        await placeReachableActiveTargets(40)
+        await drainActiveColumnTargets(150)
+      }
 
       if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
         await drainActiveColumnTargets(Math.max(50, toNumber(advanced.inlineRepairDrainMs, Math.max(200, retryCooldownMs * 4))))
