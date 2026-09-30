@@ -16504,18 +16504,23 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
         const hits = (transientRepairFailures.get(target.blockName) || 0) + 1
         transientRepairFailures.set(target.blockName, hits)
         if (hits >= transientRestockHits && !emergencyRestockBlock) {
-          emergencyRestockBlock = target.blockName
-          emergencyRestockReason = `${hits} transient repair placement failure(s), latest=${reason}`
-          active = false
-          stopRepairActive = false
-          console.log(`[${label}-STALL-RESTOCK] block=${emergencyRestockBlock} reason="${emergencyRestockReason}"; forcing emergency restock/refresh before retry.`)
-          logPingDiagnostic(bot, config, 'repair-stall-restock-requested', {
-            label,
-            block: emergencyRestockBlock,
-            target: `${target.position.x},${target.position.y},${target.position.z}`,
-            pos: formatBotPosition(bot),
-            reason: emergencyRestockReason
-          }, { force: true })
+          if (countInventoryItems(bot, target.blockName) <= 0) {
+            emergencyRestockBlock = target.blockName
+            emergencyRestockReason = `${hits} transient repair placement failure(s), latest=${reason}`
+            active = false
+            stopRepairActive = false
+            console.log(`[${label}-STALL-RESTOCK] block=${emergencyRestockBlock} reason="${emergencyRestockReason}"; forcing emergency restock/refresh before retry.`)
+            logPingDiagnostic(bot, config, 'repair-stall-restock-requested', {
+              label,
+              block: emergencyRestockBlock,
+              target: `${target.position.x},${target.position.y},${target.position.z}`,
+              pos: formatBotPosition(bot),
+              reason: emergencyRestockReason
+            }, { force: true })
+          } else {
+            console.log(`[${label}-STALL-FALLBACK] block=${target.blockName} has ${countInventoryItems(bot, target.blockName)} in inventory; falling back to stop-place instead of chest restock.`)
+            fallbackNeeded = true
+          }
         }
       }
       if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
@@ -16727,7 +16732,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
     return { placed, already, skipped, foodRequeue: true }
   }
 
-  if (allowEmergencyRestock && emergencyRestockBlock) {
+  if (allowEmergencyRestock && emergencyRestockBlock && countInventoryItems(bot, emergencyRestockBlock) <= 0) {
     console.log(`[${label}-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; refilling and retrying unresolved repair targets once.`)
     const restocked = await waitForRequiredMaterialRestock(bot, config, emergencyRestockBlock, 1, null, emergencyRestockReason || 'repair-emergency-restock')
     const remainingTargets = scanPlacementErrors(bot, targets, {
@@ -16830,7 +16835,8 @@ async function repairTargetsInBatches(bot, config, targets, placeRange, label = 
     const repairGroups = classifyRepairTargets(bot, config, batch)
     console.log(`[${label}-BATCH] mixedRepair=true missing=${repairGroups.missing.length} occupied=${repairGroups.occupied.length} already=${repairGroups.already.length}`)
 
-    const result = await repairTargetsWhileMovingWithStops(bot, config, batch, placeRange, `${label}-MIXED`)
+    const allowEmergencyRestock = !isLineEndRepair || !haveAllMaterials
+    const result = await repairTargetsWhileMovingWithStops(bot, config, batch, placeRange, `${label}-MIXED`, allowEmergencyRestock)
     placed += result.placed
     already += result.already
     skipped += result.skipped
@@ -17355,7 +17361,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
     }
   }
 
-  if (allowEmergencyRestock && emergencyRestockBlock) {
+  if (allowEmergencyRestock && emergencyRestockBlock && countInventoryItems(bot, emergencyRestockBlock) <= 0) {
     console.log(`[NERV-SCANNER-EMERGENCY-RESTOCK] ${emergencyRestockBlock} unavailable during placement; stopping movement, refilling, and retrying remaining targets once.`)
     const restocked = await waitForRequiredMaterialRestock(bot, config, emergencyRestockBlock, 1, neededByBlock, 'scanner-emergency-restock')
     if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
@@ -18351,7 +18357,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
   }
 
-  if (allowEmergencyRestock && emergencyRestockBlock) {
+  if (allowEmergencyRestock && emergencyRestockBlock && countInventoryItems(bot, emergencyRestockBlock) <= 0) {
     console.log(`[NERV-WORKLOAD-EMERGENCY-RESTOCK] ${emergencyRestockBlock} ${emergencyRestockReason}; stopping movement, refilling, and retrying remaining targets once.`)
     const unresolvedBeforeRestock = getUnresolvedTraversalTargets()
     const fullWindowTargets = Array.isArray(options?.windowTargets) && options.windowTargets.length > 0

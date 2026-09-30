@@ -997,7 +997,7 @@ test('vanilla speed collision guard rejects carpet, slab, and full-block overlap
   }
 
   assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(1.69, 1, 0.5)), false)
-  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(1.71, 1, 0.5)), true)
+  assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(1.71, 1, 0.5)), false) // carpet underfoot treated as floor
   assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(2.71, 1, 0.5)), true)
   assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(3.71, 1, 0.5)), true)
   assert.equal(playerPositionOverlapsBlockCollision(bot, new Vec3(2.5, 1.5, 0.5)), false)
