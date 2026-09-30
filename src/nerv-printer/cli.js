@@ -18086,14 +18086,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         checkpointMoveInProgress = true
         try {
           if (useStraightCheckpoint) {
-            const shouldSprintDynamic = (pos) => {
-              if (!shouldSprint || !pos) return false
-              if (pos.z <= batchMinZ + 2.0 || pos.z >= batchMaxZ - 1.0) {
-                return false
-              }
-              return true
-            }
-
             await walkStraightToPointWithHardTimeout(
               bot,
               checkpoint.position,
@@ -18103,7 +18095,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               {
                 config,
                 sprint: shouldSprint,
-                shouldSprint: shouldSprintDynamic,
                 jump: false,
                 tickMs: straightCheckpointTickMs,
                 shouldPauseTimeout: () => !isWorkloadPlatformReady(),
