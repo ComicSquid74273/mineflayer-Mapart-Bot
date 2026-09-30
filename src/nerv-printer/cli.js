@@ -16620,15 +16620,28 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
         continue
       }
 
+      const isSameLane = Math.abs(bot.entity.position.x - (target.position.x + 0.5)) <= 3.5
       try {
-        const repairMovePromise = bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
-        repairMovePromise.catch(() => {})
-        await Promise.race([
-          repairMovePromise,
-          delay(moveTimeoutMs).then(() => {
-            throw new Error(`repair move timeout after ${moveTimeoutMs}ms`)
-          })
-        ])
+        if (isSameLane) {
+          const straightPos = { x: target.position.x + 0.5, y: bot.entity.position.y, z: target.position.z + 0.5 }
+          await walkStraightToPointWithHardTimeout(
+            bot,
+            straightPos,
+            goalRange,
+            Math.min(moveTimeoutMs, 10000),
+            `${label}-straight-move`,
+            { config, sprint: shouldSprintDuringRepair(config), jump: false }
+          )
+        } else {
+          const repairMovePromise = bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
+          repairMovePromise.catch(() => {})
+          await Promise.race([
+            repairMovePromise,
+            delay(moveTimeoutMs).then(() => {
+              throw new Error(`repair move timeout after ${moveTimeoutMs}ms`)
+            })
+          ])
+        }
       } catch (err) {
         if (typeof bot.pathfinder?.stop === 'function') {
           try { bot.pathfinder.stop() } catch { }
@@ -16637,13 +16650,11 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
         const message = String(err?.message || err)
         const failures = (moveFailures.get(targetKey(target)) || 0) + 1
         moveFailures.set(targetKey(target), failures)
-        console.log(`[${label}-MOVE-WARN] ${target.position.x} ${target.position.y} ${target.position.z} -> ${message}; continuing fast repair (${failures}/2).`)
-        if (failures >= 2) {
-          processed.add(targetKey(target))
-          skipped += 1
-          if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
-            console.log(`[${label}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (move-failed)`)
-          }
+        console.log(`[${label}-MOVE-WARN] ${target.position.x} ${target.position.y} ${target.position.z} -> ${message}; continuing fast repair.`)
+        processed.add(targetKey(target))
+        skipped += 1
+        if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
+          console.log(`[${label}-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (move-failed)`)
         }
         await delay(tickMs)
         continue
