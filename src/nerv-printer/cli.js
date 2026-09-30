@@ -8889,10 +8889,10 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
     bot.setControlState('left', false)
     bot.setControlState('right', false)
     bot.setControlState('jump', jump)
+    normalizeCarpetSurfacePosition(bot)
 
     while (isBotSessionLive(bot)) {
       assertRuntimeContinue(bot, config, `${label}-runtime-stop`)
-      normalizeCarpetSurfacePosition(bot)
       if (isGoalSatisfied()) return
 
       const now = Date.now()

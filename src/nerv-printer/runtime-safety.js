@@ -683,27 +683,16 @@ function normalizeCarpetSurfacePosition(bot, options = {}) {
   if (![position.x, position.y, position.z].every(Number.isFinite)) return null
 
   const blockY = Math.floor(position.y)
-  const halfWidth = Math.max(0.01, Number(options.halfWidth) || 0.3)
+  const cellX = Math.floor(position.x)
+  const cellZ = Math.floor(position.z)
   let carpetBlock = null
 
-  // Check center cell first, then any cell covered by the player's bounding box footprint
-  const cells = [
-    { x: Math.floor(position.x), z: Math.floor(position.z) },
-    { x: Math.floor(position.x - halfWidth), z: Math.floor(position.z - halfWidth) },
-    { x: Math.floor(position.x + halfWidth), z: Math.floor(position.z - halfWidth) },
-    { x: Math.floor(position.x - halfWidth), z: Math.floor(position.z + halfWidth) },
-    { x: Math.floor(position.x + halfWidth), z: Math.floor(position.z + halfWidth) }
-  ]
-
-  for (const cell of cells) {
-    try {
-      const b = bot.blockAt(new Vec3(cell.x, blockY, cell.z), false)
-      if (b && isCarpetBlockName(b.name)) {
-        carpetBlock = b
-        break
-      }
-    } catch { }
-  }
+  try {
+    const b = bot.blockAt(new Vec3(cellX, blockY, cellZ), false)
+    if (b && isCarpetBlockName(b.name)) {
+      carpetBlock = b
+    }
+  } catch { }
 
   if (!carpetBlock) return null
 
