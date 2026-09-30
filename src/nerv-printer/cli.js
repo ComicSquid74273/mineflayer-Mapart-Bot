@@ -16841,7 +16841,11 @@ async function repairTargetsInBatches(bot, config, targets, placeRange, label = 
     remaining = selection.remaining
 
     const isLineEndRepair = label === 'NERV-WORKLOAD-LINEEND'
-    const haveAllMaterials = batch.every((t) => countInventoryItems(bot, t.blockName) > 0)
+    const neededCounts = new Map()
+    for (const t of batch) {
+      if (t?.blockName) neededCounts.set(t.blockName, (neededCounts.get(t.blockName) || 0) + 1)
+    }
+    const haveAllMaterials = [...neededCounts.entries()].every(([name, count]) => countInventoryItems(bot, name) >= count)
     const foodState = getFoodTraversalState(bot, config)
     const needsFood = Boolean(foodState?.chestTraversalNeeded)
     const canSkipDetour = isLineEndRepair && haveAllMaterials && !needsFood
