@@ -18204,8 +18204,45 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           else pendingUntil.delete(key)
         }
 
-        for (let i = 0; i < allowed; i += 1) {
-          const target = findNervScannerCandidate(bot, config, targetByXZ, currentGoal, burstExcluded, currentActiveCols, retryPriority)
+        // Collect and sort once per tick, then place from that ordered list.
+        // Re-scanning the reach grid per placement is what capped us at ~1
+        // block per tick; the reference printer sorts the whole candidate set
+        // first and then emits up to blocks-per-tick from it.
+        const burstTargets = collectNervScannerCandidates(
+          bot,
+          config,
+          targetByXZ,
+          currentGoal,
+          burstExcluded,
+          currentActiveCols,
+          retryPriority,
+          allowed
+        )
+
+        // Goal lookahead: pre-select every material this burst needs so the
+        // burst runs hotbar-clean. Swapping mid-burst costs a clickWindow round
+        // trip and stalls the sprint, which is what dropped carpets.
+        if (burstTargets.length > 1) {
+          const staged = new Set()
+          for (const burstTarget of burstTargets) {
+            const blockName = burstTarget.blockName
+            if (staged.has(blockName)) continue
+            staged.add(blockName)
+            if (getSelectedHotbarStack(bot)?.name === blockName && Number(getSelectedHotbarStack(bot)?.count) > 0) continue
+            if (findHotbarIndexForItem(bot, blockName) >= 0) continue
+            if (countInventoryItems(bot, blockName) > 0) continue
+            // Out of stock entirely: drop it from the burst rather than
+            // triggering a mid-sprint emergency restock.
+            const blocked = burstTargets.findIndex((candidate) => candidate.blockName === blockName)
+            if (blocked >= 0) {
+              burstTargets.splice(blocked, 1)
+              staged.delete(blockName)
+            }
+          }
+        }
+
+        for (let i = 0; i < burstTargets.length; i += 1) {
+          const target = burstTargets[i]
           if (!target) break
 
           const key = `${target.position.x}:${target.position.y}:${target.position.z}`
@@ -21396,7 +21433,7 @@ function buildNervScannerCheckpoints(targets, config, maxGroupsOverride = null) 
   return checkpoints
 }
 
-function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processed = new Set(), activeCols = null, priorityKeys = null) {
+function collectNervScannerCandidates(bot, config, targetByXZ, currentGoal, processed = new Set(), activeCols = null, priorityKeys = null, limit = 1) {
   const printer = config.printer || {}
   const placeRange = Math.max(1, toNumber(printer.placeRange, 5))
   const placeRange2 = placeRange * placeRange
@@ -21414,11 +21451,10 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
   const botZ = bot.entity.position.z
   const baseX = Math.floor(botX)
   const baseZ = Math.floor(botZ)
+  const Vec3 = bot.entity.position.constructor
+  const maxResults = Math.max(1, Math.floor(toNumber(limit, 1)))
 
-  let best = null
-  let bestDistance2 = Number.POSITIVE_INFINITY
-  let bestPriority = Number.NEGATIVE_INFINITY
-
+  const scored = []
   for (let dx = -radius; dx <= radius; dx += 1) {
     for (let dz = -radius; dz <= radius; dz += 1) {
       const x = baseX + dx
@@ -21441,7 +21477,6 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
-      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 10000 : 0
       let isMovingSouth = bot?.__nervTraversalDirection === 'south'
       let isMovingNorth = bot?.__nervTraversalDirection === 'north'
       if (!isMovingSouth && !isMovingNorth && currentGoal && Number.isFinite(currentGoal.z)) {
@@ -21454,35 +21489,40 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       } else if (isMovingNorth) {
         zRel = Math.floor(botZ) - target.position.z
       }
-      // Earliest reach-exit row schedule: current row under/in-front of bot (zRel=0) is prioritized
-      // to clear all columns in row N before advancing. Immediate trailing row (zRel=-1) has second
-      // highest priority to prevent boundary/swap misses, and forward rows (zRel>=1) follow in order.
-      let rowPriority = 100
-      if (zRel === 0) rowPriority = 1000
-      else if (zRel === -1) rowPriority = 950
-      else if (zRel === 1) rowPriority = 800
-      else if (zRel === 2) rowPriority = 700
-      else if (zRel === 3) rowPriority = 600
-      else if (zRel === -2) rowPriority = 500
-      const priority = repairPriority + rowPriority - distance2
-
-      if (priority > bestPriority) {
-        // Only do blockAt for the current best candidate to skip expensive world reads
-        const actual = bot.blockAt(new bot.entity.position.constructor(target.position.x, target.position.y, target.position.z))
-        if (actual?.name === target.blockName) {
-          processed.add(key)
-          continue
-        }
-        if (actual && actual.name !== 'air' && !String(actual.name).endsWith('_carpet')) continue
-
-        best = target
-        bestDistance2 = distance2
-        bestPriority = priority
-      }
+      // Break distance ties by reach-exit order so blocks about to leave the
+      // reach bubble win over equally-distant blocks further along the lane.
+      // Distance stays the dominant term, matching the reference printer's
+      // closest-first sort; a large row bonus here is what let a forward block
+      // steal a placement from a closer trailing one.
+      let rowTiebreak = 0
+      if (zRel === 0) rowTiebreak = 3
+      else if (zRel === -1) rowTiebreak = 2
+      else if (zRel === 1) rowTiebreak = 1
+      else if (zRel === -2) rowTiebreak = -1
+      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? -1e6 : 0
+      scored.push({ target, key, score: repairPriority + distance2 * 1000 - rowTiebreak })
     }
   }
 
-  return best
+  if (scored.length === 0) return []
+  scored.sort((left, right) => left.score - right.score)
+
+  const results = []
+  for (const entry of scored) {
+    if (results.length >= maxResults) break
+    const actual = bot.blockAt(new Vec3(entry.target.position.x, entry.target.position.y, entry.target.position.z))
+    if (actual?.name === entry.target.blockName) {
+      processed.add(entry.key)
+      continue
+    }
+    if (actual && actual.name !== 'air' && !String(actual.name).endsWith('_carpet')) continue
+    results.push(entry.target)
+  }
+  return results
+}
+
+function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processed = new Set(), activeCols = null, priorityKeys = null) {
+  return collectNervScannerCandidates(bot, config, targetByXZ, currentGoal, processed, activeCols, priorityKeys, 1)[0] || null
 }
 
 async function placeNervScannerTarget(bot, config, target, options = {}) {

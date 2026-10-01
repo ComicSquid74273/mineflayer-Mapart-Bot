@@ -129,3 +129,29 @@ test('a fast-confirm repair placement accepts the written packet when the client
   const mixed = source.slice(mixedStart, mixedStart + 700)
   assert.match(mixed, /bot\.__nervAcceptUnconfirmedPlacement = \(config\.advanced \|\| \{\}\)\.repairAcceptUnconfirmedPlacement === true/)
 })
+
+test('the placement burst collects and sorts once, closest-first, with a reach-exit tiebreak', () => {
+  // Regression: the loop re-scanned the reach grid per placement (capping us near
+  // 1 block/tick) and a large rowPriority let a forward block outrank a closer
+  // trailing one. The reference printer sorts once, then emits blocks-per-tick.
+  const collectEnd = source.indexOf('\nfunction findNervScannerCandidate(')
+  const collect = source.slice(source.indexOf('function collectNervScannerCandidates('), collectEnd)
+
+  assert.match(collect, /scored\.sort\(\(left, right\) => left\.score - right\.score\)/)
+  // Distance must dominate; the row schedule is only a tiebreak.
+  assert.match(collect, /score: repairPriority \+ distance2 \* 1000 - rowTiebreak/)
+  assert.doesNotMatch(collect, /rowPriority/)
+  // The grid walk happens once and world reads happen after the sort.
+  assert.ok(collect.indexOf('scored.push') < collect.indexOf('scored.sort'))
+
+  const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
+  const loop = source.slice(loopStart, loopStart + 12000)
+  assert.match(loop, /const burstTargets = collectNervScannerCandidates\(/)
+  assert.match(loop, /for \(let i = 0; i < burstTargets\.length; i \+= 1\)/)
+  // One call per tick, not one per placement slot.
+  assert.equal((loop.match(/collectNervScannerCandidates\(/g) || []).length, 1)
+
+  // The burst pre-checks every material so it never swaps mid-burst.
+  assert.match(loop, /Goal lookahead: pre-select every material this burst needs/)
+  assert.match(loop, /if \(countInventoryItems\(bot, blockName\) > 0\) continue/)
+})
