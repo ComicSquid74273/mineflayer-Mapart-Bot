@@ -17248,6 +17248,10 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
     if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
       const Vec3Retry = bot.entity.position.constructor
       const remainingTargets = batchTargets.filter((target) => {
+        // Paper never echoes block_change to the placing client, so a client-only
+        // read reports every already-accepted carpet as air and re-places the band.
+        if (bot.__nervConfirmedPlaced instanceof Set &&
+          bot.__nervConfirmedPlaced.has(`${target.position.x}:${target.position.y}:${target.position.z}`)) return false
         const actual = bot.blockAt(new Vec3Retry(target.position.x, target.position.y, target.position.z))
         return actual?.name !== target.blockName
       })
@@ -17540,6 +17544,10 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
     if (restocked || countInventoryItems(bot, emergencyRestockBlock) > 0) {
       const Vec3Retry = bot.entity.position.constructor
       const remainingTargets = batchTargets.filter((target) => {
+        // Paper never echoes block_change to the placing client, so a client-only
+        // read reports every already-accepted carpet as air and re-places the band.
+        if (bot.__nervConfirmedPlaced instanceof Set &&
+          bot.__nervConfirmedPlaced.has(`${target.position.x}:${target.position.y}:${target.position.z}`)) return false
         const actual = bot.blockAt(new Vec3Retry(target.position.x, target.position.y, target.position.z))
         return actual?.name !== target.blockName
       })
@@ -18581,6 +18589,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       await returnToEmergencyRestockAnchor()
       const Vec3Retry = bot.entity.position.constructor
       const remainingTargets = batchTargets.filter((target) => {
+        // Paper never echoes block_change to the placing client, so a client-only
+        // read reports every already-accepted carpet as air and re-places the band.
+        if (bot.__nervConfirmedPlaced instanceof Set &&
+          bot.__nervConfirmedPlaced.has(`${target.position.x}:${target.position.y}:${target.position.z}`)) return false
         const actual = bot.blockAt(new Vec3Retry(target.position.x, target.position.y, target.position.z))
         return actual?.name !== target.blockName
       })
@@ -18601,6 +18613,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   let missing = 0
   for (const target of batchTargets) {
+    const key = getTargetKey(target)
+    if (confirmedPlaced.has(key)) continue
     const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
     if (actual?.name !== target.blockName) missing += 1
   }

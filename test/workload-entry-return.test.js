@@ -106,3 +106,12 @@ test('every post-placement verification path honours the confirmed-placement led
   const placeTarget = source.slice(source.indexOf('async function placeTarget('), placeEnd)
   assert.match(placeTarget, /bot\.__nervConfirmedPlaced\.add\(`\$\{target\.position\.x\}:\$\{target\.position\.y\}:\$\{target\.position\.z\}`\)/)
 })
+
+test('band retry and missing-count consult the ledger instead of the silent client world', () => {
+  // Regression: every placement re-read as air, so each emergency restock re-placed
+  // the whole 640-target band and the reported missing count only grew (77 -> 106).
+  const retryFilters = source.match(/batchTargets\.filter\(\(target\) => \{\r?\n\s*\/\/ Paper never echoes block_change[\s\S]{0,400}?__nervConfirmedPlaced\.has\(`\$\{target\.position\.x\}:\$\{target\.position\.y\}:\$\{target\.position\.z\}`\)\) return false/g) || []
+  assert.equal(retryFilters.length, 3, `expected all three band-retry filters to consult the ledger, found ${retryFilters.length}`)
+
+  assert.match(source, /let missing = 0\r?\n\s*for \(const target of batchTargets\) \{\r?\n\s*const key = getTargetKey\(target\)\r?\n\s*if \(confirmedPlaced\.has\(key\)\) continue/)
+})
