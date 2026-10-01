@@ -1112,20 +1112,9 @@ function installVanillaSpeed(bot, config) {
     const targetPerTick = bps / 20.0
 
     if (movedDist < targetPerTick) {
-      const boost = targetPerTick - movedDist
-      const dirX = movedX / movedDist
-      const dirZ = movedZ / movedDist
-      const nextPos = pos.offset(dirX * boost, 0, dirZ * boost)
-      const Vec3 = pos.constructor
-
-      const checkY = Math.floor(pos.y - 0.1)
-      const blockBelow = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY, Math.floor(nextPos.z)))
-      if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
-        pos.x = nextPos.x
-        pos.z = nextPos.z
-        prevX = nextPos.x
-        prevZ = nextPos.z
-      }
+      // Don't modify local position directly - server will setback.
+      // Instead rely on vanilla physics with stepHeight for obstacle traversal.
+      // The control states (forward, sprint) are already set; physics handles movement.
     }
   })
 }
