@@ -112,8 +112,12 @@ test('band retry and missing-count consult the ledger instead of the silent clie
   // the whole 640-target band and the reported missing count only grew (77 -> 106).
   const retryFilters = source.match(/batchTargets\.filter\(\(target\) => \{\r?\n\s*\/\/ Paper never echoes block_change[\s\S]{0,400}?__nervConfirmedPlaced\.has\(`\$\{target\.position\.x\}:\$\{target\.position\.y\}:\$\{target\.position\.z\}`\)\) return false/g) || []
   assert.equal(retryFilters.length, 3, `expected all three band-retry filters to consult the ledger, found ${retryFilters.length}`)
-
-  assert.match(source, /let missing = 0\r?\n\s*for \(const target of batchTargets\) \{\r?\n\s*const key = getTargetKey\(target\)\r?\n\s*if \(confirmedPlaced\.has\(key\)\) continue/)
+  assert.match(source, /Report what the world actually shows, not what the ledger claims/)
+  assert.match(source, /The ledger says we placed it but the world disagrees: count it as missing/)
+  assert.match(source, /\[LANE-VERIFY\] missing=\$\{missing\} unverified=\$\{unverified\}/)
+  assert.match(source, /\[LANE-MISS\]/)
+  assert.match(source, /\[LANE-REPAIR\] \$\{laneMisses\.length\} missing carpet\(s\) at the end of this lane/)
+  assert.match(source, /\[LANE-REPAIR-RESIDUAL\]/)
 })
 
 test('a fast-confirm repair placement accepts the written packet when the client world can never confirm it', () => {

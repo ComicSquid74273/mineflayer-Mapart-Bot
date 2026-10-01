@@ -18755,12 +18755,32 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   const Vec3 = bot.entity.position.constructor
 
+  // Report what the world actually shows, not what the ledger claims. The ledger
+  // is an optimistic record of accepted packets; the world is the only evidence
+  // that a carpet is really down. Reporting missing from the ledger made every
+  // lane look perfect while carpets were still absent.
   let missing = 0
+  let unverified = 0
+  for (const target of batchTargets) {
+    const key = getTargetKey(target)
+    const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
+    if (actual?.name === target.blockName) {
+      if (!confirmedPlaced.has(key)) markTargetPlacedInWorld(target, key)
+      continue
+    }
+    if (!confirmedPlaced.has(key)) continue
+    // The ledger says we placed it but the world disagrees: count it as missing.
+    missing += 1
+  }
   for (const target of batchTargets) {
     const key = getTargetKey(target)
     if (confirmedPlaced.has(key)) continue
     const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
-    if (actual?.name !== target.blockName) missing += 1
+    if (actual?.name === target.blockName) continue
+    unverified += 1
+  }
+  if (missing > 0 || unverified > 0) {
+    console.log(`[LANE-VERIFY] missing=${missing} unverified=${unverified} of ${batchTargets.length}; repairing before the next lane.`)
   }
 
   return {
@@ -19792,23 +19812,68 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           console.log(`[LITEMATIC-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
         }
 
-        // Collect errors from this batch for deferred end-of-print repair.
-        // Only scans loaded chunks; unloaded blocks are caught by the final sweep.
+        // Verify the lane against the world, not the ledger. A claimed placement that
+        // the world does not show is a real miss and must be repaired here, at
+        // the end of this lane, rather than deferred to a sweep that used to
+        // trust the same claim.
         {
           const Vec3Batch = bot.entity.position.constructor
           const batchErrorKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
+          const laneMisses = []
           for (const target of batchTargets) {
             const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-            if (batchErrorKeys.has(key) || result.seenSet?.has(key)) continue
+            if (batchErrorKeys.has(key)) continue
             const actual = bot.blockAt(new Vec3Batch(target.position.x, target.position.y, target.position.z))
             if (!actual) continue
             if (actual.name !== target.blockName) {
+              laneMisses.push(target)
               errorList.push(target)
               if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 const reason = actual.name === 'air' ? 'missing' : `wrong-${actual.name}`
-                console.log(`[BATCH-ERROR] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
+                console.log(`[LANE-MISS] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
               }
             }
+          }
+
+          if (laneMisses.length > 0) {
+            console.log(`[LANE-REPAIR] ${laneMisses.length} missing carpet(s) at the end of this lane; repairing in place.`)
+            const laneRepair = await repairTargetsInBatches(bot, config, laneMisses, Math.max(1, toNumber(printer.placeRange, 5)), 'LANE-REPAIR')
+            placed += laneRepair.placed
+            already += laneRepair.already
+            skipped += laneRepair.skipped
+
+            const repaired = new Set()
+            const residual = []
+            for (const target of laneMisses) {
+              const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+              const actual = bot.blockAt(new Vec3Batch(target.position.x, target.position.y, target.position.z))
+              if (actual?.name === target.blockName) {
+                repaired.add(key)
+              } else {
+                residual.push({ target, key })
+              }
+            }
+
+            if (residual.length > 0) {
+              console.log(`[LANE-REPAIR-RESIDUAL] ${residual.length} carpet(s) still absent after in-lane repair; carrying to the final sweep.`)
+            }
+
+            // Keep only what is genuinely still absent for the deferred sweep.
+            const kept = []
+            const seenKeys = new Set()
+            for (const entry of errorList) {
+              const key = `${entry.position.x}:${entry.position.y}:${entry.position.z}`
+              if (repaired.has(key) || seenKeys.has(key)) continue
+              seenKeys.add(key)
+              kept.push(entry)
+            }
+            for (const entry of residual) {
+              if (seenKeys.has(entry.key)) continue
+              seenKeys.add(entry.key)
+              kept.push(entry.target)
+            }
+            errorList.length = 0
+            errorList.push(...kept)
           }
         }
 
