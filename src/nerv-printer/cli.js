@@ -9030,7 +9030,7 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
       }
 
       const latencyState = getLatencyBackoffState(bot, config)
-      if (latencyState.shouldPause) {
+      if (latencyState.shouldPause && !sprint) {
         stopLagSensitiveMovement(bot)
         await applyAdaptiveLatencyBackoff(bot, config, `${label}-movement-pause`, { pauseMovement: true })
         continue
