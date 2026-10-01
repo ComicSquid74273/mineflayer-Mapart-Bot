@@ -13925,6 +13925,59 @@ async function recoverInterruptedCartographyOutput(bot, config, checkpointMapId,
   return candidateMapId
 }
 
+// Post-print fills, cartographs, renames and stores the map, so anything still missing
+// or wrongly coloured at this point ships as a broken map that can never be corrected
+// downstream. This gate re-verifies against the world and refuses to advance while
+// anything is outstanding.
+//
+// The repair scan consults the placement ledger, which only records what the bot claims
+// it placed. That is necessary (Paper never echoes block_change, so a client-world rescan
+// would flag every accepted carpet) but it means ErrorCount=0 can mean either "nothing
+// outstanding" or "the ledger says we are done". One more ledger-backed pass separates the
+// two, and an independent world check reports what is genuinely wrong.
+async function gateOnCompleteMap(bot, config, orderedTargets, placeRange) {
+  const advanced = config.advanced || {}
+  const passesUsed = Math.max(1, toNumber(advanced.repairTestMaxPasses, 3))
+  let lastCount = 0
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    assertRuntimeContinue(bot, config, 'stopping-during-post-print-gate')
+    const outstanding = scanPlacementErrors(bot, orderedTargets, {
+      config,
+      logPrefix: `POSTPRINT-GATE-${attempt}`,
+      logErrors: config.errorHandling?.logErrors !== false,
+      maxLogs: toNumber(advanced.repairTestMaxErrorLogs, 80),
+      confirmedPlaced: bot.__nervConfirmedPlaced
+    }).map((entry) => entry.target)
+
+    if (outstanding.length === 0) {
+      console.log(`[POSTPRINT-GATE] map verified complete after ${attempt - 1} gate repair pass(es); ${lastCount ? `${lastCount} repaired, ` : ''}proceeding to post-print.`)
+      return { ok: true, repaired: lastCount }
+    }
+
+    console.log(`[POSTPRINT-GATE] ${outstanding.length} carpet(s) still missing or misplaced after ${passesUsed} repair pass(es); repairing again before post-print.`)
+    const repair = await repairTargetsInBatches(bot, config, outstanding, placeRange, `POSTPRINT-GATE-PASS-${attempt}`)
+    lastCount = repair.placed
+    await delay(toNumber(advanced.repairVerifySettleMs, 300))
+  }
+
+  const blocked = scanPlacementErrors(bot, orderedTargets, {
+    config,
+    logPrefix: 'POSTPRINT-GATE-BLOCKED',
+    logErrors: config.errorHandling?.logErrors !== false,
+    maxLogs: toNumber(advanced.repairTestMaxErrorLogs, 80),
+    confirmedPlaced: bot.__nervConfirmedPlaced
+  }).map((entry) => entry.target)
+
+  if (blocked.length > 0) {
+    console.log(`[POSTPRINT-GATE-BLOCKED] ${blocked.length} carpet(s) remain unplaced or misplaced. Holding the job before post-print; an incomplete map must not be filled, cartographed or stored.`)
+    console.log('[POSTPRINT-GATE-BLOCKED] First outstanding positions: ' + blocked.slice(0, 10).map((t) => `${t.position.x},${t.position.y},${t.position.z}`).join(' '))
+    return { ok: false, errorCount: blocked.length }
+  }
+
+  return { ok: true, repaired: lastCount }
+}
+
 async function runPostPrintWorkflow(bot, config, context = {}) {
   const advanced = config.advanced || {}
   const machine = config.machine || {}
@@ -19791,6 +19844,18 @@ async function runPrint(bot, config, dashboardRuntime = null) {
 
   console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
 
+  // Never hand an unverified map to post-print.
+  const postPrintGate = await gateOnCompleteMap(bot, config, orderedTargets, placeRange)
+  if (!postPrintGate.ok) {
+    return {
+      completed: false,
+      phase: 'repair',
+      errorCount: postPrintGate.errorCount,
+      postPrintBlocked: true,
+      reason: `post-print blocked: ${postPrintGate.errorCount} carpet(s) unplaced or misplaced after repair`
+    }
+  }
+
   const multiIntervalResult = await completeAssignedMultiInterval(errorList.length)
   if (multiIntervalResult) return multiIntervalResult
 
@@ -20334,6 +20399,18 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   }
 
   console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
+
+  // Never hand an unverified map to post-print.
+  const postPrintGate = await gateOnCompleteMap(bot, config, orderedTargets, placeRange)
+  if (!postPrintGate.ok) {
+    return {
+      completed: false,
+      phase: 'repair',
+      errorCount: postPrintGate.errorCount,
+      postPrintBlocked: true,
+      reason: `post-print blocked: ${postPrintGate.errorCount} carpet(s) unplaced or misplaced after repair`
+    }
+  }
 
   const multiIntervalResult = await completeAssignedMultiInterval(errorList.length)
   if (multiIntervalResult) return multiIntervalResult

@@ -159,6 +159,29 @@ test('a fast-confirm repair placement accepts the written packet when the client
   assert.match(mixed, /bot\.__nervAcceptUnconfirmedPlacement = \(config\.advanced \|\| \{\}\)\.repairAcceptUnconfirmedPlacement === true/)
 })
 
+test('post-print is gated on a verified-complete map', () => {
+  // Regression: the final repair loop is bounded by maxRepairPasses, and its
+  // verification scan trusts the placement ledger. So a job could exit the loop with
+  // errors still outstanding, or with ErrorCount=0 meaning "the ledger says we are
+  // done", and go straight into fill/cartography/rename/store. Post-print shipped
+  // incomplete maps. The gate re-verifies and refuses to advance.
+  assert.match(source, /async function gateOnCompleteMap\(bot, config, orderedTargets, placeRange\)/)
+  assert.match(source, /\[POSTPRINT-GATE\] map verified complete after/)
+
+  // It must be enforced at BOTH final-scan sites, not just one branch.
+  const gateCalls = source.match(/const postPrintGate = await gateOnCompleteMap\(/g) || []
+  assert.equal(gateCalls.length, 2, `expected the gate before both post-print entries, found ${gateCalls.length}`)
+
+  // A blocked map must return without running post-print, and say why.
+  assert.match(source, /\[POSTPRINT-GATE-BLOCKED\] \$\{blocked\.length\} carpet\(s\) remain unplaced or misplaced/)
+  assert.match(source, /postPrintBlocked: true/)
+  assert.match(source, /reason: `post-print blocked:/)
+
+  // The gate re-repairs rather than merely reporting, so a single stray miss does not
+  // fail a whole job.
+  assert.match(source, /repairTargetsInBatches\(bot, config, outstanding, placeRange, `POSTPRINT-GATE-PASS-/)
+})
+
 test('the placement burst collects and sorts once, closest-first, with a reach-exit tiebreak', () => {
   // Regression: the loop re-scanned the reach grid per placement (capping us near
   // 1 block/tick) and a large rowPriority let a forward block outrank a closer
