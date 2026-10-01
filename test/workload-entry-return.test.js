@@ -165,19 +165,22 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   assert.doesNotMatch(loop, /if \(countInventoryItems\(bot, blockName\) > 0\) continue/)
 })
 
-test('fast placement aims at the target face instead of sending with forceLook ignore', () => {
-  // Regression: forceLook:'ignore' sent block_place without correcting aim. The
-  // server validates reach against the player's actual look vector, so ~24% of
-  // every lane (152/640) was silently rejected and never appeared in the world.
+test('fast placement sends an in-range cursor and never forces a look', () => {
+  // Regression: mineflayer defaults the block_place cursor to 0.5 + face*0.5, so
+  // an up-face yields dy=1.0 and cursorY = floor(1.0*16) = 16. The protocol cursor
+  // is 0-15, so the server silently rejected ~24% of every lane (152/640) with no
+  // error, no skip and no ledger entry.
   const placeEnd = source.indexOf('\nfunction isTargetAlreadyResolved(')
   const placeTarget = source.slice(source.indexOf('async function placeTarget('), placeEnd)
 
-  assert.match(placeTarget, /const forceLook = printer\.rotate === false \? 'ignore' : false/)
-  assert.doesNotMatch(placeTarget, /printer\.rotate === true \? true : 'ignore'/)
-  assert.match(placeTarget, /server validates block_place reach against the player's actual look/)
+  assert.match(placeTarget, /forceLook: 'ignore'/)
+  assert.doesNotMatch(placeTarget, /forceLook = printer\.rotate/)
+  assert.match(placeTarget, /const delta = \{/)
+  assert.match(placeTarget, /x: Math\.min\(0\.9375, Math\.max\(0\.0625, 0\.5 \+ faceVec\.x \* 0\.5\)\)/)
+  assert.match(placeTarget, /y: Math\.min\(0\.9375, Math\.max\(0\.0625, 0\.5 \+ faceVec\.y \* 0\.5\)\)/)
+  assert.match(placeTarget, /z: Math\.min\(0\.9375, Math\.max\(0\.0625, 0\.5 \+ faceVec\.z \* 0\.5\)\)/)
 
-  // And the burst must not sleep between placements: that walks the sprint
-  // forward and drops trailing carpets out of reach mid-lane.
+  // And the burst must not sleep between placements.
   const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
   const loop = source.slice(loopStart, loopStart + 12000)
   assert.doesNotMatch(loop, /scannerInterPlacementDelayMs/)

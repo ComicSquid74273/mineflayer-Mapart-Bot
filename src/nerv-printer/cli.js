@@ -16257,14 +16257,25 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         await applyAdaptiveLatencyBackoff(bot, config, 'before-place-block', { pauseMovement: true })
       }
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
-        // The server validates block_place reach against the player's actual look
-        // vector. forceLook:'ignore' sent the packet without correcting aim, so
-        // ~24% of every lane was silently rejected and never appeared in the world.
-        // Aim at the target's placement face unless the caller disabled rotation.
-        const forceLook = printer.rotate === false ? 'ignore' : false
+        // No forced look, matching the reference printer (rotate disabled).
+        //
+        // We must pass an explicit delta. Mineflayer defaults the cursor to the
+        // face centre computed as 0.5 + face*0.5, which for an up-face yields
+        // dy = 1.0 and then cursorY = floor(1.0 * 16) = 16. The protocol cursor is
+        // a 0-15 value, so 16 is out of range and the server silently rejects the
+        // placement. That was ~24% of every lane (152/640) disappearing with no
+        // error, no skip and no ledger entry. Keep the hit point just inside the
+        // face, exactly as the reference does with its centre hitPos.
+        const faceVec = attempt.face
+        const delta = {
+          x: Math.min(0.9375, Math.max(0.0625, 0.5 + faceVec.x * 0.5)),
+          y: Math.min(0.9375, Math.max(0.0625, 0.5 + faceVec.y * 0.5)),
+          z: Math.min(0.9375, Math.max(0.0625, 0.5 + faceVec.z * 0.5))
+        }
         await bot._genericPlace(attempt.block, attempt.face, {
           swingArm: 'right',
-          forceLook
+          forceLook: 'ignore',
+          delta
         })
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
