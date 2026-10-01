@@ -5885,6 +5885,9 @@ function createDefaultConfig() {
       repairStallEmergencyRestock: true,
       repairEmergencyRestockTransientHits: 3,
       repairConfirmFastPlacements: true,
+      // How many upcoming placements the hotbar eviction lookahead may consider.
+      // 9 slots serve an entire lane through continuous replenishment inside this window.
+      hotbarLookaheadHorizon: 50,
       // 6b6t (Paper) never echoes block_change to the placing client, so a
       // fast-confirm placement can never be verified by reading the client world.
       // Accept the written packet instead of skipping and re-placing forever.
@@ -6840,51 +6843,84 @@ function findBestInventorySlotForItem(bot, blockName) {
     })[0] || null
 }
 
+function getHotbarStackCount(bot, index) {
+  const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
+  const stack = slots[getHotbarWindowSlot(index)]
+  if (!stack?.name) return 0
+  return Math.max(0, toNumber(stack.count, 0))
+}
+
+function countUpcomingTargetsByBlock(targets) {
+  const demand = new Map()
+  if (!Array.isArray(targets)) return demand
+  for (const target of targets) {
+    const name = target?.blockName
+    if (!name) continue
+    demand.set(name, (demand.get(name) || 0) + 1)
+  }
+  return demand
+}
+
+function rankHotbarEvictionCandidates(slots, window, countOf) {
+  const demand = countUpcomingTargetsByBlock(window)
+  const nextUse = new Map()
+  for (let index = 0; index < 9; index += 1) {
+    const stack = slots[getHotbarWindowSlot(index)]
+    if (stack?.name) nextUse.set(stack.name, -1)
+  }
+  for (let i = 0; i < window.length; i += 1) {
+    const name = window[i]?.blockName
+    if (name && nextUse.has(name) && nextUse.get(name) === -1) nextUse.set(name, i)
+  }
+
+  const hotbarSupply = new Map()
+  for (let index = 0; index < 9; index += 1) {
+    const stack = slots[getHotbarWindowSlot(index)]
+    if (!stack?.name) continue
+    hotbarSupply.set(stack.name, (hotbarSupply.get(stack.name) || 0) + countOf(index))
+  }
+
+  const ranked = []
+  for (let index = 0; index < 9; index += 1) {
+    const stack = slots[getHotbarWindowSlot(index)]
+    if (!stack?.name) continue
+    const name = stack.name
+    const useAt = nextUse.has(name) ? nextUse.get(name) : -1
+    // 0: unused inside the horizon. 1: spare hotbar stock covers demand.
+    // 2: needed and this is the only stock for it.
+    const rank = useAt === -1
+      ? 0
+      : ((hotbarSupply.get(name) || 0) > (demand.get(name) || 0) ? 1 : 2)
+    ranked.push({ index, name, rank, useAt: useAt === -1 ? Number.MAX_SAFE_INTEGER : useAt })
+  }
+  // Lower rank is cheaper to evict, so it sorts first. Within a rank the
+  // farthest next use is the one we can most afford to lose.
+  ranked.sort((left, right) => left.rank - right.rank || right.useAt - left.useAt)
+  return ranked
+}
+
 function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
   const existing = findHotbarIndexForItem(bot, blockName)
   if (existing >= 0) return existing
 
   const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
-  // Check all 9 hotbar slots (0 to 8, window slots 36 to 44)
+  // Any empty slot is free; take the first so we never evict something in use.
   for (let index = 0; index < 9; index += 1) {
     if (!slots[getHotbarWindowSlot(index)]) return index
   }
 
-  // Lookahead: evict the hotbar item whose next use is farthest in the future (or never used again)
   const targets = upcomingTargets || bot.__nervActiveBatchTargets || null
   if (Array.isArray(targets) && targets.length > 0) {
-    const nextUseDistance = new Map()
-    for (let index = 0; index < 9; index += 1) {
-      const stack = slots[getHotbarWindowSlot(index)]
-      if (stack?.name) nextUseDistance.set(stack.name, -1) // -1 = never used
-    }
-
-    let dist = 0
-    for (const t of targets) {
-      const name = t?.blockName
-      if (name && nextUseDistance.has(name) && nextUseDistance.get(name) === -1) {
-        nextUseDistance.set(name, dist)
-      }
-      dist += 1
-    }
-
-    let bestIndex = 0
-    let bestDist = -2
-
-    for (let index = 0; index < 9; index += 1) {
-      const stack = slots[getHotbarWindowSlot(index)]
-      if (!stack?.name) return index
-      const d = nextUseDistance.get(stack.name) ?? -1
-      if (d === -1) return index // never used again in batch -> evict immediately!
-      if (d > bestDist) {
-        bestDist = d
-        bestIndex = index
-      }
-    }
-    return bestIndex
+    const horizon = Math.max(
+      1,
+      toNumber((bot.__nervConfig?.advanced || {}).hotbarLookaheadHorizon, 50)
+    )
+    const window = targets.slice(0, horizon)
+    const ranked = rankHotbarEvictionCandidates(slots, window, (index) => getHotbarStackCount(bot, index))
+    if (ranked.length > 0) return ranked[0].index
   }
 
-  // Fallback: evict duplicate or most frequent stack in hotbar slots 0-8
+  // Fallback: evict the most duplicated stack, else keep the current slot.
   const byName = new Map()
   for (let index = 0; index < 9; index += 1) {
     const stack = slots[getHotbarWindowSlot(index)]
@@ -7068,6 +7104,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 
 async function prepareHotbarForBatch(bot, config, batchTargets) {
   if (!bot?.inventory || !Array.isArray(batchTargets) || batchTargets.length === 0) return
+  const advanced = config.advanced || {}
   const freq = new Map()
   for (const target of batchTargets) {
     const name = target?.blockName
@@ -7076,7 +7113,22 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
   }
   if (freq.size === 0) return
 
-  const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name)
+  // Rank materials by how soon they are needed, not just how often they occur.
+  // Frequency alone put high-count-but-late colours ahead of the colour the
+  // sprint needs for its next few placements, which showed up as missing-item.
+  const horizon = Math.max(1, toNumber(advanced.hotbarLookaheadHorizon, 50))
+  const firstUse = new Map()
+  for (let i = 0; i < Math.min(horizon, batchTargets.length); i += 1) {
+    const name = batchTargets[i]?.blockName
+    if (name && !firstUse.has(name)) firstUse.set(name, i)
+  }
+  const urgency = (name) => {
+    const at = firstUse.has(name) ? firstUse.get(name) : horizon
+    // Earlier first use wins; frequency breaks ties between equal-distance colours.
+    return at * 1000 - Math.min(999, freq.get(name) || 0)
+  }
+
+  const sorted = [...freq.keys()].sort((a, b) => urgency(b) - urgency(a))
   const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
 
   const targetMaterials = sorted.slice(0, 9)
@@ -7096,18 +7148,14 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
     const source = findBestInventorySlotForItem(bot, mat)
     if (!source || source.slot < 9 || source.slot > 35) continue
 
-    let destIndex = -1
-    for (let i = 0; i < 9; i++) {
-      const stack = bot.inventory.slots[36 + i]
-      if (!stack || Number(stack.count) <= 0) {
-        destIndex = i
-        break
-      }
-    }
+    // Prefer a slot whose colour the horizon no longer needs, then a duplicate
+    // whose removal still leaves enough stock, then the farthest next use.
+    let destIndex = chooseMaterialHotbarIndex(bot, mat, batchTargets)
+    if (destIndex < 0 || destIndex > 8) destIndex = -1
     if (destIndex < 0) {
       for (let i = 0; i < 9; i++) {
         const stack = bot.inventory.slots[36 + i]
-        if (stack?.name && !targetSet.has(stack.name)) {
+        if (!stack || Number(stack.count) <= 0) {
           destIndex = i
           break
         }
