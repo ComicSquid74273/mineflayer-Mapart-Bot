@@ -220,6 +220,22 @@ test('placement reach is measured from the eyes, not the feet', () => {
   assert.match(source, /const ddy = \(botY \+ toNumber\(bot\.entity\?\.height, 1\.62\) - 0\.18\) - ty/)
 })
 
+test('the configured placeRange stays inside the server block-interaction limit', () => {
+  // The server rejects a placement whose hit block is beyond BLOCK_INTERACTION_RANGE
+  // from the eye: 4.5 in survival, 5.0 in creative. Selecting targets further than
+  // that guarantees silent rejections, which resurface as missing carpets at the end
+  // of a lane. Both reference printers stay well under it (meteor defaults to 2).
+  const configPath = path.join(__dirname, '..', 'nerv-printer-config', '_configs', 'nerv-printer-config.json')
+  const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+  const placeRange = Number(cfg.printer?.placeRange)
+
+  assert.ok(Number.isFinite(placeRange), 'printer.placeRange must be a number')
+  assert.ok(
+    placeRange <= 4.5,
+    `printer.placeRange is ${placeRange}, past the 4.5 survival interaction limit; the server will reject those placements`
+  )
+})
+
 test('isSolidPlacementFace rejects replaceable and clickable neighbours', () => {
   const start = source.indexOf('function isSolidPlacementFace(')
   assert.ok(start >= 0)
