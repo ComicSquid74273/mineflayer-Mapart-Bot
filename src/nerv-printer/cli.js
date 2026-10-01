@@ -18321,7 +18321,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               continue
             }
 
-            const destIndex = chooseMaterialHotbarIndex(bot, blockName)
+            // Rank eviction against the burst itself, not the whole batch. Using the
+            // batch would let a colour the next placement needs be evicted in
+            // favour of one needed hundreds of targets later.
+            const destIndex = chooseMaterialHotbarIndex(bot, blockName, burstTargets)
             if (destIndex >= 0 && destIndex <= 8 && source.slot !== getHotbarWindowSlot(destIndex)) {
               silentHotbarSwap(bot, source.slot, destIndex)
             }

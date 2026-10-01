@@ -155,5 +155,8 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   // to placeTarget, which stalled the sprint once per new colour.
   assert.match(loop, /Goal lookahead: provision every material this burst needs/)
   assert.match(loop, /silentHotbarSwap\(bot, source\.slot, destIndex\)/)
+  // Eviction must rank against the burst, not the whole 640-target batch,
+  // otherwise a colour the next placement needs is evicted for a later one.
+  assert.match(loop, /chooseMaterialHotbarIndex\(bot, blockName, burstTargets\)/)
   assert.doesNotMatch(loop, /if \(countInventoryItems\(bot, blockName\) > 0\) continue/)
 })
