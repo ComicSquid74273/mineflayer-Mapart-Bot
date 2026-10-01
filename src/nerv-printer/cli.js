@@ -21303,7 +21303,7 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
 
   let best = null
   let bestDistance2 = Number.POSITIVE_INFINITY
-  let bestPriority = -1
+  let bestPriority = Number.NEGATIVE_INFINITY
 
   for (let dx = -radius; dx <= radius; dx += 1) {
     for (let dz = -radius; dz <= radius; dz += 1) {
