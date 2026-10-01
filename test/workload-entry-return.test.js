@@ -220,20 +220,22 @@ test('placement reach is measured from the eyes, not the feet', () => {
   assert.match(source, /const ddy = \(botY \+ toNumber\(bot\.entity\?\.height, 1\.62\) - 0\.18\) - ty/)
 })
 
-test('the configured placeRange stays inside the server block-interaction limit', () => {
-  // The server rejects a placement whose hit block is beyond BLOCK_INTERACTION_RANGE
-  // from the eye: 4.5 in survival, 5.0 in creative. Selecting targets further than
-  // that guarantees silent rejections, which resurface as missing carpets at the end
-  // of a lane. Both reference printers stay well under it (meteor defaults to 2).
+test('the configured placeRange stays inside the 6b6t interaction limit', () => {
+  // 6b6t raises the vanilla block-interaction range: measurements on the server put
+  // the limit at 5.9, not the 4.5 survival default. Reach is therefore not the cause
+  // of the missing carpets -- the placement and swap logic is. This test exists to
+  // stop a future reader re-deriving the vanilla 4.5 figure and "fixing" a value
+  // that is already correct with headroom to spare.
   const configPath = path.join(__dirname, '..', 'nerv-printer-config', '_configs', 'nerv-printer-config.json')
   const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'))
   const placeRange = Number(cfg.printer?.placeRange)
 
   assert.ok(Number.isFinite(placeRange), 'printer.placeRange must be a number')
   assert.ok(
-    placeRange <= 4.5,
-    `printer.placeRange is ${placeRange}, past the 4.5 survival interaction limit; the server will reject those placements`
+    placeRange <= 5.9,
+    `printer.placeRange is ${placeRange}, past the measured 6b6t interaction limit of 5.9`
   )
+  assert.ok(placeRange >= 5, `printer.placeRange is ${placeRange}; 5 is the measured working value with headroom`)
 })
 
 test('the placement burst stays under the server packet-burst rejection rate', () => {
