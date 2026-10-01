@@ -153,6 +153,40 @@ test('an empty slot is never evicted by the ranker', () => {
   assert.equal(ranked[0].index, 0)
 })
 
+test('two hotbar slots are reserved so staging always has a destination', () => {
+  // A window can carry more distinct materials than free slots: production logs show
+  // materials=10/16 against a 9-slot hotbar. Without a reserve every new colour evicts
+  // a live one on the spot, which is the thrash. Hold two back from the residency plan
+  // and keep them out of every eviction path.
+  assert.match(source, /hotbarReservedSlots: 2/)
+  assert.match(source, /function getReservedHotbarSlotCount\(\)/)
+  assert.match(source, /function getBuildHotbarSlotIndices\(\)/)
+
+  // The reserve is applied at the top of the file, so chooseMaterialHotbarIndex (defined
+  // after it) can call it.
+  const reserveAt = source.indexOf('function getBuildHotbarSlotIndices(')
+  const chooseAt = source.indexOf('function chooseMaterialHotbarIndex(')
+  assert.ok(reserveAt >= 0 && reserveAt < chooseAt, 'the reserve helper must be defined before its callers')
+
+  const chooseStart = chooseAt
+  const chooseEnd = source.indexOf('\nfunction ', chooseStart + 10)
+  const choose = source.slice(chooseStart, chooseEnd)
+
+  // Empty-slot search is scoped to the build slots.
+  assert.match(choose, /for \(const index of getBuildHotbarSlotIndices\(\)\)/)
+  // Ranked eviction is filtered to build slots, so a reserved slot is never a victim.
+  assert.match(choose, /const buildSlots = new Set\(getBuildHotbarSlotIndices\(\)\)/)
+  assert.match(choose, /ranked\.find\(\(entry\) => buildSlots\.has\(entry\.index\)\)/)
+  // And the no-window fallback cannot reach into the reserve either.
+  assert.match(choose, /for \(const index of buildSlots\)/)
+  assert.doesNotMatch(choose, /for \(let index = 0; index < 9; index \+= 1\) \{[\s\S]{0,120}getHotbarWindowSlot\(index\)/)
+
+  // Duplicate reuse is also scoped, so it cannot hand back a reserved slot.
+  const dupStart = source.indexOf('function findThinnestDuplicateHotbarIndex(')
+  const dup = source.slice(dupStart, source.indexOf('\nfunction ', dupStart + 10))
+  assert.match(dup, /for \(const index of buildSlots\)/)
+})
+
 test('an inventory swap does not stop the sprint or zero velocity', () => {
   // The swap used to clear forward/sprint and zero velocity.x/z because the old
   // bot.clickWindow() path awaited a server round trip and the bot had to stand

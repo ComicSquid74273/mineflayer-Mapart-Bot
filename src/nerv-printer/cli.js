@@ -5889,6 +5889,11 @@ function createDefaultConfig() {
       // How many upcoming placements the hotbar eviction lookahead may consider.
       // 9 slots serve an entire lane through continuous replenishment inside this window.
       hotbarLookaheadHorizon: 50,
+      // Hotbar slots held back from the residency plan so staging always has a
+      // destination. A window can carry more distinct materials than free slots
+      // (10 against 9 is observed in production), so without a reserve every new
+      // colour evicts a live one on the spot.
+      hotbarReservedSlots: 2,
       // 6b6t (Paper) never echoes block_change to the placing client, so a
       // fast-confirm placement can never be verified by reading the client world.
       // Accept the written packet instead of skipping and re-placing forever.
@@ -6944,8 +6949,9 @@ function rankHotbarEvictionCandidates(slots, window, countOf, mainCountOf = null
 function findThinnestDuplicateHotbarIndex(bot) {
   const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : null
   if (!slots) return -1
+  const buildSlots = new Set(getBuildHotbarSlotIndices())
   const byName = new Map()
-  for (let index = 0; index < 9; index += 1) {
+  for (const index of buildSlots) {
     const stack = slots[getHotbarWindowSlot(index)]
     if (!stack?.name) continue
     if (!byName.has(stack.name)) byName.set(stack.name, [])
@@ -6966,13 +6972,33 @@ function findThinnestDuplicateHotbarIndex(bot) {
   return best
 }
 
+// Two hotbar slots are held back from the residency plan so there is always somewhere
+// to stage from the main inventory. A window can carry more distinct materials than
+// there are free slots (10 materials against 9 slots is observed in production), and
+// without a reserve every new colour has to evict a live one on the spot. Keeping two
+// free means the swap always has a destination that is not currently being placed.
+function getReservedHotbarSlotCount() {
+  const config = createDefaultConfig()
+  const advanced = (config && config.advanced) || {}
+  return Math.max(0, Math.min(7, toNumber(advanced.hotbarReservedSlots, 2)))
+}
+
+function getBuildHotbarSlotIndices() {
+  const reserved = getReservedHotbarSlotCount()
+  const indices = []
+  for (let index = 0; index < 9; index += 1) {
+    if (index >= reserved) indices.push(index)
+  }
+  return indices
+}
+
 function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
   const existing = findHotbarIndexForItem(bot, blockName)
   if (existing >= 0) return existing
 
   const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
-  // Any empty slot is free; take the first so we never evict something in use.
-  for (let index = 0; index < 9; index += 1) {
+  // Any empty build slot is free; take the first so we never evict something in use.
+  for (const index of getBuildHotbarSlotIndices()) {
     if (!slots[getHotbarWindowSlot(index)]) return index
   }
 
@@ -6998,12 +7024,16 @@ function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
       const duplicateRank = ranked.find((entry) => entry.index === duplicate)
       if (!duplicateRank || duplicateRank.rank <= 1) return duplicate
     }
-    if (ranked.length > 0) return ranked[0].index
+    const buildSlots = new Set(getBuildHotbarSlotIndices())
+    const candidate = ranked.find((entry) => buildSlots.has(entry.index))
+    if (candidate) return candidate.index
   }
 
-  // Fallback: evict the most duplicated stack, else keep the current slot.
+  // Fallback: evict the most duplicated stack, else keep the current slot. Scoped to
+  // the build slots so the reserve survives even when no target window is available.
+  const buildSlots = new Set(getBuildHotbarSlotIndices())
   const byName = new Map()
-  for (let index = 0; index < 9; index += 1) {
+  for (const index of buildSlots) {
     const stack = slots[getHotbarWindowSlot(index)]
     if (!stack?.name) continue
     const entry = byName.get(stack.name) || { name: stack.name, count: 0, index }
