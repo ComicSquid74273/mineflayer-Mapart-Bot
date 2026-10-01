@@ -16324,17 +16324,20 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         placedSuccessfully = true
         break
       }
+      if (isFastNoWaitPlacement) {
+        // Fast path: the packet is written and never confirmed against the client
+        // world (Paper does not echo block_change). Sample the placement
+        // conditions so a lane that reports missing carpets can be explained.
+        placedSuccessfully = true
+        noteUnverifiedPlacement(target, attempt, support)
+        break
+      }
       // Paper never echoes block_change to the placing client, so a fast-confirm
       // placement can never be confirmed by reading the client world. The packet
       // was written and the server accepted it; record it and move on instead of
       // reporting a skip and re-placing the same block forever.
       if (requiresFastConfirmation && bot.__nervAcceptUnconfirmedPlacement === true) {
         placedSuccessfully = true
-        break
-      }
-      if (isFastNoWaitPlacement) {
-        placedSuccessfully = true
-        noteUnverifiedPlacement(target, attempt, support)
         break
       }
       if (requiresFastConfirmation) {
