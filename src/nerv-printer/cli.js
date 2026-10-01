@@ -16060,6 +16060,26 @@ function requiresSneakPlacementSupport(block) {
   return name === 'dispenser' || name === 'dropper'
 }
 
+// Mirrors the reference printers' isSolidFace(): a neighbour is only a valid
+// click target if it is a real block. Air, fluids and anything replaceable
+// (carpet, snow layers, grass, slabs) would make the server place into that
+// block rather than offsetting to the target cell.
+function isSolidPlacementFace(bot, block) {
+  if (!block || block.boundingBox === 'empty') return false
+  const name = String(block.name || '')
+  if (name === 'air' || name === 'cave_air' || name === 'void_air') return false
+  if (String(name).endsWith('_carpet')) return false
+  if (isWaterBlockName(name)) return false
+  // Clicking these opens an interface instead of placing.
+  if (name === 'chest' || name === 'trapped_chest' || name === 'barrel' ||
+      name === 'furnace' || name === 'blast_furnace' || name === 'smoker' ||
+      name === 'chest' || name.endsWith('_door') || name === 'trapdoor' ||
+      name === 'lever' || name === 'stone_button' || name.endsWith('_button') ||
+      name === 'crafting_table' || name === 'enchanting_table' || name === 'anvil' ||
+      name === 'hopper' || name === 'dropper' || name === 'dispenser') return false
+  return true
+}
+
 function isTargetBlockPlaced(bot, targetPos, blockName) {
   const placed = bot?.blockAt?.(targetPos)
   return placed?.name === blockName
@@ -16220,6 +16240,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   if (isRepairPass && String(support.name || '').endsWith('_carpet')) {
     return { state: 'skip', reason: `support-is-carpet-possible-wrong-y-${support.name}` }
   }
+  // A replaceable or clickable support cannot be used: the server would place
+  // into it, or open its interface, instead of placing the carpet above.
+  if (!isSolidPlacementFace(bot, support)) {
+    return { state: 'skip', reason: `unsupported-support-${support.name}` }
+  }
 
   const botBlockX = Math.floor(bot.entity.position.x)
   const botBlockZ = Math.floor(bot.entity.position.z)
@@ -16280,7 +16305,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
 
     for (const candidate of sideCandidates) {
       const sideBlock = bot.blockAt(candidate.refPos)
-      if (sideBlock && sideBlock.name !== 'air') {
+      // A replaceable neighbour (carpet, snow layer, grass) is not a valid click
+      // target: the server places *into* it instead of offsetting to the target,
+      // so the carpet lands in the wrong cell. The reference implementations
+      // (THM PlacementUtils.isSolidFace) all require a real non-replaceable face.
+      if (isSolidPlacementFace(bot, sideBlock)) {
         placeAttempts.push({ block: sideBlock, face: candidate.face })
       }
     }
@@ -16310,25 +16339,15 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         await applyAdaptiveLatencyBackoff(bot, config, 'before-place-block', { pauseMovement: true })
       }
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
-        // No forced look, matching the reference printer (rotate disabled).
-        //
-        // We must pass an explicit delta. Mineflayer defaults the cursor to the
-        // face centre computed as 0.5 + face*0.5, which for an up-face yields
-        // dy = 1.0 and then cursorY = floor(1.0 * 16) = 16. The protocol cursor is
-        // a 0-15 value, so 16 is out of range and the server silently rejects the
-        // placement. That was ~24% of every lane (152/640) disappearing with no
-        // error, no skip and no ledger entry. Keep the hit point just inside the
-        // face, exactly as the reference does with its centre hitPos.
-        const faceVec = attempt.face
-        const delta = {
-          x: Math.min(0.9375, Math.max(0.0625, 0.5 + faceVec.x * 0.5)),
-          y: Math.min(0.9375, Math.max(0.0625, 0.5 + faceVec.y * 0.5)),
-          z: Math.min(0.9375, Math.max(0.0625, 0.5 + faceVec.z * 0.5))
-        }
+        // No forced look, matching the reference printers (rotate defaults off).
+        // Send no explicit delta: cursorX/Y/Z are f32 on 1.14+, so mineflayer's
+        // default face-centre value (0.5 + face*0.5, i.e. the face plane) is
+        // exactly what the reference sends. An earlier clamp to 0.0625..0.9375
+        // was justified by an incorrect "cursor is a 0-15 integer" reading of the
+        // protocol and moved the hit point off the face for no reason.
         await bot._genericPlace(attempt.block, attempt.face, {
           swingArm: 'right',
-          forceLook: 'ignore',
-          delta
+          forceLook: 'ignore'
         })
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
@@ -21723,7 +21742,11 @@ function collectNervScannerCandidates(bot, config, targetByXZ, currentGoal, proc
       const ty = target.position.y + 0.5
       const tz = target.position.z + 0.5
       const ddx = botX - tx
-      const ddy = botY - ty
+      // Measure reach from the eyes, not the feet. The server validates block
+      // reach from the player's eye position, so measuring from the feet lets us
+      // select targets the server will then reject. The reference printers both
+      // use getEyePosition().distanceToSqr(...).
+      const ddy = (botY + toNumber(bot.entity?.height, 1.62) - 0.18) - ty
       const ddz = botZ - tz
       const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue

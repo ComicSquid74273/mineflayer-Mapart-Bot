@@ -165,23 +165,44 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   assert.doesNotMatch(loop, /if \(countInventoryItems\(bot, blockName\) > 0\) continue/)
 })
 
-test('fast placement sends an in-range cursor and never forces a look', () => {
-  // Regression: mineflayer defaults the block_place cursor to 0.5 + face*0.5, so
-  // an up-face yields dy=1.0 and cursorY = floor(1.0*16) = 16. The protocol cursor
-  // is 0-15, so the server silently rejected ~24% of every lane (152/640) with no
-  // error, no skip and no ledger entry.
+test('fast placement sends no delta and never forces a look', () => {
+  // cursorX/Y/Z are f32 on 1.14+, not 0-15 integers. An earlier clamp to
+  // 0.0625..0.9375 was justified by an incorrect reading of the protocol and
+  // moved the hit point off the placement face for no measured benefit.
   const placeEnd = source.indexOf('\nfunction isTargetAlreadyResolved(')
   const placeTarget = source.slice(source.indexOf('async function placeTarget('), placeEnd)
 
   assert.match(placeTarget, /forceLook: 'ignore'/)
   assert.doesNotMatch(placeTarget, /forceLook = printer\.rotate/)
-  assert.match(placeTarget, /const delta = \{/)
-  assert.match(placeTarget, /x: Math\.min\(0\.9375, Math\.max\(0\.0625, 0\.5 \+ faceVec\.x \* 0\.5\)\)/)
-  assert.match(placeTarget, /y: Math\.min\(0\.9375, Math\.max\(0\.0625, 0\.5 \+ faceVec\.y \* 0\.5\)\)/)
-  assert.match(placeTarget, /z: Math\.min\(0\.9375, Math\.max\(0\.0625, 0\.5 \+ faceVec\.z \* 0\.5\)\)/)
+  assert.doesNotMatch(placeTarget, /const delta = \{/)
+  assert.doesNotMatch(placeTarget, /cursorY = floor/)
+
+  // Only a real, non-replaceable, non-clickable block may be clicked.
+  assert.match(placeTarget, /if \(!isSolidPlacementFace\(bot, support\)\) \{/)
+  assert.match(placeTarget, /if \(isSolidPlacementFace\(bot, sideBlock\)\) \{/)
+  assert.match(placeTarget, /unsupported-support-/)
 
   // And the burst must not sleep between placements.
   const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
   const loop = source.slice(loopStart, loopStart + 12000)
   assert.doesNotMatch(loop, /scannerInterPlacementDelayMs/)
+})
+
+test('placement reach is measured from the eyes, not the feet', () => {
+  // The server validates block reach from the eye position. Measuring from the
+  // feet let the selector choose targets the server then rejects.
+  assert.match(source, /Measure reach from the eyes, not the feet/)
+  assert.match(source, /const ddy = \(botY \+ toNumber\(bot\.entity\?\.height, 1\.62\) - 0\.18\) - ty/)
+})
+
+test('isSolidPlacementFace rejects replaceable and clickable neighbours', () => {
+  const start = source.indexOf('function isSolidPlacementFace(')
+  assert.ok(start >= 0)
+  const body = source.slice(start, source.indexOf('\nfunction ', start + 10))
+  assert.match(body, /if \(!block \|\| block\.boundingBox === 'empty'\) return false/)
+  assert.match(body, /endsWith\('_carpet'\)\) return false/)
+  assert.match(body, /isWaterBlockName\(name\)\) return false/)
+  assert.match(body, /'chest'/)
+  assert.match(body, /_door/)
+  assert.match(body, /'trapdoor'/)
 })
