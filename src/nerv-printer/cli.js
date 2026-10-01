@@ -8806,6 +8806,23 @@ async function waitForRequiredMaterialRestock(bot, config, blockName, requestedP
       return false
     }
 
+    // Never block the whole job on a material we are simply short of. When the
+    // bot already holds some of it, or every chest has failed to path for a
+    // while, proceed with what we have and let the lane-verify repair pass pick
+    // up the shortfall. Previously this looped forever: 49 restock attempts for
+    // purple_carpet while holding 57 of the 64 needed, stalling printing entirely.
+    const partialThreshold = Math.max(1, Math.floor(stackSize * 0.25))
+    const stalledAccess = elapsedMs >= Math.max(30000, toNumber(advanced.requiredMaterialAccessStallMs, 45000))
+    if (haveAfter >= partialThreshold && (stalledAccess || attempt >= 3)) {
+      logThrottled(
+        `required-material-partial-${blockName}`,
+        `[REQUIRED-MATERIAL-PARTIAL] ${blockName} short have=${haveAfter} target=${targetCount} attempt=${attempt} elapsed=${Math.round(elapsedMs / 1000)}s; proceeding with current stock and letting lane repair cover the shortfall. reason=${reason}`,
+        { intervalMs: logEveryMs }
+      )
+      restockFailureCache.delete(blockName)
+      return true
+    }
+
     logThrottled(
       `required-material-wait-${blockName}`,
       `[REQUIRED-MATERIAL-WAIT] ${blockName} unavailable after full chest scan attempt=${attempt}; have=${haveAfter} target=${targetCount}; retrying all ${spots.length} configured chest(s) in ${retryMs}ms. reason=${reason}`,

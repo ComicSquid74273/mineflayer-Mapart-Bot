@@ -189,3 +189,15 @@ test('cartography output timeouts reconcile late locked-map proof before recycli
   assert.match(postPrint, /cartography-late-output-recovered/)
   assert.match(postPrint, /checkpoint-recovery:cartography-output/)
 })
+
+test('a material shortfall proceeds with current stock instead of looping forever', () => {
+  // Regression: 49 restock attempts for purple_carpet while holding 57 of the 64
+  // needed stalled printing entirely. Every chest failed to path (12s ingress
+  // timeouts), so the retry loop never terminated.
+  assert.match(source, /\[REQUIRED-MATERIAL-PARTIAL\]/)
+  assert.match(source, /const partialThreshold = Math\.max\(1, Math\.floor\(stackSize \* 0\.25\)\)/)
+  assert.match(source, /const stalledAccess = elapsedMs >= Math\.max\(30000, toNumber\(advanced\.requiredMaterialAccessStallMs, 45000\)\)/)
+  assert.match(source, /if \(haveAfter >= partialThreshold && \(stalledAccess \|\| attempt >= 3\)\) \{/)
+  // It must return success so printing continues, and clear the failure cache.
+  assert.match(source, /restockFailureCache\.delete\(blockName\)\r?\n\s*return true/)
+})
