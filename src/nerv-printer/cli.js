@@ -21374,9 +21374,16 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       } else if (isMovingNorth) {
         zRel = Math.floor(botZ) - target.position.z
       }
-      // Earliest reach-exit priority: trailing and current rows (zRel <= 0) exit reach first
-      // and receive highest priority. Every row N completes across all 5 columns before row N+1.
-      const rowPriority = (5 - zRel) * 100
+      // Earliest reach-exit row schedule: current row under/in-front of bot (zRel=0) is prioritized
+      // to clear all columns in row N before advancing. Immediate trailing row (zRel=-1) has second
+      // highest priority to prevent boundary/swap misses, and forward rows (zRel>=1) follow in order.
+      let rowPriority = 100
+      if (zRel === 0) rowPriority = 1000
+      else if (zRel === -1) rowPriority = 950
+      else if (zRel === 1) rowPriority = 800
+      else if (zRel === 2) rowPriority = 700
+      else if (zRel === 3) rowPriority = 600
+      else if (zRel === -2) rowPriority = 500
       const priority = repairPriority + rowPriority - distance2
 
       if (priority > bestPriority) {
