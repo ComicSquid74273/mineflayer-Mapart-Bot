@@ -68,8 +68,8 @@
     "profiles": {
       "local": {
         "bot": {
-          "host": "127.0.0.1",
-          "port": 54321,
+          "host": "FabricCraftx.aternos.me",
+          "port": 41262,
           "auth": "offline",
           "profilesFolder": "./auth-cache",
           "viewDistance": "normal",
