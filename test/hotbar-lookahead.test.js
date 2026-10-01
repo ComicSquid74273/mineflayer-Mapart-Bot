@@ -179,14 +179,14 @@ test('a resume seeds the confirmed-placement ledger so restarts do not re-place 
   assert.ok(seed < pending, 'the ledger must be seeded before pending targets are derived')
 })
 
-test('selectedMaterialMatches trusts the predicted hotbar slot over a lagging heldItem', () => {
-  // Regression: silent swaps predict the slot locally, but bot.heldItem is only
-  // refreshed by the server's set_slot. Requiring both made a swap that had
-  // already succeeded report held-item-desync for the rest of the burst.
+test('selectedMaterialMatches requires the selected slot and heldItem to agree', () => {
+  // bot.heldItem is a live getter over inventory.slots[36 + quickBarSlot], so it
+  // never lags a predicted swap. An earlier fallback that trusted the selected
+  // slot alone masked real desyncs instead of catching them.
   const start = source.indexOf('function selectedMaterialMatches(')
-  assert.ok(start >= 0)
   const body = source.slice(start, source.indexOf('\nasync function waitForSelectedMaterialReady(', start))
 
-  assert.match(body, /if \(selectedMatches && heldMatches\) return true/)
-  assert.match(body, /return selectedMatches && \(bot\.heldItem == null \|\| bot\.heldItem\.name === blockName\)/)
+  assert.match(body, /return selectedMatches && heldMatches/)
+  assert.doesNotMatch(body, /bot\.heldItem == null/)
+  assert.doesNotMatch(body, /The predicted selected slot is the authoritative signal/)
 })
