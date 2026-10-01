@@ -337,7 +337,7 @@
     "fastTraversalCheckpointEveryRows": 10,
     "fastTraversalCatchupPasses": 2,
     "fastTraversalCatchupStallMs": 750,
-    "maxPlacementsPerTick": 5
+    "maxPlacementsPerTick": 4
   },
   "advanced": {
     "antiHunger": {
@@ -500,7 +500,7 @@
     "nervWorkloadTestLineGroups": 2,
     "nervWorkloadTestWaitAfterMs": 5000,
     "scannerPlaceDelayMs": 0,
-    "scannerMaxCatchupPlacements": 5,
+    "scannerMaxCatchupPlacements": 4,
     "scannerWorkloadPollMs": 10,
     "scannerWorkloadLogEveryMs": 1000,
     "scannerLineEndSettleMs": 6000,

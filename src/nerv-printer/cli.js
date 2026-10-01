@@ -18384,8 +18384,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         goal: currentGoal ? `${currentGoal.x},${currentGoal.y},${currentGoal.z}` : 'none'
       }, { throttleKey: 'ping-placement-loop' })
       const serverTps = bot.__nervServerTps || 20.0
-      // Scale burst limit dynamically with server TPS: 20 TPS -> 5 blocks/tick; <17 TPS -> 3 blocks/tick
-      const tpsBurstCap = serverTps >= 19.0 ? 5 : (serverTps < 17.0 ? 3 : (bot.__nervCurrentBurstCap || 4))
+      // Burst limit scales with server TPS. Cap at 4 blocks/tick: the server accepts
+      // roughly five placements per packet burst and rejects beyond it, and a rejected
+      // placement silently re-enters the candidate set next tick. Staying under the
+      // limit separates rate-based rejection from hotbar problems: if carpets are still
+      // missing at 4/tick, the swap arrangement is the suspect, not the rate.
+      const tpsBurstCap = serverTps >= 19.0 ? 4 : (serverTps < 17.0 ? 3 : (bot.__nervCurrentBurstCap || 4))
       bot.__nervCurrentBurstCap = tpsBurstCap
       const effectiveCatchup = Math.min(maxCatchup, tpsBurstCap)
 

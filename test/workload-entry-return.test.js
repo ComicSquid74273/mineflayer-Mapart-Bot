@@ -236,6 +236,23 @@ test('the configured placeRange stays inside the server block-interaction limit'
   )
 })
 
+test('the placement burst stays under the server packet-burst rejection rate', () => {
+  // At 20 TPS the live cap decides how many placements leave in one tick. The server
+  // accepts roughly five and rejects beyond it; a rejected placement silently re-enters
+  // the candidate set. Holding at four keeps rate-based rejection out of the picture,
+  // so any carpets still missing after a job point at the hotbar swap arrangement
+  // rather than the send rate.
+  assert.match(source, /const tpsBurstCap = serverTps >= 19\.0 \? 4 :/)
+  assert.doesNotMatch(source, /serverTps >= 19\.0 \? 5 :/)
+
+  const cfg = JSON.parse(fs.readFileSync(
+    path.join(__dirname, '..', 'nerv-printer-config', '_configs', 'nerv-printer-config.json'),
+    'utf8'
+  ))
+  assert.ok(Number(cfg.advanced?.scannerMaxCatchupPlacements) <= 4, 'scannerMaxCatchupPlacements must not exceed the burst cap')
+  assert.ok(Number(cfg.printer?.maxPlacementsPerTick) <= 4, 'maxPlacementsPerTick must not exceed the burst cap')
+})
+
 test('isSolidPlacementFace rejects replaceable and clickable neighbours', () => {
   const start = source.indexOf('function isSolidPlacementFace(')
   assert.ok(start >= 0)
