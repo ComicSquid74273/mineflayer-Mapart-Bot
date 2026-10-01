@@ -6829,13 +6829,45 @@ function getHotbarWindowSlot(index) {
   return 36 + Math.max(0, Math.min(8, Math.floor(toNumber(index, 0))))
 }
 
+// Prefer the FULLEST slot holding this colour, not the first one found.
+//
+// When a duplicate is staged -- two slots, say 1 red left in one and 20 in the other --
+// the selection path must move to the fuller stack immediately. Selecting costs a single
+// held_item_slot packet and moves no items at all, so there is no reason to drain the
+// thin stack first and then pay for a real swap once it empties. Returning the first
+// match made the duplicate useless: it sat there untouched until the first slot ran dry,
+// which is exactly when a swap could least afford to happen.
 function findHotbarIndexForItem(bot, blockName) {
   const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
+  let best = -1
+  let bestCount = 0
   for (let index = 0; index < 9; index += 1) {
     const stack = slots[getHotbarWindowSlot(index)]
-    if (stack?.name === blockName && toNumber(stack.count, 0) > 0) return index
+    if (stack?.name !== blockName) continue
+    const count = toNumber(stack.count, 0)
+    if (count <= 0) continue
+    if (count > bestCount) {
+      bestCount = count
+      best = index
+    }
   }
-  return -1
+  return best
+}
+
+// Every hotbar slot holding this colour, fullest first. Used by the burst planner to
+// know a duplicate exists without having to move anything.
+function findHotbarIndexesForItem(bot, blockName) {
+  const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
+  const found = []
+  for (let index = 0; index < 9; index += 1) {
+    const stack = slots[getHotbarWindowSlot(index)]
+    if (stack?.name !== blockName) continue
+    const count = toNumber(stack.count, 0)
+    if (count <= 0) continue
+    found.push({ index, count })
+  }
+  found.sort((left, right) => right.count - left.count)
+  return found
 }
 
 function findBestInventorySlotForItem(bot, blockName) {
@@ -18818,6 +18850,20 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           }
 
           const readiness = burstMaterialsReady(availability, requiredByBlock, burstTargets)
+
+          // Selecting a resident stack moves no items: one held_item_slot packet. So
+          // before any swap is even considered, point the hand at the fullest slot
+          // holding the burst's FIRST colour. A slot that has run dry is then covered by
+          // its staged duplicate without touching the inventory at all -- which is the
+          // whole point of staging duplicates in the first place.
+          const primaryColor = burstColors[0]
+          if (primaryColor) {
+            const resident = findHotbarIndexForItem(bot, primaryColor)
+            if (resident >= 0 && resident !== bot.quickBarSlot) {
+              if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(resident)
+              else bot.quickBarSlot = resident
+            }
+          }
 
           // Replenish whatever the burst cannot cover from what is already hotbar-resident.
           for (const entry of readiness.missing) {

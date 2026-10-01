@@ -303,6 +303,43 @@ test('replenishment prefers a whole-stack swap and returns merge leftovers to th
   assert.match(body, /if \(sourceStack\?\.name !== blockName\) return \{ ok: false/)
 })
 
+test('hotbar selection prefers the fullest stack, so a drained slot is covered by its duplicate', () => {
+  // Regression: findHotbarIndexForItem returned the FIRST slot with count > 0. With a
+  // staged duplicate (1 red left in slot 2, 20 red in slot 5) it kept selecting slot 2
+  // until it emptied and only then moved on -- so the duplicate sat unused right up to
+  // the moment a real swap could least afford to happen. Selecting is one
+  // held_item_slot packet and moves no items, so the fuller stack must win.
+  const start = source.indexOf('function findHotbarIndexForItem(')
+  assert.ok(start >= 0)
+  const body = source.slice(start, source.indexOf('\nfunction ', start + 10))
+
+  assert.match(body, /if \(count > bestCount\) \{/)
+  assert.match(body, /bestCount = count/)
+  assert.doesNotMatch(body, /return index\s*\n\s*\}\s*\n\s*return -1/)
+
+  // And the selection path must reach the resident-slot branch before any staging.
+  const selStart = source.indexOf('async function selectHotbarMaterial(')
+  assert.ok(selStart >= 0)
+  const sel = source.slice(selStart, source.indexOf('\nfunction ', selStart + 10))
+  const residentAt = sel.indexOf('const existingHotbar = findHotbarIndexForItem(bot, blockName)')
+  const sourceAt = sel.indexOf('findBestInventorySlotForItem(bot, blockName)')
+  assert.ok(residentAt >= 0, 'the resident-slot lookup must exist')
+  assert.ok(residentAt < sourceAt, 'a resident slot must be used before considering a swap')
+  assert.match(sel, /if \(existingHotbar >= 0\) \{\s*\n\s*setSelectedHotbar\(existingHotbar\)/)
+
+  // The burst pre-selects its first colour the same way, before any swap is considered.
+  const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
+  const loop = source.slice(loopStart, loopStart + 14000)
+  assert.match(loop, /const primaryColor = burstColors\[0\]/)
+  assert.match(loop, /bot\.setQuickBarSlot\(resident\)/)
+  const selectAt = loop.indexOf('const primaryColor = burstColors[0]')
+  const swapAt = loop.indexOf('silentHotbarSwap(bot, source.slot, destIndex)')
+  assert.ok(selectAt >= 0 && selectAt < swapAt, 'selection must be attempted before staging a swap')
+
+  // The multi-slot lookup the planner needs.
+  assert.match(source, /function findHotbarIndexesForItem\(bot, blockName\)/)
+})
+
 test('an inventory swap does not stop the sprint or zero velocity', () => {
   // The swap used to clear forward/sprint and zero velocity.x/z because the old
   // bot.clickWindow() path awaited a server round trip and the bot had to stand
