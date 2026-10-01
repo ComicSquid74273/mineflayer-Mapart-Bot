@@ -7597,9 +7597,17 @@ async function restockMaterialUnlocked(bot, config, blockName, requestedPulls = 
     }
   }
 
+  // Bounded give-up across the whole rack. Every unreachable chest burns up to
+  // 12s of ingress pathing before failing, so grinding all 12 chests cost ~12
+  // minutes per attempt and stalled the job entirely (165 consecutive
+  // stage-1-path-timeout lines in one repair window).
+  const maxUnreachableChests = Math.max(1, toNumber(advanced.restockMaxUnreachableChests, 2))
+  let unreachableChests = 0
+
   for (let groupIndex = 0; groupIndex < spotGroups.length; groupIndex += 1) {
     assertRuntimeContinue(bot, config, 'stopping-during-restock')
     const group = spotGroups[groupIndex]
+    if (unreachableChests >= maxUnreachableChests) break
 
     for (let spotIndex = 0; spotIndex < group.length; spotIndex += 1) {
       assertRuntimeContinue(bot, config, 'stopping-during-restock')
@@ -8095,6 +8103,11 @@ async function restockMaterialUnlocked(bot, config, blockName, requestedPulls = 
             console.log(`[RESTOCK-PROTOCOL-WARN] ${blockName} chest packet could not be decoded at ${spot.x},${spot.y},${spot.z}; skipping this chest immediately without repeated open attempts: ${message}`)
           } else if (message.includes('Could not open container') || message.includes('open-container-timeout') || message.includes('No block at') || message.includes('Unexpected block at')) {
             console.log(`[RESTOCK-WARN] Could not open chest for ${blockName} at ${spot.x},${spot.y},${spot.z}: ${message}`)
+          } else if (message.includes('path-timeout') || message.includes('ingress') || message.includes('pathfinder')) {
+            // Navigation could not reach this chest at all. Count it and stop
+            // trying the rest of the rack rather than burning 12s per chest.
+            unreachableChests += 1
+            console.log(`[RESTOCK-UNREACHABLE] ${blockName} @ ${spot.x},${spot.y},${spot.z}: ${message} (${unreachableChests}/${maxUnreachableChests} unreachable; giving up on the remaining rack)`)
           } else if (config.advanced?.debugPrints) {
             console.log(`[RESTOCK-DEBUG] ${blockName} @ ${spot.x},${spot.y},${spot.z}: ${message}`)
           }

@@ -201,3 +201,14 @@ test('a material shortfall proceeds with current stock instead of looping foreve
   // It must return success so printing continues, and clear the failure cache.
   assert.match(source, /restockFailureCache\.delete\(blockName\)\r?\n\s*return true/)
 })
+
+test('restock gives up on the chest rack after a bounded number of unreachable chests', () => {
+  // Regression: every unreachable chest burned up to 12s of ingress pathing, so
+  // grinding all 12 cost ~12 minutes per attempt. One repair window logged 165
+  // consecutive stage-1-path-timeout lines and the job stalled for 45 minutes.
+  assert.match(source, /const maxUnreachableChests = Math\.max\(1, toNumber\(advanced\.restockMaxUnreachableChests, 2\)\)/)
+  assert.match(source, /if \(unreachableChests >= maxUnreachableChests\) break/)
+  assert.match(source, /\[RESTOCK-UNREACHABLE\]/)
+  assert.match(source, /message\.includes\('path-timeout'\) \|\| message\.includes\('ingress'\) \|\| message\.includes\('pathfinder'\)/)
+  assert.match(source, /unreachableChests \+= 1/)
+})
