@@ -12784,40 +12784,42 @@ async function ensureFoodBeforeTraversal(bot, config, reason = 'before-traversal
       break
     }
     if (!hasFoodInInventoryOrOffhand(bot, foodItem)) {
-      const foodStock = await holdForRequiredStock(
-        bot,
-        config,
-        'food',
-        async () => {
-          if (hasFoodInInventoryOrOffhand(bot, foodItem)) {
-            return { ready: true, verified: true, shortage: false }
-          }
-          return await pullFoodStackFromChest(bot, config, foodItem, reason, {
-            ...options,
-            reportOperationalWarning: false
-          })
-        },
-        {
-          waitingStatus: 'waiting-food-stock',
-          resumeStatus: options.resumeStatus || reason,
-          postPrintDeadline: options.postPrintDeadline,
-          onHold: options.onStockHold,
-          onOperationalFailure: ({ result, operationalRetryAttempts }) => {
-            const message = `Food chest access failed after ${operationalRetryAttempts} attempts: ${result.error || 'unknown error'}`
-            reportDashboardWarning(config, 'food-supply', message, {
-              reason,
-              item: foodItem,
-              attempts: operationalRetryAttempts
+      if (!bot.inventory.items().some((entry) => entry.name === foodItem)) {
+        const foodStock = await holdForRequiredStock(
+          bot,
+          config,
+          'food',
+          async () => {
+            if (hasFoodInInventoryOrOffhand(bot, foodItem)) {
+              return { ready: true, verified: true, shortage: false }
+            }
+            return await pullFoodStackFromChest(bot, config, foodItem, reason, {
+              ...options,
+              reportOperationalWarning: false
             })
           },
-          message: (_shortage, retryMs) =>
-            'Food stock is empty: no ' + foodItem + ' is available. Refill the food chest to resume; ' +
-            'the bot will not continue and will recheck every ' + Math.round(retryMs / 1000) + 's.'
-        }
-      )
-      if (!foodStock.ready) break
-      clearDashboardWarning(config, 'food-supply')
-      await delay(Math.max(100, toNumber(advanced.autoEatSettleMs, 500)))
+          {
+            waitingStatus: 'waiting-food-stock',
+            resumeStatus: options.resumeStatus || reason,
+            postPrintDeadline: options.postPrintDeadline,
+            onHold: options.onStockHold,
+            onOperationalFailure: ({ result, operationalRetryAttempts }) => {
+              const message = `Food chest access failed after ${operationalRetryAttempts} attempts: ${result.error || 'unknown error'}`
+              reportDashboardWarning(config, 'food-supply', message, {
+                reason,
+                item: foodItem,
+                attempts: operationalRetryAttempts
+              })
+            },
+            message: (_shortage, retryMs) =>
+              'Food stock is empty: no ' + foodItem + ' is available. Refill the food chest to resume; ' +
+              'the bot will not continue and will recheck every ' + Math.round(retryMs / 1000) + 's.'
+          }
+        )
+        if (!foodStock.ready) break
+        clearDashboardWarning(config, 'food-supply')
+        await delay(Math.max(100, toNumber(advanced.autoEatSettleMs, 500)))
+      }
     }
 
     if (!hasFoodInInventoryOrOffhand(bot, foodItem)) {
@@ -18152,17 +18154,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
             if (result.state === 'placed') {
               placed += 1
-              pendingUntil.set(key, now + optimisticRetryMs)
-              retryPriority.delete(key)
-              inventoryDesyncHits.delete(`${target.blockName}:${key}`)
-              clearRepairAlert(key)
               const Vec3Placed = bot.entity.position.constructor
-              const actual = bot.blockAt(new Vec3Placed(target.position.x, target.position.y, target.position.z))
-              if (actual?.name === target.blockName) {
-                markTargetPlacedInWorld(target, key)
-              } else {
-                noteOptimisticPlacement()
+              const blockType = bot.registry?.blocksByName?.[target.blockName]
+              if (blockType?.defaultState != null && bot.world?.setBlockStateId) {
+                try {
+                  bot.world.setBlockStateId(new Vec3Placed(target.position.x, target.position.y, target.position.z), blockType.defaultState)
+                } catch { }
               }
+              markTargetPlacedInWorld(target, key)
             } else if (result.state === 'already') {
               already += 1
               markTargetPlacedInWorld(target, key)
