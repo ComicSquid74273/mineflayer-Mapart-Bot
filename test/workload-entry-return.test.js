@@ -71,3 +71,22 @@ test('staged ingress breaks long-distance non-strict access into 24-block segmen
   assert.match(gotoCode, /staged-ingress/)
 })
 
+
+test('the final sweep trusts the confirmed-placement ledger instead of the silent client world', () => {
+  // Paper never echoes block_change to the placing client, so a client-only
+  // world snapshot reports every accepted carpet as air and floods the repair
+  // pass with false positives.
+  const scanStart = source.indexOf('function scanPlacementErrors(')
+  const scanEnd = source.indexOf('\nfunction ', scanStart + 10)
+  assert.ok(scanStart >= 0 && scanEnd > scanStart)
+
+  const scan = source.slice(scanStart, scanEnd)
+  assert.match(scan, /const confirmed = options\.confirmedPlaced instanceof Set/)
+  assert.match(scan, /if \(confirmed && confirmed\.has\(`\$\{target\.position\.x\}:\$\{target\.position\.y\}:\$\{target\.position\.z\}`\)\) continue/)
+
+  // The ledger is filled by the workload pass and consumed by both verification passes.
+  assert.match(source, /const confirmedPlaced = options\.confirmedPlaced instanceof Set/)
+  assert.match(source, /const markTargetPlacedInWorld = \(target, key = getTargetKey\(target\)\) => \{[\s\S]*?confirmedPlaced\.add\(key\)/)
+  assert.match(source, /confirmedPlaced: bot\.__nervConfirmedPlaced/)
+  assert.match(source, /if \(bot\.__nervConfirmedPlaced instanceof Set && bot\.__nervConfirmedPlaced\.has\(key\)\) continue/)
+})

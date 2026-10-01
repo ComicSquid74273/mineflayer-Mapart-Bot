@@ -16405,9 +16405,14 @@ function scanPlacementErrors(bot, targets, options = {}) {
   const logErrors = options.logErrors === true
   const maxLogs = Math.max(0, toNumber(options.maxLogs, 50))
   const includeUnloaded = options.includeUnloaded === true
+  // Paper servers never echo block_change back to the placing client, so an
+  // optimistic placement can read as air long after the server accepted it. Trust
+  // the confirmed-placement ledger before trusting the client world snapshot.
+  const confirmed = options.confirmedPlaced instanceof Set ? options.confirmedPlaced : null
 
   for (const target of targets) {
     const { targetPos, shiftedDown } = resolveTargetPlacementPosition(bot, target, options.config || {})
+    if (confirmed && confirmed.has(`${target.position.x}:${target.position.y}:${target.position.z}`)) continue
     const actual = bot.blockAt(targetPos)
     if (!actual) {
       unloaded += 1
@@ -17557,6 +17562,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
   }
 
+  const confirmedPlaced = options.confirmedPlaced instanceof Set
+    ? options.confirmedPlaced
+    : (bot.__nervConfirmedPlaced instanceof Set ? bot.__nervConfirmedPlaced : (bot.__nervConfirmedPlaced = new Set()))
+
   const printer = config.printer || {}
   const advanced = config.advanced || {}
   const placeRange = Math.max(1, toNumber(printer.placeRange, 5))
@@ -17792,6 +17801,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     inventoryDesyncHits.delete(`${target.blockName}:${key}`)
     clearRepairAlert(key)
     noteWorldPlacementProgress()
+    confirmedPlaced.add(key)
   }
   const getTargetWorldBlock = (target) => {
     const Vec3Target = bot.entity.position.constructor
@@ -19765,6 +19775,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
             if (!target) continue
             const key = `${target.position.x}:${target.position.y}:${target.position.z}`
             if (errorListKeys.has(key)) continue
+            if (bot.__nervConfirmedPlaced instanceof Set && bot.__nervConfirmedPlaced.has(key)) continue
             const actual = bot.blockAt(new Vec3_LineEnd(target.position.x, target.position.y, target.position.z))
             if (actual?.name !== target.blockName) {
               errorList.push(target)
@@ -19789,7 +19800,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       config,
       logPrefix: 'LITEMATIC-SWEEP',
       logErrors: config.errorHandling?.logErrors !== false,
-      maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+      maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80),
+      confirmedPlaced: bot.__nervConfirmedPlaced
     }).map((entry) => entry.target).filter(t => !existingErrorKeys.has(`${t.position.x}:${t.position.y}:${t.position.z}`))
     errorList.push(...sweepErrors)
   }
