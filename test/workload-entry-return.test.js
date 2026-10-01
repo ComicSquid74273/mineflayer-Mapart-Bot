@@ -151,7 +151,9 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   // One call per tick, not one per placement slot.
   assert.equal((loop.match(/collectNervScannerCandidates\(/g) || []).length, 1)
 
-  // The burst pre-checks every material so it never swaps mid-burst.
-  assert.match(loop, /Goal lookahead: pre-select every material this burst needs/)
-  assert.match(loop, /if \(countInventoryItems\(bot, blockName\) > 0\) continue/)
+  // The burst provisions every material it needs rather than deferring the swap
+  // to placeTarget, which stalled the sprint once per new colour.
+  assert.match(loop, /Goal lookahead: provision every material this burst needs/)
+  assert.match(loop, /silentHotbarSwap\(bot, source\.slot, destIndex\)/)
+  assert.doesNotMatch(loop, /if \(countInventoryItems\(bot, blockName\) > 0\) continue/)
 })

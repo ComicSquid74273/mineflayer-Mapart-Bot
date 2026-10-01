@@ -18300,24 +18300,30 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           allowed
         )
 
-        // Goal lookahead: pre-select every material this burst needs so the
-        // burst runs hotbar-clean. Swapping mid-burst costs a clickWindow round
-        // trip and stalls the sprint, which is what dropped carpets.
+        // Goal lookahead: provision every material this burst needs so the burst
+        // runs hotbar-clean. Swaps are silent now, so staging here is free;
+        // deferring it to placeTarget costs a sprint stall per new colour.
         if (burstTargets.length > 1) {
           const staged = new Set()
-          for (const burstTarget of burstTargets) {
-            const blockName = burstTarget.blockName
-            if (staged.has(blockName)) continue
+          for (let i = burstTargets.length - 1; i >= 0; i -= 1) {
+            const blockName = burstTargets[i]?.blockName
+            if (!blockName || staged.has(blockName)) continue
             staged.add(blockName)
-            if (getSelectedHotbarStack(bot)?.name === blockName && Number(getSelectedHotbarStack(bot)?.count) > 0) continue
+
             if (findHotbarIndexForItem(bot, blockName) >= 0) continue
-            if (countInventoryItems(bot, blockName) > 0) continue
-            // Out of stock entirely: drop it from the burst rather than
-            // triggering a mid-sprint emergency restock.
-            const blocked = burstTargets.findIndex((candidate) => candidate.blockName === blockName)
-            if (blocked >= 0) {
-              burstTargets.splice(blocked, 1)
+
+            const source = findBestInventorySlotForItem(bot, blockName)
+            if (!source) {
+              // Out of stock entirely: drop it from the burst rather than
+              // triggering a mid-sprint emergency restock.
+              burstTargets.splice(i, 1)
               staged.delete(blockName)
+              continue
+            }
+
+            const destIndex = chooseMaterialHotbarIndex(bot, blockName)
+            if (destIndex >= 0 && destIndex <= 8 && source.slot !== getHotbarWindowSlot(destIndex)) {
+              silentHotbarSwap(bot, source.slot, destIndex)
             }
           }
         }
