@@ -12458,6 +12458,13 @@ function getBotHunger(bot) {
   return Number.isFinite(hunger) ? hunger : null
 }
 
+function hasFoodInInventoryOrOffhand(bot, foodItem) {
+  if (!bot?.inventory) return false
+  const offHand = bot.inventory.slots?.[45]
+  if (offHand?.name === foodItem && Number(offHand.count) > 0) return true
+  return bot.inventory.items().some((entry) => entry.name === foodItem && Number(entry.count) > 0)
+}
+
 function getFoodTraversalState(bot, config, options = {}) {
   const advanced = config?.advanced || {}
   const enabled = options.enabled != null ? options.enabled !== false : advanced.autoEatEnabled !== false
@@ -12473,7 +12480,7 @@ function getFoodTraversalState(bot, config, options = {}) {
   const foodItem = String(options.foodItem || advanced.autoEatFoodItem || 'cooked_beef').replace(/^minecraft:/, '')
   const triggered = options.force === true || lowHunger || lowHealth
   const needed = enabled && hunger != null && triggered && hunger < targetHunger && Boolean(foodItem)
-  const carried = needed && bot.inventory.items().some((entry) => entry.name === foodItem)
+  const carried = needed && hasFoodInInventoryOrOffhand(bot, foodItem)
   return {
     hunger,
     health,
@@ -12541,7 +12548,7 @@ async function eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, rea
       console.log(`[AUTO-EAT] ${reason}: ate ${foodItem}; hunger=${hunger}/${minHunger}.`)
       return true
     }
-    if (hunger <= previousHunger && !bot.inventory.items().some((entry) => entry.name === foodItem)) {
+    if (hunger <= previousHunger && !hasFoodInInventoryOrOffhand(bot, foodItem)) {
       break
     }
     previousHunger = hunger
@@ -12776,13 +12783,13 @@ async function ensureFoodBeforeTraversal(bot, config, reason = 'before-traversal
       ok = true
       break
     }
-    if (!bot.inventory.items().some((entry) => entry.name === foodItem)) {
+    if (!hasFoodInInventoryOrOffhand(bot, foodItem)) {
       const foodStock = await holdForRequiredStock(
         bot,
         config,
         'food',
         async () => {
-          if (bot.inventory.items().some((entry) => entry.name === foodItem)) {
+          if (hasFoodInInventoryOrOffhand(bot, foodItem)) {
             return { ready: true, verified: true, shortage: false }
           }
           return await pullFoodStackFromChest(bot, config, foodItem, reason, {
@@ -12813,7 +12820,7 @@ async function ensureFoodBeforeTraversal(bot, config, reason = 'before-traversal
       await delay(Math.max(100, toNumber(advanced.autoEatSettleMs, 500)))
     }
 
-    if (!bot.inventory.items().some((entry) => entry.name === foodItem)) {
+    if (!hasFoodInInventoryOrOffhand(bot, foodItem)) {
       const message = 'No ' + foodItem + ' available after food chest check; continuing.'
       console.log(`[AUTO-EAT-WARN] ${reason}: ${message}`)
       reportDashboardWarning(config, 'food-supply', message, { reason, item: foodItem })
@@ -12821,7 +12828,7 @@ async function ensureFoodBeforeTraversal(bot, config, reason = 'before-traversal
     }
 
     const ate = await eatConfiguredFoodUntilReady(bot, config, foodItem, targetHunger, reason)
-    if (!ate && !bot.inventory.items().some((entry) => entry.name === foodItem)) {
+    if (!ate && !hasFoodInInventoryOrOffhand(bot, foodItem)) {
       continue
     }
     ok = ate
