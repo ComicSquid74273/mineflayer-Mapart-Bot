@@ -16156,6 +16156,12 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
       }
+      const blockType = bot.registry?.blocksByName?.[target.blockName]
+      if (blockType?.defaultState != null && bot.world?.setBlockStateId) {
+        try {
+          bot.world.setBlockStateId(targetPos, blockType.defaultState)
+        } catch { }
+      }
       if (!requiresFastConfirmation && isFastNoWaitPlacement) {
         placedSuccessfully = true
         break
