@@ -16229,6 +16229,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     const latencyState = await applyAdaptiveLatencyBackoff(bot, config, 'after-place-block', { allowCriticalWait: false, maxWaitMs: 1000 })
     await delay(Math.max(toNumber(printer.placeDelayMs, 50), latencyState.delayMs || 0))
   }
+  // Paper never echoes block_change to the placing client, so record the acceptance
+  // here instead of re-reading a client world that will always report air.
+  if (bot.__nervConfirmedPlaced instanceof Set) {
+    bot.__nervConfirmedPlaced.add(`${target.position.x}:${target.position.y}:${target.position.z}`)
+  }
   return { state: 'placed' }
 }
 
@@ -19275,6 +19280,11 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     for (const target of orderedTargets) {
       setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-verification')
       checkRuntimeStop()
+      if (bot.__nervConfirmedPlaced instanceof Set &&
+        bot.__nervConfirmedPlaced.has(`${target.position.x}:${target.position.y}:${target.position.z}`)) {
+        already += 1
+        continue
+      }
       const actual = bot.blockAt(new Vec3Verify(target.position.x, target.position.y, target.position.z))
       if (!actual) continue
       if (actual.name !== target.blockName) {
@@ -19305,6 +19315,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     for (const target of orderedTargets) {
       setRuntimeStopCheckpoint('printing', 'dashboard-stop-during-final-scan')
       checkRuntimeStop()
+      if (bot.__nervConfirmedPlaced instanceof Set &&
+        bot.__nervConfirmedPlaced.has(`${target.position.x}:${target.position.y}:${target.position.z}`)) continue
       const actual = bot.blockAt(new Vec3_Final(target.position.x, target.position.y, target.position.z))
       if (actual && actual.name !== target.blockName) fullMapErrors.push(target)
     }
@@ -19350,7 +19362,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           config,
           logPrefix: `REPAIR-VERIFY-PASS-${pass}`,
           logErrors: config.errorHandling?.logErrors !== false,
-          maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+          maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80),
+          confirmedPlaced: bot.__nervConfirmedPlaced
         }).map((entry) => entry.target)
         errorList.length = 0
         errorList.push(...remainingErrors)
@@ -19845,7 +19858,8 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         config,
         logPrefix: `REPAIR-VERIFY-PASS-${pass}`,
         logErrors: config.errorHandling?.logErrors !== false,
-        maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80)
+        maxLogs: toNumber(config.advanced?.repairTestMaxErrorLogs, 80),
+        confirmedPlaced: bot.__nervConfirmedPlaced
       }).map((entry) => entry.target)
       errorList.length = 0
       errorList.push(...remainingErrors)

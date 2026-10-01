@@ -90,3 +90,19 @@ test('the final sweep trusts the confirmed-placement ledger instead of the silen
   assert.match(source, /confirmedPlaced: bot\.__nervConfirmedPlaced/)
   assert.match(source, /if \(bot\.__nervConfirmedPlaced instanceof Set && bot\.__nervConfirmedPlaced\.has\(key\)\) continue/)
 })
+
+test('every post-placement verification path honours the confirmed-placement ledger', () => {
+  // Regression: post-repair verification reported MORE errors (1621) than the
+  // first pass (597) because it re-read a client world the server never updates.
+  const verifyScan = /scanPlacementErrors\(bot, orderedTargets, \{[\s\S]{0,400}?confirmedPlaced: bot\.__nervConfirmedPlaced/g
+  const scans = source.match(verifyScan) || []
+  assert.ok(scans.length >= 2, `expected both REPAIR-VERIFY scans to use the ledger, found ${scans.length}`)
+
+  assert.match(source, /for \(const target of orderedTargets\) \{[\s\S]*?dashboard-stop-during-final-scan[\s\S]*?__nervConfirmedPlaced\.has\(`\$\{target\.position\.x\}/)
+  assert.match(source, /dashboard-stop-during-verification[\s\S]*?__nervConfirmedPlaced\.has\(`\$\{target\.position\.x\}/)
+
+  // placeTarget must record acceptance too, otherwise repair placements re-enter the ledger blind.
+  const placeEnd = source.indexOf('\nfunction isTargetAlreadyResolved(')
+  const placeTarget = source.slice(source.indexOf('async function placeTarget('), placeEnd)
+  assert.match(placeTarget, /bot\.__nervConfirmedPlaced\.add\(`\$\{target\.position\.x\}:\$\{target\.position\.y\}:\$\{target\.position\.z\}`\)/)
+})
