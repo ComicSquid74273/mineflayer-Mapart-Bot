@@ -141,6 +141,16 @@ test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () 
   assert.match(helper, /bot\.lastDigTime = null/)
   assert.doesNotMatch(helper, /await/)
   assert.doesNotMatch(helper, /clickWindow/)
+  // The cursor must be serialized by the registry: a hand-rolled object fails on
+  // the component protocol ("Serialization error for play.toServer : SizeOf
+  // error for undefined"), desyncs the server transaction and drops the session.
+  assert.match(helper, /prismarineItem\(bot\.version\)\.toNotch\(window\.selectedItem \|\| null\)/)
+  assert.doesNotMatch(helper, /cursorItem: \{/)
+
+  // And the serialized shape must be what this protocol version expects.
+  const prismarineItem = require('prismarine-item')
+  assert.deepEqual(prismarineItem('26.1.2').toNotch(null), { itemCount: 0, components: [], removeComponents: [] })
+  assert.deepEqual(prismarineItem('1.20').toNotch(null), { present: false })
 
   // Every hotbar-swap site routes through the helper.
   const selectStart = source.indexOf('async function selectHotbarMaterial(')

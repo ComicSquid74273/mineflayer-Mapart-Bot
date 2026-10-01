@@ -74,6 +74,7 @@ const path = require('path')
 const { AsyncLocalStorage } = require('async_hooks')
 const mineflayer = require('mineflayer')
 const nbt = require('prismarine-nbt')
+const prismarineItem = require('prismarine-item')
 const { pathfinder, Movements, goals: { GoalNear, GoalBlock } } = require('mineflayer-pathfinder')
 const { targetsFromNbt } = require('./nbt-targets')
 const { createPlacementWorkload } = require('./placement/workload')
@@ -7106,6 +7107,18 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
   const window = bot.currentWindow || bot.inventory
   if (!window || !bot._client) return false
   try { bot.lastDigTime = null } catch { }
+
+  // Serialize the cursor with the registry's own converter. A hand-rolled
+  // cursorItem fails on the component protocol the bot actually speaks
+  // ("Serialization error for play.toServer : SizeOf error for undefined"),
+  // which desyncs the server transaction and gets the session dropped.
+  let cursorItem
+  try {
+    cursorItem = prismarineItem(bot.version).toNotch(window.selectedItem || null)
+  } catch {
+    return false
+  }
+
   try {
     bot._client.write('window_click', {
       windowId: window.id,
@@ -7114,7 +7127,7 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
       mouseButton: 0,
       mode: 2,
       changedSlots: [],
-      cursorItem: { present: false, blockId: -1 }
+      cursorItem
     })
   } catch {
     return false
