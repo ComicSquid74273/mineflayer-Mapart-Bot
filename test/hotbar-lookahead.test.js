@@ -168,7 +168,8 @@ test('a resume seeds the confirmed-placement ledger so restarts do not re-place 
   // Regression: the ledger is in-memory, so after a restart every previously
   // placed carpet read as client-world "missing" and repair pass 1 inflated
   // 203 real errors into 1348 by re-walking the whole canvas.
-  assert.match(source, /if \(bot\.__nervConfirmedPlaced instanceof Set && resumeFrom > 0\)/)
+  assert.match(source, /if \(resumeFrom > 0\) \{/)
+  assert.match(source, /if \(!\(bot\.__nervConfirmedPlaced instanceof Set\)\) bot\.__nervConfirmedPlaced = new Set\(\)/)
   assert.match(source, /Seeded \$\{bot\.__nervConfirmedPlaced\.size\} confirmed placement\(s\) from saved progress/)
 
   // Seed must run before the pending slice is derived from resumeFrom.

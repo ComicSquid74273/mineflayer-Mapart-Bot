@@ -19130,7 +19130,10 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     // memory, so after a restart every previously-placed carpet would look like a
     // client-world "missing" block and the repair pass would re-place the whole
     // map. Progress counts targets in target order, so the prefix is confirmed.
-    if (bot.__nervConfirmedPlaced instanceof Set && resumeFrom > 0) {
+    if (resumeFrom > 0) {
+      // The ledger is normally created lazily by the workload pass, which runs
+      // after this point. Create it here so a resume can seed it.
+      if (!(bot.__nervConfirmedPlaced instanceof Set)) bot.__nervConfirmedPlaced = new Set()
       for (let i = 0; i < Math.min(resumeFrom, orderedTargets.length); i += 1) {
         const t = orderedTargets[i]
         bot.__nervConfirmedPlaced.add(`${t.position.x}:${t.position.y}:${t.position.z}`)
