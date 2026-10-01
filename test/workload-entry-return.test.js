@@ -164,3 +164,21 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   assert.match(loop, /chooseMaterialHotbarIndex\(bot, blockName, burstTargets\)/)
   assert.doesNotMatch(loop, /if \(countInventoryItems\(bot, blockName\) > 0\) continue/)
 })
+
+test('fast placement aims at the target face instead of sending with forceLook ignore', () => {
+  // Regression: forceLook:'ignore' sent block_place without correcting aim. The
+  // server validates reach against the player's actual look vector, so ~24% of
+  // every lane (152/640) was silently rejected and never appeared in the world.
+  const placeEnd = source.indexOf('\nfunction isTargetAlreadyResolved(')
+  const placeTarget = source.slice(source.indexOf('async function placeTarget('), placeEnd)
+
+  assert.match(placeTarget, /const forceLook = printer\.rotate === false \? 'ignore' : false/)
+  assert.doesNotMatch(placeTarget, /printer\.rotate === true \? true : 'ignore'/)
+  assert.match(placeTarget, /server validates block_place reach against the player's actual look/)
+
+  // And the burst must not sleep between placements: that walks the sprint
+  // forward and drops trailing carpets out of reach mid-lane.
+  const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
+  const loop = source.slice(loopStart, loopStart + 12000)
+  assert.doesNotMatch(loop, /scannerInterPlacementDelayMs/)
+})

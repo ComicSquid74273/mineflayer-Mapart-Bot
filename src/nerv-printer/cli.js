@@ -16257,7 +16257,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         await applyAdaptiveLatencyBackoff(bot, config, 'before-place-block', { pauseMovement: true })
       }
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
-        const forceLook = printer.rotate === true ? true : 'ignore'
+        // The server validates block_place reach against the player's actual look
+        // vector. forceLook:'ignore' sent the packet without correcting aim, so
+        // ~24% of every lane was silently rejected and never appeared in the world.
+        // Aim at the target's placement face unless the caller disabled rotation.
+        const forceLook = printer.rotate === false ? 'ignore' : false
         await bot._genericPlace(attempt.block, attempt.face, {
           swingArm: 'right',
           forceLook
@@ -18405,9 +18409,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (stallSkippedNow.length > 0) {
             break
           }
-          if (i < allowed - 1) {
-            await delay(Math.max(1, toNumber(advanced.scannerInterPlacementDelayMs, 3)))
-          }
+          // No inter-placement sleep: the burst already yields on the tick loop and
+          // any sleep here walks the sprint forward and drops trailing carpets out
+          // of reach mid-lane.
         }
       }
 
