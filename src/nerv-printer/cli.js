@@ -1102,8 +1102,9 @@ function installVanillaSpeed(bot, config) {
     if (!isMoving) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
 
-    const maxSafeBps = 7.192
-    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, 7.123) : 7.123
+    const allowJump = config?.printer?.allowJump === true
+    const maxSafeBps = allowJump ? 7.192 : 5.612
+    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, allowJump ? 7.123 : 5.612) : (allowJump ? 7.123 : 5.612)
     const serverTps = bot.__nervServerTps || 20.0
     // Dynamic TPS speed throttling: scale down if server TPS falls below 17.0
     const tpsSpeedLimit = serverTps >= 19.0 ? maxSafeBps : (serverTps < 14.0 ? 4.317 : 5.0)
@@ -16168,12 +16169,6 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
       }
-      const blockType = bot.registry?.blocksByName?.[target.blockName]
-      if (blockType?.defaultState != null && bot.world?.setBlockStateId) {
-        try {
-          bot.world.setBlockStateId(targetPos, blockType.defaultState)
-        } catch { }
-      }
       if (!requiresFastConfirmation && isFastNoWaitPlacement) {
         placedSuccessfully = true
         break
@@ -18171,13 +18166,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
             if (result.state === 'placed') {
               placed += 1
-              const Vec3Placed = bot.entity.position.constructor
-              const blockType = bot.registry?.blocksByName?.[target.blockName]
-              if (blockType?.defaultState != null && bot.world?.setBlockStateId) {
-                try {
-                  bot.world.setBlockStateId(new Vec3Placed(target.position.x, target.position.y, target.position.z), blockType.defaultState)
-                } catch { }
-              }
               markTargetPlacedInWorld(target, key)
             } else if (result.state === 'already') {
               already += 1
