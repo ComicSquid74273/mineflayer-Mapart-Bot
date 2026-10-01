@@ -969,7 +969,6 @@ function installAdaptiveLatencyGuard(bot, config) {
   wrapAsyncAction('activateBlock', 'activate-block', { pauseMovement: true })
   wrapAsyncAction('activateItem', 'activate-item', { pauseMovement: true })
   wrapAsyncAction('placeBlock', 'place-block', { pauseMovement: true })
-  wrapAsyncAction('_genericPlace', 'generic-place', { pauseMovement: true })
   wrapAsyncAction('equip', 'equip')
   wrapAsyncAction('dig', 'dig', { pauseMovement: true })
 }
@@ -16112,7 +16111,9 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         bot.setControlState('sneak', true)
         await new Promise(r => setTimeout(r, 60))
       }
-      await applyAdaptiveLatencyBackoff(bot, config, 'before-place-block', { pauseMovement: true })
+      if (!isFastNoWaitPlacement) {
+        await applyAdaptiveLatencyBackoff(bot, config, 'before-place-block', { pauseMovement: true })
+      }
       if (isFastNoWaitPlacement && typeof bot._genericPlace === 'function') {
         const forceLook = printer.rotate === true ? true : 'ignore'
         await bot._genericPlace(attempt.block, attempt.face, {
