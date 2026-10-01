@@ -16317,7 +16317,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         await bot.placeBlock(attempt.block, attempt.face)
       }
       if (!requiresFastConfirmation && isFastNoWaitPlacement) {
+        // Fast path: the packet is written and never confirmed against the client
+        // world (Paper does not echo block_change). Sample the placement
+        // conditions so a lane that reports missing carpets can be explained.
         placedSuccessfully = true
+        noteUnverifiedPlacement(target, attempt, support)
         break
       }
       if (await waitForTargetBlockPlaced(bot, targetPos, target.blockName, effectiveConfirmMs, fastConfirmPollMs)) {
@@ -16325,9 +16329,6 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         break
       }
       if (isFastNoWaitPlacement) {
-        // Fast path: the packet is written and never confirmed against the client
-        // world (Paper does not echo block_change). Sample the placement
-        // conditions so a lane that reports missing carpets can be explained.
         placedSuccessfully = true
         noteUnverifiedPlacement(target, attempt, support)
         break
