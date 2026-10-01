@@ -16099,6 +16099,42 @@ function fastBreakInstantBlock(bot, block) {
   }
 }
 
+// Sampled conditions for placements that were sent but never appeared in the
+// world. Paper accepts or rejects block_place silently, so this is the only way
+// to see *why* a carpet is dropped: reach, look vector, support validity, or a
+// hotbar item the server did not agree with.
+const unverifiedPlacementSamples = []
+function noteUnverifiedPlacement(target, attempt, support) {
+  if (unverifiedPlacementSamples.length >= 40) return
+  const pos = bot.entity.position
+  const tx = target.position.x + 0.5
+  const ty = target.position.y + 0.5
+  const tz = target.position.z + 0.5
+  const eyeY = toNumber(bot.entity?.height, 1.62) - 0.18
+  const dx = tx - pos.x
+  const dy = ty - (pos.y + eyeY)
+  const dz = tz - pos.z
+  const dist = Math.hypot(dx, dy, dz)
+  unverifiedPlacementSamples.push({
+    target: `${target.position.x},${target.position.y},${target.position.z}`,
+    block: target.blockName,
+    dist: Number(dist.toFixed(2)),
+    support: support?.name || 'none',
+    supportBelow: support?.name && String(support.name).endsWith('_carpet') ? 'carpet' : 'solid',
+    held: bot.heldItem?.name || 'none',
+    heldCount: toNumber(bot.heldItem?.count, 0),
+    selected: getSelectedHotbarName(),
+    pitch: Number(toNumber(bot.entity?.pitch, 0).toFixed(2)),
+    yawDeltaFromTarget: Number(toNumber(bot.entity?.yaw, 0).toFixed(2)),
+    onGround: bot.entity?.onGround === true,
+    sprint: bot.getControlState?.('sprint') === true,
+    forward: bot.getControlState?.('forward') === true
+  })
+  if (unverifiedPlacementSamples.length === 40) {
+    console.log(`[UNVERIFIED-PLACEMENT-SAMPLES] ${JSON.stringify(unverifiedPlacementSamples)}`)
+  }
+}
+
 async function placeTarget(bot, config, target, isRepairPass = false) {
   const printer = config.printer || {}
   const errors = config.errorHandling || {}
@@ -16294,6 +16330,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       // reporting a skip and re-placing the same block forever.
       if (requiresFastConfirmation && bot.__nervAcceptUnconfirmedPlacement === true) {
         placedSuccessfully = true
+        break
+      }
+      if (isFastNoWaitPlacement) {
+        placedSuccessfully = true
+        noteUnverifiedPlacement(target, attempt, support)
         break
       }
       if (requiresFastConfirmation) {
@@ -18796,6 +18837,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
   if (missing > 0 || unverified > 0) {
     console.log(`[LANE-VERIFY] missing=${missing} unverified=${unverified} of ${batchTargets.length}; repairing before the next lane.`)
+    if (unverifiedPlacementSamples.length > 0) {
+      console.log(`[UNVERIFIED-PLACEMENT-SAMPLES] ${JSON.stringify(unverifiedPlacementSamples)}`)
+      unverifiedPlacementSamples.length = 0
+    }
   }
 
   return {
