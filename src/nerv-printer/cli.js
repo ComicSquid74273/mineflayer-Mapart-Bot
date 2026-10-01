@@ -6867,14 +6867,88 @@ function countUpcomingTargetsByBlock(targets) {
   return demand
 }
 
-function rankHotbarEvictionCandidates(slots, window, countOf, mainCountOf = null) {
-  const demand = countUpcomingTargetsByBlock(window)
+// Quantity accounting for one colour.
+//
+//  hotbar      usable count across the build hotbar slots
+//  main        count in the main inventory, EXCLUDING the hotbar (no double counting)
+//  reserved    already committed to placements we have sent but not yet seen settle;
+//              subtracted exactly once, by whoever commits it
+//
+// `available` is what a burst may spend: it must not be negative, and it is the only
+// figure the readiness check compares against required demand.
+function buildMaterialAvailability(hotbar, main, reserved) {
+  const hotbarCount = Math.max(0, toNumber(hotbar, 0))
+  const mainCount = Math.max(0, toNumber(main, 0))
+  const reservedCount = Math.max(0, toNumber(reserved, 0))
+  return {
+    hotbar: hotbarCount,
+    main: mainCount,
+    reserved: reservedCount,
+    available: Math.max(0, hotbarCount - reservedCount)
+  }
+}
 
-  // Occurrence index per colour, not just the first use. A stack is exhausted at the
-  // count-th future placement of its colour, so `nthUse[c][n]` is when this slot runs
-  // dry. Plain Belady keys on the FIRST use, which evicts a nearly-empty stack whose
-  // last few carpets land deep in the window -- exactly the slot we can least afford
-  // to re-stage mid-sprint.
+// Is this burst startable from what is already in the hotbar?
+//
+// A burst never begins with insufficient material. Nearest-first order is preserved:
+// a target whose colour is short makes the whole burst not-ready, it is never dropped
+// in favour of a farther target that happens to be stocked. The caller replenishes and
+// retries; skipping the nearest target is exactly the failure this prevents.
+function burstMaterialsReady(availability, requiredByBlock, burstTargets) {
+  const missing = []
+  const need = new Map()
+  for (const target of burstTargets || []) {
+    const name = target?.blockName
+    if (!name) continue
+    need.set(name, (need.get(name) || 0) + 1)
+  }
+  for (const [name, required] of need.entries()) {
+    const state = availability instanceof Map ? availability.get(name) : availability[name]
+    const available = state ? toNumber(state.available, 0) : 0
+    if (available < required) {
+      missing.push({
+        blockName: name,
+        required,
+        available,
+        short: required - available,
+        // Whether main inventory can bridge it without a chest trip.
+        mainCovered: state ? toNumber(state.main, 0) >= (required - available) : false
+      })
+    }
+  }
+  void requiredByBlock
+  return { ready: missing.length === 0, missing }
+}
+
+// How many placements of `blockName` the upcoming window still asks for. Used to size
+// a replenishment to the work that follows rather than to a fixed constant.
+function countUpcomingDemand(targets, blockName, limit = Number.MAX_SAFE_INTEGER) {
+  let count = 0
+  for (const target of targets || []) {
+    if (target?.blockName !== blockName) continue
+    count += 1
+    if (count >= limit) break
+  }
+  return count
+}
+
+// Eviction rank for one hotbar slot.
+//
+// The key quantity is NOT when this stack empties, it is when REMOVING it leaves a
+// gap. With 64 red + 20 red resident and 80 red of demand, removing the 64-stack
+// leaves 20 usable, so the shortage begins at the 21st red placement -- that duplicate
+// is not spare, and it is not the stack to lose. Keying on the stack's own exhaustion
+// gets this backwards and would discard the 64.
+//
+// Q is the coverage left in the other usable hotbar slots once this one is gone; the
+// first uncovered request is the (Q+1)-th upcoming placement of the colour.
+function rankHotbarEvictionCandidates(slots, window, countOf, mainCountOf = null, options = {}) {
+  const demand = countUpcomingTargetsByBlock(window)
+  const buildSlots = Array.isArray(options.buildSlots) && options.buildSlots.length > 0
+    ? new Set(options.buildSlots)
+    : null
+  const protectedSlots = options.protectedSlots instanceof Set ? options.protectedSlots : new Set()
+
   const nthUse = new Map()
   for (let i = 0; i < window.length; i += 1) {
     const name = window[i]?.blockName
@@ -6885,6 +6959,7 @@ function rankHotbarEvictionCandidates(slots, window, countOf, mainCountOf = null
 
   const hotbarSupply = new Map()
   for (let index = 0; index < 9; index += 1) {
+    if (buildSlots && !buildSlots.has(index)) continue
     const stack = slots[getHotbarWindowSlot(index)]
     if (!stack?.name) continue
     hotbarSupply.set(stack.name, (hotbarSupply.get(stack.name) || 0) + countOf(index))
@@ -6897,6 +6972,7 @@ function rankHotbarEvictionCandidates(slots, window, countOf, mainCountOf = null
 
   const ranked = []
   for (let index = 0; index < 9; index += 1) {
+    if (buildSlots && !buildSlots.has(index)) continue
     const stack = slots[getHotbarWindowSlot(index)]
     if (!stack?.name) continue
     const name = stack.name
@@ -6906,9 +6982,10 @@ function rankHotbarEvictionCandidates(slots, window, countOf, mainCountOf = null
     const main = mainStockOf(name)
     const count = Math.max(0, toNumber(countOf(index), 0))
 
-    // Exhaustion: the index of this stack's count-th future use, or Infinity when
-    // the window outlasts the stack.
-    const exhaustAt = count > 0 && count <= uses.length ? uses[count - 1] : Number.MAX_SAFE_INTEGER
+    // Coverage remaining in the OTHER hotbar slots once this one is removed.
+    const q = Math.max(0, hot - count)
+    // First request removal leaves uncovered: the (q + 1)-th placement of this colour.
+    const gapAt = q + 1 <= uses.length ? uses[q] : Number.MAX_SAFE_INTEGER
 
     // 0 unused in the window, or out of stock entirely (dead weight either way)
     // 1 spare hotbar stock covers the window on its own
@@ -6921,22 +6998,23 @@ function rankHotbarEvictionCandidates(slots, window, countOf, mainCountOf = null
     else if (hot > demandFor) rank = 1
     else rank = 2
 
+    // A slot the immediate burst or an open transaction depends on is not a candidate.
+    if (protectedSlots.has(index)) rank = 4
+
     ranked.push({
       index,
       name,
       rank,
       count,
       useAt: uses.length > 0 ? uses[0] : Number.MAX_SAFE_INTEGER,
-      exhaustAt
+      gapAt
     })
   }
-  // Lower rank is cheaper to evict, so it sorts first. Within a rank, prefer the stack
-  // that survives longest; when both outlive the window that ties, so fall back to the
-  // plain Belady key and evict the colour needed furthest in the future.
+  // Lower rank is cheaper to evict, so it sorts first. Within a rank, evict the stack
+  // whose removal leaves the latest gap: the one we can most afford to lose.
   ranked.sort((left, right) => {
     if (left.rank !== right.rank) return left.rank - right.rank
-    if (left.exhaustAt !== right.exhaustAt) return right.exhaustAt - left.exhaustAt
-    return right.useAt - left.useAt
+    return right.gapAt - left.gapAt
   })
   return ranked
 }
@@ -7208,19 +7286,14 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 // burst that is seconds of dead time, during which the sprint coasts and the
 // trailing carpets leave reach. The server's authoritative slots still arrive
 // asynchronously and reconcile the prediction.
-function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
-  const window = bot.currentWindow || bot.inventory
-  if (!window || !bot._client) return false
-  try { bot.lastDigTime = null } catch { }
-
-  // Track the window's revision the way mineflayer's own inventory click does
-  // (lib/plugins/inventory.js:33-35, :611). A hardcoded stateId against a live
-  // window is a stale revision: the server rejects the transaction and the slot
-  // change is lost, which is what a held-item-desync actually is.
-  let stateId = 0
+// The live window revision, tracked the way mineflayer's own inventory click does
+// (lib/plugins/inventory.js:33-35, :611). A hardcoded stateId against a live window is
+// a stale revision: the server rejects the transaction and the slot change is lost,
+// which is what a held-item-desync actually is.
+function getWindowStateId(bot) {
   if (!Number.isFinite(bot.__nervWindowStateId)) {
     bot.__nervWindowStateId = 0
-    if (typeof bot._client.on === 'function') {
+    if (typeof bot._client?.on === 'function') {
       const trackState = (packet) => {
         if (Number.isFinite(Number(packet?.stateId))) bot.__nervWindowStateId = Number(packet.stateId)
       }
@@ -7228,18 +7301,29 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
       bot._client.on('set_slot', trackState)
     }
   }
-  stateId = bot.__nervWindowStateId
+  return bot.__nervWindowStateId
+}
 
-  // Serialize the cursor with the registry's own converter. A hand-rolled
-  // cursorItem fails on the component protocol the bot actually speaks
-  // ("Serialization error for play.toServer : SizeOf error for undefined"),
-  // which desyncs the server transaction and gets the session dropped.
-  let cursorItem
+// Serialize the cursor with the registry's own converter. A hand-rolled cursorItem
+// fails on the component protocol the bot actually speaks ("Serialization error for
+// play.toServer : SizeOf error for undefined"), which desyncs the server transaction
+// and gets the session dropped.
+function serializeCursorItem(bot, window) {
   try {
-    cursorItem = prismarineItem(bot.version).toNotch(window.selectedItem || null)
+    return prismarineItem(bot.version).toNotch(window.selectedItem || null)
   } catch {
-    return false
+    return null
   }
+}
+
+function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
+  const window = bot.currentWindow || bot.inventory
+  if (!window || !bot._client) return false
+  try { bot.lastDigTime = null } catch { }
+
+  const stateId = getWindowStateId(bot)
+  const cursorItem = serializeCursorItem(bot, window)
+  if (!cursorItem) return false
 
   try {
     bot._client.write('window_click', {
@@ -7273,6 +7357,105 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
   if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(destHotbarIndex)
   else bot.quickBarSlot = destHotbarIndex
   return true
+}
+
+// Replenish a hotbar slot that already holds `blockName` but has run low.
+//
+// Two shapes, and picking the wrong one is a real bug rather than a waste of packets:
+//
+//   hotbar 3, main 64  ->  whole-stack SWAP:  hotbar 64, main 3
+//   hotbar 3, main 40  ->  PICKUP merge:       hotbar 43, cursor empty
+//   hotbar 3, main 64  ->  PICKUP merge:       hotbar 64, cursor STILL HOLDS 3
+//
+// The third case is the trap. A merge lifts the source stack and merges what fits; the
+// remainder stays on the cursor. Printing with a non-empty cursor is undefined, so the
+// leftover is returned to the source slot with a third click and reused -- never dropped.
+//
+// A SWAP is preferred whenever the source stack could replace the hotbar stack outright,
+// because it is one packet and never touches the cursor at all.
+function replenishHotbarSlot(bot, destHotbarIndex, sourceSlot, blockName) {
+  const window = bot.currentWindow || bot.inventory
+  if (!window || !bot._client) return { ok: false, reason: 'no-window' }
+
+  const destWindowSlot = getHotbarWindowSlot(destHotbarIndex)
+  const slots = bot.inventory?.slots
+  if (!Array.isArray(slots)) return { ok: false, reason: 'no-slots' }
+
+  const destStack = slots[destWindowSlot]
+  const sourceStack = slots[sourceSlot]
+  if (destStack?.name !== blockName) return { ok: false, reason: 'slot-does-not-hold-colour' }
+  if (sourceStack?.name !== blockName) return { ok: false, reason: 'source-does-not-hold-colour' }
+
+  try { bot.lastDigTime = null } catch { }
+
+  const destCount = Math.max(0, toNumber(destStack.count, 0))
+  const sourceCount = Math.max(0, toNumber(sourceStack.count, 0))
+  const stackSize = Math.max(1, toNumber(bot.registry?.itemsByName?.[blockName]?.stackSize, 64))
+
+  // Whole-stack swap when the source can stand in for the hotbar stack by itself.
+  if (sourceCount >= stackSize || destCount === 0) {
+    if (!silentHotbarSwap(bot, sourceSlot, destHotbarIndex)) return { ok: false, reason: 'swap-failed' }
+    return { ok: true, operation: 'swap', hotbar: sourceCount, main: destCount }
+  }
+
+  // Partial merge: lift the source, merge into the destination, return the remainder.
+  const stateId = getWindowStateId(bot)
+  const slotFor = (slot) => {
+    const cursorItem = serializeCursorItem(bot, window)
+    if (!cursorItem) return false
+    try {
+      bot._client.write('window_click', {
+        windowId: window.id,
+        stateId: getWindowStateId(bot),
+        slot,
+        mouseButton: 0,
+        mode: 0,
+        changedSlots: [],
+        cursorItem
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+  void stateId
+
+  // mode 0 is PICKUP: click the source to lift it, click the hotbar slot to merge.
+  if (!slotFor(sourceSlot)) return { ok: false, reason: 'lift-failed' }
+  if (!slotFor(destWindowSlot)) return { ok: false, reason: 'merge-failed' }
+
+  const merged = Math.min(stackSize, destCount + sourceCount)
+  const leftover = destCount + sourceCount - merged
+
+  // Predict the merge locally before deciding whether a third click is needed.
+  const predicted = { name: blockName, count: merged, slot: destWindowSlot }
+  slots[destWindowSlot] = predicted
+  if (sourceStack) sourceStack.slot = sourceSlot
+  if (window.selectedItem) window.selectedItem.count = leftover
+
+  // Leftover on the cursor: hand it back so printing never resumes with an occupied or
+  // unknown cursor, and so the partial stack is reused rather than discarded.
+  if (leftover > 0) {
+    const cursorItem = serializeCursorItem(bot, window)
+    if (!cursorItem) return { ok: false, reason: 'return-failed' }
+    try {
+      bot._client.write('window_click', {
+        windowId: window.id,
+        stateId: getWindowStateId(bot),
+        slot: sourceSlot,
+        mouseButton: 0,
+        mode: 0,
+        changedSlots: [],
+        cursorItem
+      })
+    } catch {
+      return { ok: false, reason: 'return-failed' }
+    }
+    slots[sourceSlot] = { name: blockName, count: leftover, slot: sourceSlot }
+    window.selectedItem = null
+  }
+
+  return { ok: true, operation: 'merge', hotbar: merged, main: leftover }
 }
 
 async function prepareHotbarForBatch(bot, config, batchTargets) {

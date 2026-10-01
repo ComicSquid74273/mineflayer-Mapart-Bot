@@ -23,14 +23,40 @@ function loadRanker() {
   const toNumber = 'function toNumber(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d }'
   const body = source.slice(start, end)
 
+  // The quantity helpers live beside the ranker and are exercised for real below.
+  const availStart = source.indexOf('function buildMaterialAvailability(')
+  const availEnd = source.indexOf('// Eviction rank for one hotbar slot')
+  const availability = source.slice(availStart, availEnd)
+
   const factory = new Function(`
     ${hotbarSlot}
     ${toNumber}
     ${helpers}
+    ${availability}
     ${body}
-    return rankHotbarEvictionCandidates
+    return {
+      rank: rankHotbarEvictionCandidates,
+      buildMaterialAvailability,
+      burstMaterialsReady,
+      countUpcomingDemand
+    }
   `)
-  return factory()
+  const loaded = factory()
+  rankHotbarEvictionCandidates = loaded.rank
+  buildMaterialAvailability = loaded.buildMaterialAvailability
+  burstMaterialsReady = loaded.burstMaterialsReady
+  countUpcomingDemand = loaded.countUpcomingDemand
+  return loaded.rank
+}
+
+let rankHotbarEvictionCandidates = null
+let buildMaterialAvailability = null
+let burstMaterialsReady = null
+let countUpcomingDemand = null
+
+function loadMaterialHelpers() {
+  loadRanker()
+  return { buildMaterialAvailability, burstMaterialsReady, countUpcomingDemand }
 }
 
 function makeSlots(entries) {
@@ -187,6 +213,96 @@ test('two hotbar slots are reserved so staging always has a destination', () => 
   assert.match(dup, /for \(const index of buildSlots\)/)
 })
 
+test('eviction ranks on coverage after removal, not on stack exhaustion', () => {
+  // The failure this prevents: hotbar holds 64 red + 20 red against 80 red of demand.
+  // Keying on when a stack itself empties makes the 64 look safe to lose until the 64th
+  // placement, but removing it leaves only 20 -- the shortage starts at the 21st. The
+  // duplicate is the one to keep and the full stack is the one to evict.
+  const ranker = loadRanker()
+  const slots = makeSlots([
+    [0, 'red_carpet', 64],
+    [1, 'red_carpet', 20]
+  ])
+  const window = targetsFor(Array.from({ length: 80 }, () => 'red_carpet'))
+  const ranked = ranker(slots, window, countOf({ 0: 64, 1: 20 }))
+
+  const full = ranked.find((entry) => entry.index === 0)
+  const dup = ranked.find((entry) => entry.index === 1)
+  // Removing the 20-stack leaves 64 usable -> gap at the 65th red placement.
+  // Removing the 64-stack leaves 20 usable -> gap at the 21st.
+  assert.equal(dup.gapAt, 64)
+  assert.equal(full.gapAt, 20)
+  // We lose the stack whose removal leaves the LATEST gap. Losing the 20-stack keeps 64
+  // usable for 64 placements; losing the 64-stack leaves only 20. So the duplicate is
+  // the cheaper sacrifice and the full stack is kept -- the opposite of ranking on when
+  // each stack individually empties, which would have discarded the 64.
+  assert.equal(ranked[0].index, 1, 'the duplicate is evicted first; the full stack covers far longer')
+})
+
+test('readiness compares usable hotbar quantity against burst demand, not presence', () => {
+  // A stack of 3 covers two placements but not five. Presence-only checks treat both
+  // as ready, which is how a burst starts short and the carpet is silently missed.
+  const { buildMaterialAvailability: avail, burstMaterialsReady: ready } = loadMaterialHelpers()
+  const availability = new Map([
+    ['red_carpet', { hotbar: 3, main: 64, reserved: 0, available: 3 }]
+  ])
+  const short = ready(availability, null, [
+    { blockName: 'red_carpet' }, { blockName: 'red_carpet' }, { blockName: 'red_carpet' },
+    { blockName: 'red_carpet' }, { blockName: 'red_carpet' }
+  ])
+  assert.equal(short.ready, false)
+  assert.equal(short.missing[0].blockName, 'red_carpet')
+  assert.equal(short.missing[0].short, 2)
+  assert.equal(short.missing[0].mainCovered, true, 'main inventory can bridge it without a chest trip')
+
+  const ok = ready(availability, null, [{ blockName: 'red_carpet' }, { blockName: 'red_carpet' }])
+  assert.equal(ok.ready, true, '3 available covers a 2-target burst')
+})
+
+test('readiness keeps nearest-first: a short colour blocks the burst, never skips the target', () => {
+  // Skipping the nearest target because its colour is unavailable and printing a
+  // farther target instead is the failure this whole change exists to prevent.
+  const { burstMaterialsReady: ready } = loadMaterialHelpers()
+  const availability = new Map([
+    ['gray_carpet', { hotbar: 0, main: 0, reserved: 0, available: 0 }],
+    ['cyan_carpet', { hotbar: 64, main: 0, reserved: 0, available: 64 }]
+  ])
+  const result = ready(availability, null, [{ blockName: 'gray_carpet' }, { blockName: 'cyan_carpet' }])
+  assert.equal(result.ready, false)
+  assert.equal(result.missing.length, 1)
+  assert.equal(result.missing[0].blockName, 'gray_carpet')
+})
+
+test('pending reservations are subtracted exactly once and never below zero', () => {
+  const { buildMaterialAvailability: avail } = loadMaterialHelpers()
+  assert.equal(avail(10, 64, 4).available, 6)
+  assert.equal(avail(2, 0, 5).available, 0, 'over-reserved clamps to zero rather than going negative')
+})
+
+test('replenishment prefers a whole-stack swap and returns merge leftovers to the cursor', () => {
+  // hotbar 3 / main 64 -> SWAP gives hotbar 64 and never touches the cursor.
+  // hotbar 3 / main 40 -> merge gives hotbar 43 and the cursor ends empty.
+  // hotbar 3 / main 64 -> merge gives hotbar 64 but the cursor would hold 3 unless a
+  // third click returns it; printing must never resume with an occupied cursor.
+  const start = source.indexOf('function replenishHotbarSlot(')
+  assert.ok(start >= 0, 'replenishHotbarSlot must exist')
+  const body = source.slice(start, source.indexOf('\nasync function prepareHotbarForBatch(', start))
+
+  assert.match(body, /if \(sourceCount >= stackSize \|\| destCount === 0\) \{/)
+  assert.match(body, /silentHotbarSwap\(bot, sourceSlot, destHotbarIndex\)/)
+  assert.match(body, /const leftover = destCount \+ sourceCount - merged/)
+  assert.match(body, /if \(leftover > 0\)/)
+  assert.match(body, /window\.selectedItem = null/)
+  assert.match(body, /slots\[sourceSlot\] = \{ name: blockName, count: leftover, slot: sourceSlot \}/)
+  assert.match(body, /operation: 'merge'/)
+  assert.match(body, /operation: 'swap'/)
+
+  // Colour identity must be checked before any PICKUP: a mismatch swaps instead of
+  // merging, which would park the hotbar stack back in the main inventory.
+  assert.match(body, /if \(destStack\?\.name !== blockName\) return \{ ok: false/)
+  assert.match(body, /if \(sourceStack\?\.name !== blockName\) return \{ ok: false/)
+})
+
 test('an inventory swap does not stop the sprint or zero velocity', () => {
   // The swap used to clear forward/sprint and zero velocity.x/z because the old
   // bot.clickWindow() path awaited a server round trip and the bot had to stand
@@ -212,7 +328,10 @@ test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () 
   // Awaiting it inside a 5-block burst stalled the sprint and dropped carpets.
   const start = source.indexOf('function silentHotbarSwap(')
   assert.ok(start >= 0, 'silentHotbarSwap must exist')
-  const end = source.indexOf('\nasync function prepareHotbarForBatch(', start)
+  // Bound at the next function: replenishHotbarSlot legitimately uses mouseButton 0
+  // for its PICKUP clicks, so only the swap's own body may be asserted here.
+  const end = source.indexOf('\n// Replenish a hotbar slot', start)
+  assert.ok(end > start, 'the swap helper must be delimited so the merge path is not asserted against')
   const helper = source.slice(start, end)
 
   assert.match(helper, /bot\._client\.write\('window_click'/)
@@ -231,16 +350,28 @@ test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () 
   // stateId must be the live window revision, not a constant. mineflayer tracks it
   // from window_items/set_slot (lib/plugins/inventory.js:33-35) and sends the tracked
   // value on every real click (:611); a hardcoded 0 is a stale revision that the server
-  // rejects, which is exactly what a held-item-desync is.
+  // rejects, which is exactly what a held-item-desync is. The tracking lives in a
+  // shared helper now, so both the swap and the merge path read the same revision.
   assert.doesNotMatch(helper, /stateId: 0/)
-  assert.match(helper, /bot\.__nervWindowStateId/)
-  assert.match(helper, /bot\._client\.on\('window_items'/)
-  assert.match(helper, /bot\._client\.on\('set_slot'/)
+  assert.match(helper, /getWindowStateId\(bot\)/)
+
+  const trackerStart = source.indexOf('function getWindowStateId(')
+  assert.ok(trackerStart >= 0, 'getWindowStateId must exist')
+  const tracker = source.slice(trackerStart, source.indexOf('\nfunction ', trackerStart + 10))
+  assert.match(tracker, /bot\.__nervWindowStateId/)
+  assert.match(tracker, /bot\._client\.on\('window_items'/)
+  assert.match(tracker, /bot\._client\.on\('set_slot'/)
   // The cursor must be serialized by the registry: a hand-rolled object fails on
   // the component protocol ("Serialization error for play.toServer : SizeOf
   // error for undefined"), desyncs the server transaction and drops the session.
-  assert.match(helper, /prismarineItem\(bot\.version\)\.toNotch\(window\.selectedItem \|\| null\)/)
+  assert.match(helper, /serializeCursorItem\(bot, window\)/)
   assert.doesNotMatch(helper, /cursorItem: \{/)
+
+  const serializerStart = source.indexOf('function serializeCursorItem(')
+  assert.ok(serializerStart >= 0, 'serializeCursorItem must exist')
+  const serializer = source.slice(serializerStart, source.indexOf('\nfunction ', serializerStart + 10))
+  assert.match(serializer, /prismarineItem\(bot\.version\)\.toNotch\(window\.selectedItem \|\| null\)/)
+  assert.doesNotMatch(serializer, /cursorItem: \{/)
 
   // And the serialized shape must be what this protocol version expects.
   const prismarineItem = require('prismarine-item')
