@@ -7112,6 +7112,23 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
   if (!window || !bot._client) return false
   try { bot.lastDigTime = null } catch { }
 
+  // Track the window's revision the way mineflayer's own inventory click does
+  // (lib/plugins/inventory.js:33-35, :611). A hardcoded stateId against a live
+  // window is a stale revision: the server rejects the transaction and the slot
+  // change is lost, which is what a held-item-desync actually is.
+  let stateId = 0
+  if (!Number.isFinite(bot.__nervWindowStateId)) {
+    bot.__nervWindowStateId = 0
+    if (typeof bot._client.on === 'function') {
+      const trackState = (packet) => {
+        if (Number.isFinite(Number(packet?.stateId))) bot.__nervWindowStateId = Number(packet.stateId)
+      }
+      bot._client.on('window_items', trackState)
+      bot._client.on('set_slot', trackState)
+    }
+  }
+  stateId = bot.__nervWindowStateId
+
   // Serialize the cursor with the registry's own converter. A hand-rolled
   // cursorItem fails on the component protocol the bot actually speaks
   // ("Serialization error for play.toServer : SizeOf error for undefined"),
@@ -7126,7 +7143,7 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
   try {
     bot._client.write('window_click', {
       windowId: window.id,
-      stateId: 0,
+      stateId,
       slot: sourceSlot,
       mouseButton: 0,
       mode: 2,
@@ -19925,10 +19942,12 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           console.log(`[LITEMATIC-WORKLOAD-BATCH] placed=${result.placed} already=${result.already} skipped=${result.skipped} seen=${result.seen}/${batchTargets.length} missing=${result.missing} hardStops=${result.hardStops} rawAllowed=${result.rawAllowed} capped=${result.capped} maxAllowed=${result.maxAllowed}`)
         }
 
-        // Verify the lane against the world, not the ledger. A claimed placement that
-        // the world does not show is a real miss and must be repaired here, at
-        // the end of this lane, rather than deferred to a sweep that used to
-        // trust the same claim.
+        // Verify the lane against the ledger first, then the world. Paper never echoes
+        // block_change to the placing client, so every carpet this bot placed
+        // optimistically reads back as air: an unledgered world read reported the whole
+        // band missing, re-placed it, then read air again and carried all of it to the
+        // final sweep. Trust the accepted-placement ledger and report only what the
+        // ledger never claimed.
         {
           const Vec3Batch = bot.entity.position.constructor
           const batchErrorKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
@@ -19936,6 +19955,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           for (const target of batchTargets) {
             const key = `${target.position.x}:${target.position.y}:${target.position.z}`
             if (batchErrorKeys.has(key)) continue
+            if (bot.__nervConfirmedPlaced instanceof Set && bot.__nervConfirmedPlaced.has(key)) continue
             const actual = bot.blockAt(new Vec3Batch(target.position.x, target.position.y, target.position.z))
             if (!actual) continue
             if (actual.name !== target.blockName) {
@@ -19960,7 +19980,10 @@ async function runPrint(bot, config, dashboardRuntime = null) {
             for (const target of laneMisses) {
               const key = `${target.position.x}:${target.position.y}:${target.position.z}`
               const actual = bot.blockAt(new Vec3Batch(target.position.x, target.position.y, target.position.z))
-              if (actual?.name === target.blockName) {
+              // The ledger records acceptance for every block this bot placed, and a
+              // repair placement is recorded the same way. A client world that never
+              // shows them must not turn a completed repair into a residual.
+              if (actual?.name === target.blockName || (bot.__nervConfirmedPlaced instanceof Set && bot.__nervConfirmedPlaced.has(key))) {
                 repaired.add(key)
               } else {
                 residual.push({ target, key })

@@ -120,6 +120,31 @@ test('band retry and missing-count consult the ledger instead of the silent clie
   assert.match(source, /\[LANE-REPAIR-RESIDUAL\]/)
 })
 
+test('the per-band lane verify consults the ledger instead of the silent client world', () => {
+  // Regression: the lane verify was the one placement-error check missing the ledger
+  // guard. Paper never echoes block_change, so all 512 band targets read as air, the
+  // whole band was repaired, the residual re-read saw air again, and every target was
+  // carried into the final sweep. One complete map was printed two to three times per
+  // job and `[LANE-VERIFY] missing` reported hundreds of false misses.
+  const verifyStart = source.indexOf('const laneMisses = []')
+  assert.ok(verifyStart >= 0, 'lane verify must exist')
+  const verify = source.slice(verifyStart, verifyStart + 1200)
+
+  assert.match(verify, /__nervConfirmedPlaced\.has\(key\)\) continue/)
+  // The miss classification must still happen for anything the ledger never claimed.
+  assert.match(verify, /laneMisses\.push\(target\)/)
+  assert.match(verify, /actual\.name !== target\.blockName/)
+  // An unloaded chunk is not a miss.
+  assert.match(verify, /if \(!actual\) continue/)
+
+  // The residual re-read after repair must honour the ledger too, or a completed
+  // repair is immediately re-reported as still absent.
+  const residualStart = source.indexOf('const residual = []')
+  assert.ok(residualStart >= 0, 'residual check must exist')
+  const residual = source.slice(residualStart, residualStart + 700)
+  assert.match(residual, /__nervConfirmedPlaced\.has\(key\)\)/)
+})
+
 test('a fast-confirm repair placement accepts the written packet when the client world can never confirm it', () => {
   // Regression: `block=red_carpet has 38 in inventory; falling back to stop-place`
   // repeated as `unconfirmed-place` because waitForTargetBlockPlaced polls a

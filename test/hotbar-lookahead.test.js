@@ -141,6 +141,15 @@ test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () 
   assert.match(helper, /bot\.lastDigTime = null/)
   assert.doesNotMatch(helper, /await/)
   assert.doesNotMatch(helper, /clickWindow/)
+
+  // stateId must be the live window revision, not a constant. mineflayer tracks it
+  // from window_items/set_slot (lib/plugins/inventory.js:33-35) and sends the tracked
+  // value on every real click (:611); a hardcoded 0 is a stale revision that the server
+  // rejects, which is exactly what a held-item-desync is.
+  assert.doesNotMatch(helper, /stateId: 0/)
+  assert.match(helper, /bot\.__nervWindowStateId/)
+  assert.match(helper, /bot\._client\.on\('window_items'/)
+  assert.match(helper, /bot\._client\.on\('set_slot'/)
   // The cursor must be serialized by the registry: a hand-rolled object fails on
   // the component protocol ("Serialization error for play.toServer : SizeOf
   // error for undefined"), desyncs the server transaction and drops the session.
