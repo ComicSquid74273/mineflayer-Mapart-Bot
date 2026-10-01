@@ -126,3 +126,30 @@ test('an empty slot is never evicted by the ranker', () => {
   assert.equal(ranked.length, 1)
   assert.equal(ranked[0].index, 0)
 })
+
+test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () => {
+  // Regression: bot.clickWindow() awaits confirmTransaction on 1.17+ (~150ms at
+  // 6b6t ping) and sleeps up to DIG_CLICK_TIMEOUT (500ms) after a recent dig.
+  // Awaiting it inside a 5-block burst stalled the sprint and dropped carpets.
+  const start = source.indexOf('function silentHotbarSwap(')
+  assert.ok(start >= 0, 'silentHotbarSwap must exist')
+  const end = source.indexOf('\nasync function prepareHotbarForBatch(', start)
+  const helper = source.slice(start, end)
+
+  assert.match(helper, /bot\._client\.write\('window_click'/)
+  assert.match(helper, /mode: 2/)
+  assert.match(helper, /bot\.lastDigTime = null/)
+  assert.doesNotMatch(helper, /await/)
+  assert.doesNotMatch(helper, /clickWindow/)
+
+  // Every hotbar-swap site routes through the helper.
+  const selectStart = source.indexOf('async function selectHotbarMaterial(')
+  const selectEnd = source.indexOf('\nfunction ', selectStart + 10)
+  assert.match(source.slice(selectStart, selectEnd), /silentHotbarSwap\(bot, source\.slot, hotbarIndex\)/)
+
+  const prepareStart = source.indexOf('async function prepareHotbarForBatch(')
+  const prepareEnd = source.indexOf('\nasync function equipMaterial(', prepareStart)
+  const prepare = source.slice(prepareStart, prepareEnd)
+  assert.doesNotMatch(prepare, /clickWindow/)
+  assert.equal((prepare.match(/silentHotbarSwap\(/g) || []).length, 2)
+})

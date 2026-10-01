@@ -7065,6 +7065,9 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   const isMoving = typeof bot.getControlState === 'function' && bot.getControlState('forward')
   const wasSprinting = typeof bot.getControlState === 'function' && bot.getControlState('sprint')
   bot.__nervInventorySwapActive = true
+  // clickWindow sleeps up to DIG_CLICK_TIMEOUT (500ms) when a dig happened
+  // recently. Clearing the marker keeps every subsequent swap silent.
+  try { bot.lastDigTime = null } catch { }
   if (isMoving) {
     bot.setControlState('forward', false)
     bot.setControlState('sprint', false)
@@ -7075,17 +7078,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   }
 
   try {
-    await bot.clickWindow(source.slot, hotbarIndex, 2)
-    const destWindowSlot = getHotbarWindowSlot(hotbarIndex)
-    if (bot.inventory?.slots) {
-      const srcItem = bot.inventory.slots[source.slot]
-      const destItem = bot.inventory.slots[destWindowSlot]
-      bot.inventory.slots[destWindowSlot] = srcItem
-      bot.inventory.slots[source.slot] = destItem
-      if (srcItem) srcItem.slot = destWindowSlot
-      if (destItem) destItem.slot = source.slot
-    }
-    setSelectedHotbar(hotbarIndex)
+    if (!silentHotbarSwap(bot, source.slot, hotbarIndex)) return false
     if (fastSwap) return true
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
     if (!swapped) return false
@@ -7100,6 +7093,46 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
       if (wasSprinting) bot.setControlState('sprint', true)
     }
   }
+}
+
+// Write a mode-2 hotbar/inventory swap straight to the wire and predict the
+// local slot result. bot.clickWindow() is unusable here: on 1.17+ it awaits
+// confirmTransaction (a full server round trip) and additionally sleeps up to
+// DIG_CLICK_TIMEOUT (500ms) whenever a dig happened recently. Inside a 5-block
+// burst that is seconds of dead time, during which the sprint coasts and the
+// trailing carpets leave reach. The server's authoritative slots still arrive
+// asynchronously and reconcile the prediction.
+function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
+  const window = bot.currentWindow || bot.inventory
+  if (!window || !bot._client) return false
+  try { bot.lastDigTime = null } catch { }
+  try {
+    bot._client.write('window_click', {
+      windowId: window.id,
+      stateId: 0,
+      slot: sourceSlot,
+      mouseButton: 0,
+      mode: 2,
+      changedSlots: [],
+      cursorItem: { present: false, blockId: -1 }
+    })
+  } catch {
+    return false
+  }
+
+  const destWindowSlot = getHotbarWindowSlot(destHotbarIndex)
+  const slots = bot.inventory?.slots
+  if (Array.isArray(slots)) {
+    const srcItem = slots[sourceSlot]
+    const destItem = slots[destWindowSlot]
+    slots[destWindowSlot] = srcItem
+    slots[sourceSlot] = destItem
+    if (srcItem) srcItem.slot = destWindowSlot
+    if (destItem) destItem.slot = sourceSlot
+  }
+  if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(destHotbarIndex)
+  else bot.quickBarSlot = destHotbarIndex
+  return true
 }
 
 async function prepareHotbarForBatch(bot, config, batchTargets) {
@@ -7163,16 +7196,7 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
     }
     if (destIndex < 0) continue
 
-    try {
-      await bot.clickWindow(source.slot, destIndex, 2)
-      const destSlot = 36 + destIndex
-      if (bot.inventory?.slots) {
-        const srcItem = bot.inventory.slots[source.slot]
-        bot.inventory.slots[destSlot] = srcItem
-        bot.inventory.slots[source.slot] = null
-        if (srcItem) srcItem.slot = destSlot
-      }
-    } catch { }
+    silentHotbarSwap(bot, source.slot, destIndex)
   }
 
   // Fill all remaining hotbar slots (0-8) with backup stacks of the highest demand materials
@@ -7196,17 +7220,7 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
       const source = findBestInventorySlotForItem(bot, mat)
       if (!source || source.slot < 9 || source.slot > 35) continue
 
-      try {
-        await bot.clickWindow(source.slot, emptyIndex, 2)
-        const destSlot = 36 + emptyIndex
-        if (bot.inventory?.slots) {
-          const srcItem = bot.inventory.slots[source.slot]
-          bot.inventory.slots[destSlot] = srcItem
-          bot.inventory.slots[source.slot] = null
-          if (srcItem) srcItem.slot = destSlot
-        }
-        filling = true
-      } catch { }
+      if (silentHotbarSwap(bot, source.slot, emptyIndex)) filling = true
     }
   }
 }
