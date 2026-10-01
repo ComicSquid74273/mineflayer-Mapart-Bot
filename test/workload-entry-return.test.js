@@ -115,3 +115,17 @@ test('band retry and missing-count consult the ledger instead of the silent clie
 
   assert.match(source, /let missing = 0\r?\n\s*for \(const target of batchTargets\) \{\r?\n\s*const key = getTargetKey\(target\)\r?\n\s*if \(confirmedPlaced\.has\(key\)\) continue/)
 })
+
+test('a fast-confirm repair placement accepts the written packet when the client world can never confirm it', () => {
+  // Regression: `block=red_carpet has 38 in inventory; falling back to stop-place`
+  // repeated as `unconfirmed-place` because waitForTargetBlockPlaced polls a
+  // client world Paper never updates, so the same block was re-placed forever.
+  const placeEnd = source.indexOf('\nfunction isTargetAlreadyResolved(')
+  const placeTarget = source.slice(source.indexOf('async function placeTarget('), placeEnd)
+  assert.match(placeTarget, /if \(requiresFastConfirmation && bot\.__nervAcceptUnconfirmedPlacement === true\) \{\r?\n\s*placedSuccessfully = true\r?\n\s*break\r?\n\s*\}/)
+
+  assert.match(source, /repairAcceptUnconfirmedPlacement: true,/)
+  const mixedStart = source.indexOf('async function repairTargetsWhileMovingWithStops(')
+  const mixed = source.slice(mixedStart, mixedStart + 700)
+  assert.match(mixed, /bot\.__nervAcceptUnconfirmedPlacement = \(config\.advanced \|\| \{\}\)\.repairAcceptUnconfirmedPlacement === true/)
+})

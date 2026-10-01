@@ -5885,6 +5885,10 @@ function createDefaultConfig() {
       repairStallEmergencyRestock: true,
       repairEmergencyRestockTransientHits: 3,
       repairConfirmFastPlacements: true,
+      // 6b6t (Paper) never echoes block_change to the placing client, so a
+      // fast-confirm placement can never be verified by reading the client world.
+      // Accept the written packet instead of skipping and re-placing forever.
+      repairAcceptUnconfirmedPlacement: true,
       repairFastConfirmMs: 180,
       repairFastConfirmPollMs: 15,
       repairVerifySettleMs: 120,
@@ -16188,6 +16192,14 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         placedSuccessfully = true
         break
       }
+      // Paper never echoes block_change to the placing client, so a fast-confirm
+      // placement can never be confirmed by reading the client world. The packet
+      // was written and the server accepted it; record it and move on instead of
+      // reporting a skip and re-placing the same block forever.
+      if (requiresFastConfirmation && bot.__nervAcceptUnconfirmedPlacement === true) {
+        placedSuccessfully = true
+        break
+      }
       if (requiresFastConfirmation) {
         lastPlaceError = new Error('unconfirmed-place')
       }
@@ -16560,6 +16572,11 @@ function shouldSprintDuringRepair(config) {
 async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRange, label = 'REPAIR-MIXED', allowEmergencyRestock = true) {
   if (!targets.length) return { placed: 0, already: 0, skipped: 0 }
   assertRuntimeContinue(bot, config, 'stopping-during-repair')
+
+  // Paper never echoes block_change to the placing client, so waiting for a
+  // client-world confirmation always times out on 6b6t and re-places the same
+  // block forever. Accept the written packet and let the ledger track it.
+  bot.__nervAcceptUnconfirmedPlacement = (config.advanced || {}).repairAcceptUnconfirmedPlacement === true
 
   if (shouldUseLatencySafeMode(bot, config, 'repair').active) {
     console.log(`[${label}-LATENCY-SAFE] MC ping high; using stop-place confirmed repair for ${targets.length} target(s).`)
