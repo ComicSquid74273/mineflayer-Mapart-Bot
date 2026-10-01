@@ -9065,7 +9065,7 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
       bot.setControlState('sprint', isDynamicSprint && !latencyState.shouldDisableSprint)
       bot.setControlState('forward', true)
       await delay(tickMs)
-      if (latencyState.delayMs > 0) {
+      if (latencyState.delayMs > 0 && !isDynamicSprint) {
         bot.setControlState('forward', false)
         bot.setControlState('sprint', false)
         await delay(Math.min(latencyState.settings.movementPauseMaxMs, latencyState.delayMs))
