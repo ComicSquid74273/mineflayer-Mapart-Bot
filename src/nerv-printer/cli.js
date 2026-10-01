@@ -1038,10 +1038,18 @@ function installVanillaSpeed(bot, config) {
   let lastSetbackAt = 0
   const setbackCooldownMs = Math.max(1000, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 3000))
 
-  bot._client.on('position', () => {
+  bot._client.on('position', (packet) => {
     prevX = null
     prevZ = null
     lastSetbackAt = Date.now()
+    const p = bot.entity?.position
+    if (p) {
+      const feet = bot.blockAt(p)
+      const below = bot.blockAt(p.offset(0, -1, 0))
+      const ahead = bot.blockAt(p.offset(0, 0, 1))
+      const aboveAhead = bot.blockAt(p.offset(0, 1, 1))
+      console.log(`[SERVER-SETBACK] packet=(${packet?.x?.toFixed(2)},${packet?.y?.toFixed(2)},${packet?.z?.toFixed(2)}) botPos=(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}) feet=${feet?.name} below=${below?.name} ahead=${ahead?.name} aboveAhead=${aboveAhead?.name}`)
+    }
   })
 
   bot.on('physicsTick', () => {
@@ -1078,9 +1086,8 @@ function installVanillaSpeed(bot, config) {
     if (!isMoving) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
 
-    const allowJump = config?.printer?.allowJump === true
-    const maxSafeBps = allowJump ? 7.192 : 5.612
-    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, maxSafeBps) : maxSafeBps
+    const maxSafeBps = 7.192
+    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, 7.123) : 7.123
     const serverTps = bot.__nervServerTps || 20.0
     // Dynamic TPS speed throttling: scale down if server TPS falls below 17.0
     const tpsSpeedLimit = serverTps >= 19.0 ? maxSafeBps : (serverTps < 14.0 ? 4.317 : 5.0)
@@ -18116,8 +18123,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       const now = Date.now()
       logPingDiagnostic(bot, config, 'placement-loop', {
         action: currentAction || 'place',
-        goal: currentGoal ? `${currentGoal.x},${currentGoal.y},${currentGoal.z}` : 'none',
-        pos: formatBotPosition(bot)
+        goal: currentGoal ? `${currentGoal.x},${currentGoal.y},${currentGoal.z}` : 'none'
       }, { throttleKey: 'ping-placement-loop' })
       const serverTps = bot.__nervServerTps || 20.0
       // Scale burst limit dynamically with server TPS: 20 TPS -> 5 blocks/tick; <17 TPS -> 3 blocks/tick
