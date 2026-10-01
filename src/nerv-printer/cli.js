@@ -21362,9 +21362,22 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
       const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 10000 : 0
-      // Closest-first candidate selection: trailing blocks about to leave the 4.5m reach bubble
-      // have smallest distance2 and are placed with highest priority before sprinting away.
-      const priority = repairPriority - distance2
+      let isMovingSouth = bot?.__nervTraversalDirection === 'south'
+      let isMovingNorth = bot?.__nervTraversalDirection === 'north'
+      if (!isMovingSouth && !isMovingNorth && currentGoal && Number.isFinite(currentGoal.z)) {
+        isMovingSouth = currentGoal.z > botZ + 0.1
+        isMovingNorth = currentGoal.z < botZ - 0.1
+      }
+      let zRel = 0
+      if (isMovingSouth) {
+        zRel = target.position.z - Math.floor(botZ)
+      } else if (isMovingNorth) {
+        zRel = Math.floor(botZ) - target.position.z
+      }
+      // Earliest reach-exit priority: trailing and current rows (zRel <= 0) exit reach first
+      // and receive highest priority. Every row N completes across all 5 columns before row N+1.
+      const rowPriority = (5 - zRel) * 100
+      const priority = repairPriority + rowPriority - distance2
 
       if (priority > bestPriority) {
         // Only do blockAt for the current best candidate to skip expensive world reads
