@@ -16106,6 +16106,7 @@ function fastBreakInstantBlock(bot, block) {
 const unverifiedPlacementSamples = []
 function noteUnverifiedPlacement(target, attempt, support) {
   if (unverifiedPlacementSamples.length >= 40) return
+  void attempt
   const pos = bot.entity.position
   const tx = target.position.x + 0.5
   const ty = target.position.y + 0.5
@@ -16130,8 +16131,9 @@ function noteUnverifiedPlacement(target, attempt, support) {
     sprint: bot.getControlState?.('sprint') === true,
     forward: bot.getControlState?.('forward') === true
   })
-  if (unverifiedPlacementSamples.length === 40) {
+  if (unverifiedPlacementSamples.length >= 20) {
     console.log(`[UNVERIFIED-PLACEMENT-SAMPLES] ${JSON.stringify(unverifiedPlacementSamples)}`)
+    unverifiedPlacementSamples.length = 0
   }
 }
 
