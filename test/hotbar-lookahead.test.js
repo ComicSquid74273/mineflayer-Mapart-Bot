@@ -20,10 +20,12 @@ function loadRanker() {
     source.indexOf('function rankHotbarEvictionCandidates(')
   )
   const hotbarSlot = 'function getHotbarWindowSlot(index) { return 36 + Math.max(0, Math.min(8, Math.floor(Number(index) || 0))) }'
+  const toNumber = 'function toNumber(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d }'
   const body = source.slice(start, end)
 
   const factory = new Function(`
     ${hotbarSlot}
+    ${toNumber}
     ${helpers}
     ${body}
     return rankHotbarEvictionCandidates
@@ -92,9 +94,32 @@ test('protects a colour whose stock cannot cover the horizon', () => {
 
   const red = ranked.find((entry) => entry.name === 'red_carpet')
   const green = ranked.find((entry) => entry.name === 'green_carpet')
-  assert.equal(red.rank, 2, 'a colour whose stack cannot cover the horizon is rank 2')
+  // With no main-inventory stock, red's 3 carpets cannot cover 8 placements: the
+  // colour is short even with everything, so it is protected (rank 3) and a restock
+  // is the correct response, not an eviction.
+  assert.equal(red.rank, 3, 'a colour short even with main stock is protected')
   assert.equal(green.rank, 1)
   assert.equal(ranked[0].name, 'green_carpet')
+})
+
+test('main-inventory stock downgrades a protected colour to evictable', () => {
+  const ranker = loadRanker()
+  // Same shape as the protected case, but red has 20 carpets waiting in the main
+  // inventory. Losing the hotbar slot now costs one staging packet rather than a
+  // restock trip, so red drops from protected (3) to rank 2.
+  const slots = makeSlots([
+    [0, 'red_carpet', 3],
+    [1, 'green_carpet', 64]
+  ])
+  const window = targetsFor([
+    'green_carpet',
+    'red_carpet', 'red_carpet', 'red_carpet', 'red_carpet',
+    'red_carpet', 'red_carpet', 'red_carpet', 'red_carpet'
+  ])
+  const ranked = ranker(slots, window, countOf({ 0: 3, 1: 64 }), (name) => (name === 'red_carpet' ? 20 : 0))
+
+  const red = ranked.find((entry) => entry.name === 'red_carpet')
+  assert.equal(red.rank, 2, 'main stock covers the gap, so only a staging packet stands in the way')
 })
 
 test('a duplicated colour with spare stock is cheaper to evict than a sole copy', () => {
@@ -105,7 +130,8 @@ test('a duplicated colour with spare stock is cheaper to evict than a sole copy'
     [2, 'green_carpet', 2]
   ])
   // Both hotbar red stacks together hold 16 for a horizon needing 2, so a red
-  // slot is rank 1 (spare). green's only stack holds 2 for 5 placements: rank 2.
+  // slot is rank 1 (spare). green's only stack holds 2 for 5 placements and there
+  // is none in the main inventory, so it is protected (rank 3).
   const ranked = ranker(
     slots,
     targetsFor(['red_carpet', 'red_carpet', 'green_carpet', 'green_carpet', 'green_carpet', 'green_carpet', 'green_carpet']),
@@ -115,7 +141,7 @@ test('a duplicated colour with spare stock is cheaper to evict than a sole copy'
   const dupRed = ranked.filter((entry) => entry.name === 'red_carpet')
   const green = ranked.find((entry) => entry.name === 'green_carpet')
   assert.equal(dupRed.every((entry) => entry.rank === 1), true)
-  assert.equal(green.rank, 2)
+  assert.equal(green.rank, 3)
   assert.equal(ranked[0].name, 'red_carpet')
 })
 
@@ -125,6 +151,25 @@ test('an empty slot is never evicted by the ranker', () => {
   const ranked = ranker(slots, targetsFor(['red_carpet']), countOf({ 0: 64 }))
   assert.equal(ranked.length, 1)
   assert.equal(ranked[0].index, 0)
+})
+
+test('an inventory swap does not stop the sprint or zero velocity', () => {
+  // The swap used to clear forward/sprint and zero velocity.x/z because the old
+  // bot.clickWindow() path awaited a server round trip and the bot had to stand
+  // still to transact. silentHotbarSwap writes one packet and predicts locally, so
+  // nothing waits: stopping only walked us away from the targets being placed.
+  const start = source.indexOf('async function selectHotbarMaterial(')
+  assert.ok(start >= 0)
+  const end = source.indexOf('\nfunction ', start + 10)
+  const body = source.slice(start, end)
+
+  assert.doesNotMatch(body, /setControlState\('forward', false\)/)
+  assert.doesNotMatch(body, /setControlState\('sprint', false\)/)
+  assert.doesNotMatch(body, /velocity\.x = 0/)
+  assert.doesNotMatch(body, /velocity\.z = 0/)
+  // The swap-active marker is still set and cleared around the write.
+  assert.match(body, /bot\.__nervInventorySwapActive = true/)
+  assert.match(body, /bot\.__nervInventorySwapActive = false/)
 })
 
 test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () => {

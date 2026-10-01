@@ -6862,16 +6862,20 @@ function countUpcomingTargetsByBlock(targets) {
   return demand
 }
 
-function rankHotbarEvictionCandidates(slots, window, countOf) {
+function rankHotbarEvictionCandidates(slots, window, countOf, mainCountOf = null) {
   const demand = countUpcomingTargetsByBlock(window)
-  const nextUse = new Map()
-  for (let index = 0; index < 9; index += 1) {
-    const stack = slots[getHotbarWindowSlot(index)]
-    if (stack?.name) nextUse.set(stack.name, -1)
-  }
+
+  // Occurrence index per colour, not just the first use. A stack is exhausted at the
+  // count-th future placement of its colour, so `nthUse[c][n]` is when this slot runs
+  // dry. Plain Belady keys on the FIRST use, which evicts a nearly-empty stack whose
+  // last few carpets land deep in the window -- exactly the slot we can least afford
+  // to re-stage mid-sprint.
+  const nthUse = new Map()
   for (let i = 0; i < window.length; i += 1) {
     const name = window[i]?.blockName
-    if (name && nextUse.has(name) && nextUse.get(name) === -1) nextUse.set(name, i)
+    if (!name) continue
+    if (!nthUse.has(name)) nthUse.set(name, [])
+    nthUse.get(name).push(i)
   }
 
   const hotbarSupply = new Map()
@@ -6881,23 +6885,85 @@ function rankHotbarEvictionCandidates(slots, window, countOf) {
     hotbarSupply.set(stack.name, (hotbarSupply.get(stack.name) || 0) + countOf(index))
   }
 
+  const mainStockOf = (name) => {
+    if (typeof mainCountOf !== 'function') return 0
+    return Math.max(0, toNumber(mainCountOf(name), 0))
+  }
+
   const ranked = []
   for (let index = 0; index < 9; index += 1) {
     const stack = slots[getHotbarWindowSlot(index)]
     if (!stack?.name) continue
     const name = stack.name
-    const useAt = nextUse.has(name) ? nextUse.get(name) : -1
-    // 0: unused inside the horizon. 1: spare hotbar stock covers demand.
-    // 2: needed and this is the only stock for it.
-    const rank = useAt === -1
-      ? 0
-      : ((hotbarSupply.get(name) || 0) > (demand.get(name) || 0) ? 1 : 2)
-    ranked.push({ index, name, rank, useAt: useAt === -1 ? Number.MAX_SAFE_INTEGER : useAt })
+    const uses = nthUse.get(name) || []
+    const demandFor = demand.get(name) || 0
+    const hot = hotbarSupply.get(name) || 0
+    const main = mainStockOf(name)
+    const count = Math.max(0, toNumber(countOf(index), 0))
+
+    // Exhaustion: the index of this stack's count-th future use, or Infinity when
+    // the window outlasts the stack.
+    const exhaustAt = count > 0 && count <= uses.length ? uses[count - 1] : Number.MAX_SAFE_INTEGER
+
+    // 0 unused in the window, or out of stock entirely (dead weight either way)
+    // 1 spare hotbar stock covers the window on its own
+    // 2 the hotbar alone is short, but the main inventory covers the gap: one
+    //   staging packet later, cheaper than a restock trip
+    // 3 short even with everything: protect it and restock instead
+    let rank
+    if (uses.length === 0) rank = 0
+    else if (hot + main <= demandFor) rank = 3
+    else if (hot > demandFor) rank = 1
+    else rank = 2
+
+    ranked.push({
+      index,
+      name,
+      rank,
+      count,
+      useAt: uses.length > 0 ? uses[0] : Number.MAX_SAFE_INTEGER,
+      exhaustAt
+    })
   }
-  // Lower rank is cheaper to evict, so it sorts first. Within a rank the
-  // farthest next use is the one we can most afford to lose.
-  ranked.sort((left, right) => left.rank - right.rank || right.useAt - left.useAt)
+  // Lower rank is cheaper to evict, so it sorts first. Within a rank, prefer the stack
+  // that survives longest; when both outlive the window that ties, so fall back to the
+  // plain Belady key and evict the colour needed furthest in the future.
+  ranked.sort((left, right) => {
+    if (left.rank !== right.rank) return left.rank - right.rank
+    if (left.exhaustAt !== right.exhaustAt) return right.exhaustAt - left.exhaustAt
+    return right.useAt - left.useAt
+  })
   return ranked
+}
+
+// Two hotbar slots holding the same colour waste a slot in a nine-slot cache, and the
+// thinnest one is the cheap one to give up: report it as evictable so the ranker prefers
+// it over a colour that is genuinely needed. Merging the stacks into one slot is a
+// two-click cursor operation and would cost more than the slot it saves, so we do not
+// attempt it mid-sprint; we only make the wasted slot the first candidate for reuse.
+function findThinnestDuplicateHotbarIndex(bot) {
+  const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : null
+  if (!slots) return -1
+  const byName = new Map()
+  for (let index = 0; index < 9; index += 1) {
+    const stack = slots[getHotbarWindowSlot(index)]
+    if (!stack?.name) continue
+    if (!byName.has(stack.name)) byName.set(stack.name, [])
+    byName.get(stack.name).push(index)
+  }
+  let best = -1
+  let bestCount = Number.MAX_SAFE_INTEGER
+  for (const indices of byName.values()) {
+    if (indices.length < 2) continue
+    for (const index of indices) {
+      const count = getHotbarStackCount(bot, index)
+      if (count < bestCount) {
+        bestCount = count
+        best = index
+      }
+    }
+  }
+  return best
 }
 
 function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
@@ -6917,7 +6983,21 @@ function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
       toNumber((bot.__nervConfig?.advanced || {}).hotbarLookaheadHorizon, 50)
     )
     const window = targets.slice(0, horizon)
-    const ranked = rankHotbarEvictionCandidates(slots, window, (index) => getHotbarStackCount(bot, index))
+    const ranked = rankHotbarEvictionCandidates(
+      slots,
+      window,
+      (index) => getHotbarStackCount(bot, index),
+      // Main-inventory stock decides whether losing a hotbar slot costs one staging
+      // packet or a full restock trip, so the ranker has to see it.
+      (name) => countInventoryItems(bot, name)
+    )
+    // A slot that duplicates a colour we already hold is dead weight. Prefer it over
+    // evicting a colour the window actually needs.
+    const duplicate = findThinnestDuplicateHotbarIndex(bot)
+    if (duplicate >= 0) {
+      const duplicateRank = ranked.find((entry) => entry.index === duplicate)
+      if (!duplicateRank || duplicateRank.rank <= 1) return duplicate
+    }
     if (ranked.length > 0) return ranked[0].index
   }
 
@@ -7067,21 +7147,16 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 
   if (preSwapDelayMs > 0) await delay(preSwapDelayMs)
 
-  const isMoving = typeof bot.getControlState === 'function' && bot.getControlState('forward')
-  const wasSprinting = typeof bot.getControlState === 'function' && bot.getControlState('sprint')
   bot.__nervInventorySwapActive = true
   // clickWindow sleeps up to DIG_CLICK_TIMEOUT (500ms) when a dig happened
   // recently. Clearing the marker keeps every subsequent swap silent.
   try { bot.lastDigTime = null } catch { }
-  if (isMoving) {
-    bot.setControlState('forward', false)
-    bot.setControlState('sprint', false)
-    if (bot.entity?.velocity) {
-      bot.entity.velocity.x = 0
-      bot.entity.velocity.z = 0
-    }
-  }
 
+  // No velocity stop here. An earlier version cleared forward/sprint and zeroed
+  // velocity.x/z around the swap because bot.clickWindow() awaited a server round
+  // trip and the bot had to stand still to transact. silentHotbarSwap writes one
+  // packet and predicts locally, so there is nothing to wait for: stopping the
+  // sprint only walked us further from the targets we were about to place.
   try {
     if (!silentHotbarSwap(bot, source.slot, hotbarIndex)) return false
     if (fastSwap) return true
@@ -7093,10 +7168,6 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
     return false
   } finally {
     bot.__nervInventorySwapActive = false
-    if (isMoving) {
-      bot.setControlState('forward', true)
-      if (wasSprinting) bot.setControlState('sprint', true)
-    }
   }
 }
 
