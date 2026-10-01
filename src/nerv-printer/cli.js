@@ -19106,6 +19106,18 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       }
       console.log(`[RESUME] Saved state phase=${previous.phase || 'printing'} state=${previous.state || 'n/a'} action=${previous.action || 'n/a'} processed=${resumeFrom}/${orderedTargets.length}.`)
     }
+
+    // Seed the confirmed-placement ledger from saved progress. The ledger lives in
+    // memory, so after a restart every previously-placed carpet would look like a
+    // client-world "missing" block and the repair pass would re-place the whole
+    // map. Progress counts targets in target order, so the prefix is confirmed.
+    if (bot.__nervConfirmedPlaced instanceof Set && resumeFrom > 0) {
+      for (let i = 0; i < Math.min(resumeFrom, orderedTargets.length); i += 1) {
+        const t = orderedTargets[i]
+        bot.__nervConfirmedPlaced.add(`${t.position.x}:${t.position.y}:${t.position.z}`)
+      }
+      console.log(`[RESUME] Seeded ${bot.__nervConfirmedPlaced.size} confirmed placement(s) from saved progress.`)
+    }
   }
 
   const pending = orderedTargets.slice(resumeFrom)

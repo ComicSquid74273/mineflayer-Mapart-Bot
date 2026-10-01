@@ -153,3 +153,17 @@ test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () 
   assert.doesNotMatch(prepare, /clickWindow/)
   assert.equal((prepare.match(/silentHotbarSwap\(/g) || []).length, 2)
 })
+
+test('a resume seeds the confirmed-placement ledger so restarts do not re-place the map', () => {
+  // Regression: the ledger is in-memory, so after a restart every previously
+  // placed carpet read as client-world "missing" and repair pass 1 inflated
+  // 203 real errors into 1348 by re-walking the whole canvas.
+  assert.match(source, /if \(bot\.__nervConfirmedPlaced instanceof Set && resumeFrom > 0\)/)
+  assert.match(source, /Seeded \$\{bot\.__nervConfirmedPlaced\.size\} confirmed placement\(s\) from saved progress/)
+
+  // Seed must run before the pending slice is derived from resumeFrom.
+  const seed = source.indexOf('Seeded ${bot.__nervConfirmedPlaced.size}')
+  const pending = source.indexOf('const pending = orderedTargets.slice(resumeFrom)')
+  assert.ok(seed >= 0 && pending >= 0, 'both markers must exist')
+  assert.ok(seed < pending, 'the ledger must be seeded before pending targets are derived')
+})
