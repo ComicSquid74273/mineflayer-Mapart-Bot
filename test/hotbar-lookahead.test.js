@@ -142,6 +142,13 @@ test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () 
   assert.doesNotMatch(helper, /await/)
   assert.doesNotMatch(helper, /clickWindow/)
 
+  // mode 2 is SWAP and the button carries the HOTBAR INDEX to swap against. Sending a
+  // constant made the server swap into hotbar 0 while we predicted destHotbarIndex, so
+  // bot.heldItem then described a different block than the server had selected and the
+  // bot placed the wrong colour (occupied-by=black_carpet expected=gray_carpet).
+  assert.match(helper, /mouseButton: Math\.max\(0, Math\.min\(8, destHotbarIndex\)\)/)
+  assert.doesNotMatch(helper, /mouseButton: 0,/)
+
   // stateId must be the live window revision, not a constant. mineflayer tracks it
   // from window_items/set_slot (lib/plugins/inventory.js:33-35) and sends the tracked
   // value on every real click (:611); a hardcoded 0 is a stale revision that the server

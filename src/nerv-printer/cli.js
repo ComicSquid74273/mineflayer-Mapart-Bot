@@ -7145,7 +7145,12 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
       windowId: window.id,
       stateId,
       slot: sourceSlot,
-      mouseButton: 0,
+      // mode 2 is SWAP: the button carries the HOTBAR INDEX to swap against, not a
+      // constant. Sending 0 made the server swap into hotbar 0 while we predicted
+      // destHotbarIndex, so bot.heldItem then read a different block than the server
+      // had selected and we placed the wrong colour (occupied-by=black_carpet
+      // expected=gray_carpet). THM sends the target slot the same way.
+      mouseButton: Math.max(0, Math.min(8, destHotbarIndex)),
       mode: 2,
       changedSlots: [],
       cursorItem
