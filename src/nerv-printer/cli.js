@@ -16079,7 +16079,8 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     }
   }
 
-  if (String(bot.heldItem?.name || '') !== target.blockName) {
+  const isHeldReady = String(bot.heldItem?.name || '') === target.blockName && Number(bot.heldItem?.count) > 0
+  if (!isHeldReady) {
     const equipped = await equipMaterial(bot, config, target.blockName, {
       fastSwap: isFastNoWaitPlacement,
       allowRestock: !isFastNoWaitPlacement
