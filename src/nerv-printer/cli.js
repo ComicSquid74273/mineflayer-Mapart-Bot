@@ -1038,6 +1038,19 @@ function installVanillaSpeed(bot, config) {
   let lastSetbackAt = 0
   const setbackCooldownMs = Math.max(1000, toNumber(advanced.vanillaSpeedSetbackFallbackMs, 3000))
 
+  const recentSentPackets = []
+  if (bot._client && !bot.__nervSentTrackerInstalled) {
+    bot.__nervSentTrackerInstalled = true
+    const rawWrite = bot._client.write.bind(bot._client)
+    bot._client.write = (name, params) => {
+      if (name === 'position' || name === 'position_look' || name === 'look' || name === 'flying' || name === 'block_place' || name === 'use_item') {
+        recentSentPackets.push({ t: Date.now(), name, ...params })
+        if (recentSentPackets.length > 10) recentSentPackets.shift()
+      }
+      return rawWrite(name, params)
+    }
+  }
+
   bot._client.on('position', (packet) => {
     prevX = null
     prevZ = null
@@ -1049,6 +1062,9 @@ function installVanillaSpeed(bot, config) {
       const ahead = bot.blockAt(p.offset(0, 0, 1))
       const aboveAhead = bot.blockAt(p.offset(0, 1, 1))
       console.log(`[SERVER-SETBACK] packet=(${packet?.x?.toFixed(2)},${packet?.y?.toFixed(2)},${packet?.z?.toFixed(2)}) botPos=(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}) feet=${feet?.name} below=${below?.name} ahead=${ahead?.name} aboveAhead=${aboveAhead?.name}`)
+      if (recentSentPackets.length) {
+        console.log(`[RECENT-SENT] ${JSON.stringify(recentSentPackets.slice(-4))}`)
+      }
     }
   })
 
