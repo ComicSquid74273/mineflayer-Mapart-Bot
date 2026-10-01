@@ -7000,6 +7000,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 
   const isMoving = typeof bot.getControlState === 'function' && bot.getControlState('forward')
   const wasSprinting = typeof bot.getControlState === 'function' && bot.getControlState('sprint')
+  bot.__nervInventorySwapActive = true
   if (isMoving) {
     bot.setControlState('forward', false)
     bot.setControlState('sprint', false)
@@ -7029,6 +7030,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   } catch (err) {
     return false
   } finally {
+    bot.__nervInventorySwapActive = false
     if (isMoving) {
       bot.setControlState('forward', true)
       if (wasSprinting) bot.setControlState('sprint', true)
@@ -7061,7 +7063,6 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
   }
 
   const toStage = targetMaterials.filter(mat => !hotbarHas.has(mat))
-  if (toStage.length === 0) return
 
   for (const mat of toStage) {
     const source = findBestInventorySlotForItem(bot, mat)
@@ -7088,31 +7089,49 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
 
     try {
       await bot.clickWindow(source.slot, destIndex, 2)
-      await waitForHotbarItem(bot, destIndex, mat, 1000, 25)
-    } catch {
-      // Non-fatal if a clickWindow fails during pre-staging
-    }
+      const destSlot = 36 + destIndex
+      if (bot.inventory?.slots) {
+        const srcItem = bot.inventory.slots[source.slot]
+        bot.inventory.slots[destSlot] = srcItem
+        bot.inventory.slots[source.slot] = null
+        if (srcItem) srcItem.slot = destSlot
+      }
+    } catch { }
   }
 
-  // Fill any remaining hotbar slots (0-8) with backup stacks of the most frequent materials
-  for (const mat of sorted) {
-    let emptyIndex = -1
-    for (let i = 0; i < 9; i++) {
-      const stack = bot.inventory?.slots?.[36 + i]
-      if (!stack || Number(stack.count) <= 0 || !targetSet.has(stack.name)) {
-        emptyIndex = i
+  // Fill all remaining hotbar slots (0-8) with backup stacks of the highest demand materials
+  let filling = true
+  while (filling) {
+    filling = false
+    for (const mat of sorted) {
+      let emptyIndex = -1
+      for (let i = 0; i < 9; i++) {
+        const stack = bot.inventory?.slots?.[36 + i]
+        if (!stack || Number(stack.count) <= 0 || !targetSet.has(stack.name)) {
+          emptyIndex = i
+          break
+        }
+      }
+      if (emptyIndex < 0) {
+        filling = false
         break
       }
+
+      const source = findBestInventorySlotForItem(bot, mat)
+      if (!source || source.slot < 9 || source.slot > 35) continue
+
+      try {
+        await bot.clickWindow(source.slot, emptyIndex, 2)
+        const destSlot = 36 + emptyIndex
+        if (bot.inventory?.slots) {
+          const srcItem = bot.inventory.slots[source.slot]
+          bot.inventory.slots[destSlot] = srcItem
+          bot.inventory.slots[source.slot] = null
+          if (srcItem) srcItem.slot = destSlot
+        }
+        filling = true
+      } catch { }
     }
-    if (emptyIndex < 0) break
-
-    const source = findBestInventorySlotForItem(bot, mat)
-    if (!source || source.slot < 9 || source.slot > 35) continue
-
-    try {
-      await bot.clickWindow(source.slot, emptyIndex, 2)
-      await waitForHotbarItem(bot, emptyIndex, mat, 1000, 25)
-    } catch { }
   }
 }
 
@@ -8987,9 +9006,13 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
         paused = false
       }
 
-      if (paused) {
+      if (paused || bot.__nervInventorySwapActive === true) {
         bot.setControlState('forward', false)
         bot.setControlState('sprint', false)
+        if (bot.entity?.velocity) {
+          bot.entity.velocity.x = 0
+          bot.entity.velocity.z = 0
+        }
         await delay(tickMs)
         continue
       }
