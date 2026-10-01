@@ -7004,7 +7004,13 @@ function selectedMaterialMatches(bot, blockName) {
   const selectedStack = getSelectedHotbarStack(bot)
   const selectedMatches = selectedStack?.name === blockName && toNumber(selectedStack.count, 0) > 0
   const heldMatches = String(bot.heldItem?.name || '') === blockName && toNumber(bot.heldItem?.count, 0) > 0
-  return selectedMatches && heldMatches
+  if (selectedMatches && heldMatches) return true
+  // A silent swap predicts the local slot and quickBarSlot without waiting for the
+  // server's set_slot. bot.heldItem is only refreshed by that packet, so it lags
+  // our own prediction by a full round trip and used to report held-item-desync
+  // for a swap that had already succeeded. The predicted selected slot is the
+  // authoritative signal; heldItem only wins when it agrees it is something else.
+  return selectedMatches && (bot.heldItem == null || bot.heldItem.name === blockName)
 }
 
 async function waitForSelectedMaterialReady(bot, blockName, timeoutMs = 900, pollMs = 75, stableMs = 0) {

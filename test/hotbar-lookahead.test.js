@@ -177,3 +177,15 @@ test('a resume seeds the confirmed-placement ledger so restarts do not re-place 
   assert.ok(seed >= 0 && pending >= 0, 'both markers must exist')
   assert.ok(seed < pending, 'the ledger must be seeded before pending targets are derived')
 })
+
+test('selectedMaterialMatches trusts the predicted hotbar slot over a lagging heldItem', () => {
+  // Regression: silent swaps predict the slot locally, but bot.heldItem is only
+  // refreshed by the server's set_slot. Requiring both made a swap that had
+  // already succeeded report held-item-desync for the rest of the burst.
+  const start = source.indexOf('function selectedMaterialMatches(')
+  assert.ok(start >= 0)
+  const body = source.slice(start, source.indexOf('\nasync function waitForSelectedMaterialReady(', start))
+
+  assert.match(body, /if \(selectedMatches && heldMatches\) return true/)
+  assert.match(body, /return selectedMatches && \(bot\.heldItem == null \|\| bot\.heldItem\.name === blockName\)/)
+})
