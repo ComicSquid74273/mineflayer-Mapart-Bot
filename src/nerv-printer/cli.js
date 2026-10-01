@@ -1000,6 +1000,29 @@ function getFloorTopAt(bot, x, z, currentY) {
   return null
 }
 
+function installRealTimeTpsTracker(bot) {
+  if (!bot || bot.__nervTpsTrackerInstalled) return
+  bot.__nervTpsTrackerInstalled = true
+  bot.__nervServerTps = 20.0
+  let lastTime = 0
+  let lastAge = null
+
+  bot._client.on('update_time', (packet) => {
+    const now = Date.now()
+    const age = Number(packet.age)
+    if (lastAge != null && lastTime > 0) {
+      const dt = (now - lastTime) / 1000.0
+      const dticks = age - lastAge
+      if (dt > 0.05 && dticks > 0) {
+        const instantTps = Math.min(20.0, Math.max(0.0, dticks / dt))
+        bot.__nervServerTps = bot.__nervServerTps * 0.7 + instantTps * 0.3
+      }
+    }
+    lastTime = now
+    lastAge = age
+  })
+}
+
 function installVanillaSpeed(bot, config) {
   if (!bot || bot.__nervVanillaSpeedInstalled) return
   bot.__nervVanillaSpeedInstalled = true
@@ -1056,9 +1079,13 @@ function installVanillaSpeed(bot, config) {
     if (!isMoving) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
 
-    const allowJump = config?.printer?.allowJump === true
-    const maxSafeBps = allowJump ? 7.192 : 5.612
-    const bps = Math.min(maxSafeBps, Math.max(1.0, toNumber(advanced.vanillaSpeedBps, maxSafeBps)))
+    const maxSafeBps = 7.192
+    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, 7.123) : 7.123
+    const serverTps = bot.__nervServerTps || 20.0
+    // Dynamic TPS speed throttling: scale down if server TPS falls below 17.0
+    const tpsSpeedLimit = serverTps >= 19.0 ? maxSafeBps : (serverTps < 14.0 ? 4.317 : 5.612)
+    const effectiveBps = Math.min(targetBps, tpsSpeedLimit)
+    const bps = Math.min(maxSafeBps, Math.max(1.0, effectiveBps))
     const targetPerTick = bps / 20.0
 
     if (movedDist < targetPerTick) {
@@ -5850,8 +5877,8 @@ function createDefaultConfig() {
       breakCarpetAboveReset: false,
       debugPrints: false,
       vanillaSpeedEnabled: true,
-      vanillaSpeedBps: 7.192,
-      vanillaStepHeight: 1.1,
+      vanillaSpeedBps: 7.123,
+      vanillaStepHeight: 1.21,
       vanillaSpeedInLiquids: false,
       vanillaSpeedOnlyOnGround: true,
       vanillaSpeedPlatformOnly: true,
@@ -6790,8 +6817,8 @@ function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
   if (existing >= 0) return existing
 
   const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
-  // Only use hotbar slots 0 to 7. Keep slot 8 reserved for food / utility tool!
-  for (let index = 0; index < 8; index += 1) {
+  // Check all 9 hotbar slots (0 to 8, window slots 36 to 44)
+  for (let index = 0; index < 9; index += 1) {
     if (!slots[getHotbarWindowSlot(index)]) return index
   }
 
@@ -6799,7 +6826,7 @@ function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
   const targets = upcomingTargets || bot.__nervActiveBatchTargets || null
   if (Array.isArray(targets) && targets.length > 0) {
     const nextUseDistance = new Map()
-    for (let index = 0; index < 8; index += 1) {
+    for (let index = 0; index < 9; index += 1) {
       const stack = slots[getHotbarWindowSlot(index)]
       if (stack?.name) nextUseDistance.set(stack.name, -1) // -1 = never used
     }
@@ -6816,7 +6843,7 @@ function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
     let bestIndex = 0
     let bestDist = -2
 
-    for (let index = 0; index < 8; index += 1) {
+    for (let index = 0; index < 9; index += 1) {
       const stack = slots[getHotbarWindowSlot(index)]
       if (!stack?.name) return index
       const d = nextUseDistance.get(stack.name) ?? -1
@@ -6829,9 +6856,9 @@ function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
     return bestIndex
   }
 
-  // Fallback: evict duplicate or most frequent stack in hotbar slots 0-7
+  // Fallback: evict duplicate or most frequent stack in hotbar slots 0-8
   const byName = new Map()
-  for (let index = 0; index < 8; index += 1) {
+  for (let index = 0; index < 9; index += 1) {
     const stack = slots[getHotbarWindowSlot(index)]
     if (!stack?.name) continue
     const entry = byName.get(stack.name) || { name: stack.name, count: 0, index }
@@ -6844,9 +6871,9 @@ function chooseMaterialHotbarIndex(bot, blockName, upcomingTargets = null) {
     if (!replacement || entry.count > replacement.count) replacement = entry
   }
 
-  if (replacement) return Math.max(0, Math.min(7, replacement.index))
+  if (replacement) return Math.max(0, Math.min(8, replacement.index))
   const current = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0
-  return Math.max(0, Math.min(7, current))
+  return Math.max(0, Math.min(8, current))
 }
 
 function findNeutralHotbarIndex(bot, blockedItemNames = []) {
@@ -6976,14 +7003,19 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   if (isMoving) {
     bot.setControlState('forward', false)
     bot.setControlState('sprint', false)
+    if (bot.entity?.velocity) {
+      bot.entity.velocity.x = 0
+      bot.entity.velocity.z = 0
+    }
   }
 
   try {
     await bot.clickWindow(source.slot, hotbarIndex, 2)
+    setSelectedHotbar(hotbarIndex)
+    if (fastSwap) return true
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
     if (!swapped) return false
-    setSelectedHotbar(hotbarIndex)
-    if (fastSwap && inventorySwapStableMs <= 0) return true
+    if (inventorySwapStableMs <= 0) return true
     return await waitForSelectedMaterialReady(bot, blockName, timeoutMs + inventorySwapStableMs, pollMs, inventorySwapStableMs)
   } catch (err) {
     return false
@@ -7008,11 +7040,11 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
   const sorted = [...freq.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name)
   const slots = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : []
 
-  const targetMaterials = sorted.slice(0, 8)
+  const targetMaterials = sorted.slice(0, 9)
   const targetSet = new Set(targetMaterials)
 
   const hotbarHas = new Set()
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 9; i++) {
     const stack = slots[36 + i]
     if (stack?.name && Number(stack.count) > 0) {
       hotbarHas.add(stack.name)
@@ -7027,7 +7059,7 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
     if (!source || source.slot < 9 || source.slot > 35) continue
 
     let destIndex = -1
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 9; i++) {
       const stack = bot.inventory.slots[36 + i]
       if (!stack || Number(stack.count) <= 0) {
         destIndex = i
@@ -7035,7 +7067,7 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
       }
     }
     if (destIndex < 0) {
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 9; i++) {
         const stack = bot.inventory.slots[36 + i]
         if (stack?.name && !targetSet.has(stack.name)) {
           destIndex = i
@@ -7053,10 +7085,10 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
     }
   }
 
-  // Fill any remaining hotbar slots (0-7) with backup stacks of the most frequent materials
+  // Fill any remaining hotbar slots (0-8) with backup stacks of the most frequent materials
   for (const mat of sorted) {
     let emptyIndex = -1
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 9; i++) {
       const stack = bot.inventory?.slots?.[36 + i]
       if (!stack || Number(stack.count) <= 0 || !targetSet.has(stack.name)) {
         emptyIndex = i
@@ -12425,9 +12457,11 @@ function foodChestTraversalNeeded(bot, config, options = {}) {
 }
 
 async function equipFoodItem(bot, foodItem) {
+  const offHand = bot.inventory?.slots?.[45]
+  if (offHand?.name === foodItem) return true
   const item = bot.inventory.items().find((entry) => entry.name === foodItem)
   if (!item) return false
-  await bot.equip(item, 'hand')
+  await bot.equip(item, 'off-hand')
   return true
 }
 
@@ -12442,7 +12476,13 @@ async function eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, rea
   for (let attempt = 1; attempt <= maxEats; attempt += 1) {
     if (!await equipFoodItem(bot, foodItem)) return false
     try {
-      await bot.consume()
+      if (typeof bot.activateItem === 'function') {
+        bot.activateItem(true)
+        await delay(1650)
+        if (typeof bot.deactivateItem === 'function') bot.deactivateItem()
+      } else {
+        await bot.consume()
+      }
     } catch (err) {
       // Mineflayer's consume promise can time out before a delayed server food
       // update arrives. Trust the authoritative hunger state rather than
@@ -17217,24 +17257,37 @@ async function prepareWorkloadBatchEntry(bot, config, batchTargets, startOnNorth
     `range=${entryRange} from=${before.x.toFixed(2)} ${before.y.toFixed(2)} ${before.z.toFixed(2)} ` +
     `distance=${beforeDistance.toFixed(2)}`
   )
-  try {
-    await gotoConfiguredAccess(
-      bot,
-      entry,
-      entry,
-      entryRange,
-      config,
-      'workload-batch-entry-return',
-      {
-        strict: false,
-        avoidLiquids: true,
-        allowVerifiedGaps: false
-      }
-    )
-  } catch (err) {
-    console.warn(`[NERV-WORKLOAD-ENTRY-WARN] Non-fatal entry return pathing error: ${err?.message || err}; continuing traversal from current position.`)
-    interruptPathfinder(bot)
-    stopBotMovement(bot)
+  if (beforeDistance <= 8.0) {
+    try {
+      await walkStraightToPointWithHardTimeout(
+        bot,
+        entry,
+        entryRange,
+        2500,
+        'workload-lateral-u-turn',
+        { config, sprint: true, jump: false, tickMs: Math.max(25, toNumber(advanced.straightCheckpointTickMs, 40)) }
+      )
+    } catch { }
+  } else {
+    try {
+      await gotoConfiguredAccess(
+        bot,
+        entry,
+        entry,
+        entryRange,
+        config,
+        'workload-batch-entry-return',
+        {
+          strict: false,
+          avoidLiquids: true,
+          allowVerifiedGaps: false
+        }
+      )
+    } catch (err) {
+      console.warn(`[NERV-WORKLOAD-ENTRY-WARN] Non-fatal entry return pathing error: ${err?.message || err}; continuing traversal from current position.`)
+      interruptPathfinder(bot)
+      stopBotMovement(bot)
+    }
   }
 
   const after = bot?.entity?.position
@@ -18016,7 +18069,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         goal: currentGoal ? `${currentGoal.x},${currentGoal.y},${currentGoal.z}` : 'none',
         pos: formatBotPosition(bot)
       }, { throttleKey: 'ping-placement-loop' })
-      const rawAllowed = placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : maxCatchup
+      const serverTps = bot.__nervServerTps || 20.0
+      // Scale burst limit dynamically with server TPS: 20 TPS -> 5 blocks/tick; <17 TPS -> 3 blocks/tick
+      const tpsBurstCap = serverTps >= 19.0 ? 5 : (serverTps < 17.0 ? 3 : (bot.__nervCurrentBurstCap || 4))
+      bot.__nervCurrentBurstCap = tpsBurstCap
+      const effectiveCatchup = Math.min(maxCatchup, tpsBurstCap)
+
+      const rawAllowed = placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : effectiveCatchup
 
       if (rawAllowed <= 0) {
         if (pollMs > 0) await delay(pollMs)
@@ -18026,7 +18085,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       lastTickTime = placeDelayMs > 0 ? lastTickTime + rawAllowed * placeDelayMs : now
       rawAllowedTotal += rawAllowed
-      const allowed = Math.min(rawAllowed, maxCatchup)
+      const allowed = Math.min(rawAllowed, effectiveCatchup)
       cappedTotal += Math.max(0, rawAllowed - allowed)
       maxAllowedSeen = Math.max(maxAllowedSeen, rawAllowed)
 
@@ -19897,6 +19956,7 @@ function createBot(config) {
     }
   })
   bot.once('login', () => applyInventoryStateSync(bot, config))
+  installRealTimeTpsTracker(bot)
   installVanillaSpeed(bot, config)
   installMovementDiagnostics(bot, { botName: config?.username })
 
@@ -21268,23 +21328,9 @@ function findNervScannerCandidate(bot, config, targetByXZ, currentGoal, processe
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
 
       const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? 10000 : 0
-      let isMovingSouth = bot?.__nervTraversalDirection === 'south'
-      let isMovingNorth = bot?.__nervTraversalDirection === 'north'
-      if (!isMovingSouth && !isMovingNorth && currentGoal && Number.isFinite(currentGoal.z)) {
-        isMovingSouth = currentGoal.z > botZ + 0.1
-        isMovingNorth = currentGoal.z < botZ - 0.1
-      }
-      let zRel = 0
-      if (isMovingSouth) {
-        zRel = target.position.z - Math.floor(botZ)
-      } else if (isMovingNorth) {
-        zRel = Math.floor(botZ) - target.position.z
-      }
-      // Strict forward row ordering: closest row ahead has highest priority,
-      // ensuring all columns of row N are placed before row N+1 can ever be placed.
-      // Eliminates skipping closer rows and dropping boundary/lane carpets.
-      const rowPriority = zRel >= 0 ? (1000 - zRel * 100) : 50
-      const priority = repairPriority + rowPriority - distance2
+      // Closest-first candidate selection: trailing blocks about to leave the 4.5m reach bubble
+      // have smallest distance2 and are placed with highest priority before sprinting away.
+      const priority = repairPriority - distance2
 
       if (priority > bestPriority) {
         // Only do blockAt for the current best candidate to skip expensive world reads
