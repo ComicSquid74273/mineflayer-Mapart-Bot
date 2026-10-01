@@ -1079,11 +1079,12 @@ function installVanillaSpeed(bot, config) {
     if (!isMoving) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
 
-    const maxSafeBps = 7.192
-    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, 7.123) : 7.123
+    const allowJump = config?.printer?.allowJump === true
+    const maxSafeBps = allowJump ? 7.192 : 5.612
+    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, maxSafeBps) : maxSafeBps
     const serverTps = bot.__nervServerTps || 20.0
     // Dynamic TPS speed throttling: scale down if server TPS falls below 17.0
-    const tpsSpeedLimit = serverTps >= 19.0 ? maxSafeBps : (serverTps < 14.0 ? 4.317 : 5.612)
+    const tpsSpeedLimit = serverTps >= 19.0 ? maxSafeBps : (serverTps < 14.0 ? 4.317 : 5.0)
     const effectiveBps = Math.min(targetBps, tpsSpeedLimit)
     const bps = Math.min(maxSafeBps, Math.max(1.0, effectiveBps))
     const targetPerTick = bps / 20.0
@@ -7011,6 +7012,15 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 
   try {
     await bot.clickWindow(source.slot, hotbarIndex, 2)
+    const destWindowSlot = getHotbarWindowSlot(hotbarIndex)
+    if (bot.inventory?.slots) {
+      const srcItem = bot.inventory.slots[source.slot]
+      const destItem = bot.inventory.slots[destWindowSlot]
+      bot.inventory.slots[destWindowSlot] = srcItem
+      bot.inventory.slots[source.slot] = destItem
+      if (srcItem) srcItem.slot = destWindowSlot
+      if (destItem) destItem.slot = source.slot
+    }
     setSelectedHotbar(hotbarIndex)
     if (fastSwap) return true
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
