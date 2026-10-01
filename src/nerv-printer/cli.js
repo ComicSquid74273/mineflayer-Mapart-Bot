@@ -18772,30 +18772,71 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           allowed
         )
 
-        // Goal lookahead: provision every material this burst needs so the burst
-        // runs hotbar-clean. Swaps are silent now, so staging here is free;
-        // deferring it to placeTarget costs a sprint stall per new colour.
-        if (burstTargets.length > 1) {
-          const staged = new Set()
-          for (let i = burstTargets.length - 1; i >= 0; i -= 1) {
-            const blockName = burstTargets[i]?.blockName
-            if (!blockName || staged.has(blockName)) continue
-            staged.add(blockName)
+        // Readiness gate: the burst never starts with insufficient material.
+        //
+        // This replaces a presence-only check ("is this colour in the hotbar?") which
+        // could not tell a full stack from a nearly empty one. A slot holding 3 of 64
+        // passed that check, drained mid-lane, and the next placement either skipped
+        // with held-item-desync or triggered a swap in the middle of the sprint. The
+        // live skip census is dominated by held-item-desync across nearly every colour,
+        // which is this failure rather than a placement bug.
+        //
+        // Nearest-first is preserved: a short colour makes the burst not-ready and the
+        // tick waits for replenishment. It is never spliced out in favour of a farther
+        // target that happens to be stocked -- printing out of order is how a lane ends
+        // up with holes in it.
+        const burstColors = []
+        for (const target of burstTargets) {
+          const blockName = target?.blockName
+          if (blockName && !burstColors.includes(blockName)) burstColors.push(blockName)
+        }
 
-            if (findHotbarIndexForItem(bot, blockName) >= 0) continue
+        if (burstColors.length > 0) {
+          const pendingReservation = new Map()
+          for (const [key, until] of pendingUntil.entries()) {
+            if (until <= now) continue
+            // Keys are "x:y:z"; targetByXZ is keyed "x:z".
+            const parts = key.split(':')
+            if (parts.length < 3) continue
+            const target = targetByXZ.get(`${parts[0]}:${parts[2]}`)
+            const blockName = target?.blockName
+            if (!blockName) continue
+            pendingReservation.set(blockName, (pendingReservation.get(blockName) || 0) + 1)
+          }
 
+          const availability = new Map()
+          const requiredByBlock = new Map()
+          for (const blockName of burstColors) {
+            let hotbar = 0
+            for (let index = 0; index < 9; index += 1) {
+              const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+              if (stack?.name === blockName) hotbar += getHotbarStackCount(bot, index)
+            }
+            const reserved = pendingReservation.get(blockName) || 0
+            availability.set(blockName, buildMaterialAvailability(hotbar, countInventoryItems(bot, blockName), reserved))
+            requiredByBlock.set(blockName, countUpcomingDemand(burstTargets, blockName))
+          }
+
+          const readiness = burstMaterialsReady(availability, requiredByBlock, burstTargets)
+
+          // Replenish whatever the burst cannot cover from what is already hotbar-resident.
+          for (const entry of readiness.missing) {
+            const blockName = entry.blockName
+            const residentIndex = findHotbarIndexForItem(bot, blockName)
             const source = findBestInventorySlotForItem(bot, blockName)
-            if (!source) {
-              // Out of stock entirely: drop it from the burst rather than
-              // triggering a mid-sprint emergency restock.
-              burstTargets.splice(i, 1)
-              staged.delete(blockName)
+
+            if (residentIndex >= 0 && source) {
+              // The slot already holds this colour, so top it up rather than swapping a
+              // different stack in: SWAP when the source can stand in wholesale, else
+              // merge, with the merge leftover returned to the source slot.
+              replenishHotbarSlot(bot, residentIndex, source.slot, blockName)
               continue
             }
+            if (!source) continue
 
             // Rank eviction against the burst itself, not the whole batch. Using the
-            // batch would let a colour the next placement needs be evicted in
-            // favour of one needed hundreds of targets later.
+            // batch would let a colour the next placement needs be evicted in favour of
+            // one needed hundreds of targets later.
             const destIndex = chooseMaterialHotbarIndex(bot, blockName, burstTargets)
             if (destIndex >= 0 && destIndex <= 8 && source.slot !== getHotbarWindowSlot(destIndex)) {
               silentHotbarSwap(bot, source.slot, destIndex)

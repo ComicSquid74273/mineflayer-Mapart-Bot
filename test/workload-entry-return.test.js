@@ -203,14 +203,39 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   // One call per tick, not one per placement slot.
   assert.equal((loop.match(/collectNervScannerCandidates\(/g) || []).length, 1)
 
-  // The burst provisions every material it needs rather than deferring the swap
-  // to placeTarget, which stalled the sprint once per new colour.
-  assert.match(loop, /Goal lookahead: provision every material this burst needs/)
+  // The burst is gated on quantity before it places anything. A presence-only check
+  // ("is this colour in the hotbar?") cannot tell a full stack from a nearly empty
+  // one, so a 3-of-64 slot passed, drained mid-lane, and the next placement skipped
+  // with held-item-desync -- the dominant skip reason in the live log, across nearly
+  // every colour. Readiness must compare usable quantity against burst demand.
+  assert.match(loop, /Readiness gate: the burst never starts with insufficient material/)
+  assert.match(loop, /const readiness = burstMaterialsReady\(availability, requiredByBlock, burstTargets\)/)
+  assert.match(loop, /buildMaterialAvailability\(hotbar, countInventoryItems\(bot, blockName\), reserved\)/)
+  assert.match(loop, /replenishHotbarSlot\(bot, residentIndex, source\.slot, blockName\)/)
   assert.match(loop, /silentHotbarSwap\(bot, source\.slot, destIndex\)/)
   // Eviction must rank against the burst, not the whole 640-target batch,
   // otherwise a colour the next placement needs is evicted for a later one.
   assert.match(loop, /chooseMaterialHotbarIndex\(bot, blockName, burstTargets\)/)
   assert.doesNotMatch(loop, /if \(countInventoryItems\(bot, blockName\) > 0\) continue/)
+
+  // Nearest-first must hold: a short colour blocks the burst, it is never spliced out
+  // so a farther, stocked target can take its place. Printing out of order is how a
+  // lane ends up with holes.
+  assert.doesNotMatch(loop, /burstTargets\.splice/)
+  assert.doesNotMatch(loop, /if \(findHotbarIndexForItem\(bot, blockName\) >= 0\) continue/)
+})
+
+test('the burst gate re-reads stock rather than trusting a one-shot check', () => {
+  // The availability map must be rebuilt from live slot contents each tick. Caching it
+  // across ticks is how a burst ends up committing against stock a previous tick spent.
+  const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
+  const loop = source.slice(loopStart, loopStart + 14000)
+
+  assert.match(loop, /const availability = new Map\(\)/)
+  assert.match(loop, /for \(let index = 0; index < 9; index \+= 1\) \{/)
+  assert.match(loop, /getHotbarStackCount\(bot, index\)/)
+  // Reservations come from placements already sent but not yet settled.
+  assert.match(loop, /pendingReservation\.get\(blockName\) \|\| 0/)
 })
 
 test('fast placement sends no delta and never forces a look', () => {
