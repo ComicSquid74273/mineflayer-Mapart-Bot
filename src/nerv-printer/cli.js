@@ -5819,6 +5819,13 @@ function createDefaultConfig() {
       // echo before the scan may re-offer the cell. Roughly 1.5x RTT; a
       // shorter value re-sends packets the server is still processing.
       scannerEchoRetryMs: 250,
+      // Blocks before the lane end where the turn starts: with reach 5, turning
+      // 3 rows early keeps the tail rows printable through the lateral leg.
+      workloadTurnEarlyBlocks: 3,
+      // Hold-back for AHEAD-of-travel candidates: at sprint speed the server's
+      // view of the bot lags ~1 block, so a send at the forward edge of reach
+      // lands out of server reach and is dropped. 0 disables the margin.
+      scannerForwardEdgeMargin: 0.5,
       scannerPlaceConfirmMs: 80,
       scannerPlaceConfirmPollMs: 15,
       workloadCheckpointMoveTimeoutMs: 30000,
@@ -7053,6 +7060,25 @@ function runProactiveHotbarMaintenance(bot, config, batchTargets, seen) {
     if (demand <= stackSize) continue
     const holders = findHotbarIndexesForItem(bot, blockName)
     if (holders.length >= 2) continue
+
+    // Merge-sufficiency: if topping up the existing stack covers the remaining
+    // demand, the threshold-refill path above will handle it and a second slot
+    // is pure churn (stage -> merge collapses it -> stage again; that loop ran
+    // 32 wasted actions on the dominant colour in one observed band).
+    let hotbarCount = 0
+    let fullest = 0
+    const slotsForCount = bot.inventory.slots
+    for (let index = 0; index < 9; index += 1) {
+      const stack = slotsForCount[getHotbarWindowSlot(index)]
+      if (stack?.name !== blockName) continue
+      const count = Math.max(0, toNumber(stack.count, 0))
+      hotbarCount += count
+      fullest = Math.max(fullest, count)
+    }
+    const mainOnly = Math.max(0, countInventoryItems(bot, blockName) - hotbarCount)
+    const mergeCeiling = Math.min(stackSize, fullest + mainOnly) + Math.max(0, hotbarCount - fullest)
+    if (mergeCeiling >= demand) continue
+
     const source = findBestInventorySlotForItem(bot, blockName)
     if (!source || (source.slot >= 36 && source.slot <= 44)) continue
 
@@ -17981,7 +18007,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
   return { placed, already, skipped, processed: batchTargets.length - missing }
 }
 
-function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0) {
+function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0, options = {}) {
   const orderedCols = [...new Set(batchTargets.map((target) => target.col))]
   const walkColIndex = Math.floor((orderedCols.length - 1) / 2)
   const walkCol = orderedCols[walkColIndex]
@@ -17991,13 +18017,21 @@ function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0) 
   const minZ = Math.min(...batchTargets.map((target) => target.position.z))
   const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
   const activeCols = new Set(batchTargets.map((target) => target.col))
-  // Offset entry by 0.5 blocks before start row so the first carpet is in front of the bot
-  // (> minPlaceDistance 0.8) and placed under forward gaze without hitbox collision.
-  // Extend exit by 0.5 blocks past end row so the final carpet is fully placed before turn.
-  const northPos = { x: walkX + 0.5, y: walkY, z: minZ + 0.5 }
-  const southPos = { x: walkX + 0.5, y: walkY, z: maxZ + 0.5 }
-  const entryPos = startOnNorthSide ? northPos : southPos
-  const exitPos = startOnNorthSide ? southPos : northPos
+  const turnEarlyBlocks = Math.max(0, toNumber(options.turnEarlyBlocks, 0))
+  // Directional standpoints. The entry is one block BEFORE the first row in
+  // travel direction, so no first-row carpet ever starts under the bot's feet
+  // (the old +0.5 stood ON the row and produced the below-the-leg attempts).
+  // The exit is one block PAST the last row, pulled back by the early-turn
+  // budget: with reach 5 the tail rows stay printable through the whole
+  // lateral leg, so the bot never walks the lane to its very end.
+  const northStandZ = minZ - 0.5
+  const southStandZ = maxZ + 0.5
+  const entryPos = { x: walkX + 0.5, y: walkY, z: startOnNorthSide ? northStandZ : southStandZ }
+  const exitPos = {
+    x: walkX + 0.5,
+    y: walkY,
+    z: startOnNorthSide ? southStandZ - turnEarlyBlocks : northStandZ + turnEarlyBlocks
+  }
 
   if (segmentSize <= 0 || maxZ - minZ <= segmentSize) {
     return [
@@ -18329,11 +18363,35 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const inlineSegmentBlocks = inlineRepairEnabled
     ? Math.max(2, toNumber(advanced.inlineRepairSegmentBlocks, Math.max(2, placeRange - 1)))
     : 0
-  const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks)
+  const turnEarlyBlocks = Math.max(0, toNumber(advanced.workloadTurnEarlyBlocks, 0))
+  const checkpoints = buildNervUCheckpoints(batchTargets, startOnNorthSide, inlineSegmentBlocks, { turnEarlyBlocks })
   const batchMinZ = Math.min(...batchTargets.map((target) => target.position.z))
   const batchMaxZ = Math.max(...batchTargets.map((target) => target.position.z))
 
   const targetByXZ = new Map(batchTargets.map((target) => [`${target.position.x}:${target.position.z}`, target]))
+  // Continuous-turn printing: during the 'uTurn' leg the scan may also offer the
+  // next band's head-row cells that come into reach, so the turn itself prints
+  // instead of being dead traversal. Bonus cells are opportunistic only -- the
+  // next band's own entry drain guarantees its head rows regardless of stock.
+  const uTurnLeg = Array.isArray(options.uTurnTargets) && options.uTurnTargets.length > 0
+    ? options.uTurnTargets
+    : null
+  if (uTurnLeg) {
+    const bonusCols = new Set()
+    for (const target of uTurnLeg) {
+      if (!target?.blockName || !Number.isFinite(target.position?.x)) continue
+      targetByXZ.set(`${target.position.x}:${target.position.z}`, target)
+      bonusCols.add(target.col)
+    }
+    if (bonusCols.size > 0 && options.uTurnPosition) {
+      const turnCols = new Set([...checkpoints[checkpoints.length - 1].activeCols, ...bonusCols])
+      checkpoints.push({
+        position: options.uTurnPosition,
+        action: 'uTurn',
+        activeCols: turnCols
+      })
+    }
+  }
   bot.__nervActiveBatchTargets = batchTargets
   bot.__nervTraversalDirection = startOnNorthSide ? 'south' : 'north'
   let active = true
@@ -18354,9 +18412,23 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let prevCheckpointPos = null
   let latencySafeInterrupted = false
   let latencySafeSeen = 0
+  let lastPlatformPauseLogAt = 0
+  // Per-band phase timings for [LANE-PHASE]: where the wall-clock actually goes.
+  let laneWalkMs = 0
+  let lineEndDrainMs = 0
+  let backtrackMs = 0
+  let lineEndRepairMs = 0
+  let unresolvedInCount = 0
+  let unresolvedOutCount = 0
+  let laneWalkTotalMs = 0
+  let traversalSlowTicks = 0
   const seen = new Set()
   const stallSkipped = new Set()
   const pendingUntil = new Map()
+  // Per-target send counts: a cell sent twice whose echo window has expired is
+  // an EXHAUSTED retry -- the signal for the traversal slow-down and for the
+  // miss-recovery test. Echo lag (one send, window still open) is not a miss.
+  const sendCounts = new Map()
   const retryPriority = new Set()
   const repairAlerts = new Map()
   const inventoryDesyncHits = new Map()
@@ -18519,6 +18591,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const markTargetPlacedInWorld = (target, key = getTargetKey(target)) => {
     seen.add(key)
     pendingUntil.delete(key)
+    sendCounts.delete(key)
     inventoryDesyncHits.delete(`${target.blockName}:${key}`)
     clearRepairAlert(key)
     noteWorldPlacementProgress()
@@ -18859,6 +18932,21 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         if (!checkpointMoveInProgress) {
           await waitForWorkloadPlatformReady('workload-placement-loop')
         } else {
+          // This branch previously parked SILENTLY for as long as readiness
+          // stayed false -- the only code path that could stop walk+placement
+          // with zero log lines (one band froze 9 minutes this way). Say why,
+          // throttled, so the next freeze names itself.
+          if (Date.now() - lastPlatformPauseLogAt > 2000) {
+            lastPlatformPauseLogAt = Date.now()
+            const runtime = getWorkloadRuntime('workload-placement-loop-paused')
+            console.log(
+              `[WORKLOAD-PLACEMENT-PAUSED] action=${currentAction || 'place'} ` +
+              `state=${runtime?.classification?.state || 'unknown'} ` +
+              `platform=${runtime?.classification?.platform === true} ` +
+              `elevation=${isMachineElevationReady(bot, config)} ` +
+              `worldChangePending=${hasPendingRuntimeWorldChange(bot, config)}`
+            )
+          }
           lastTickTime = Date.now()
           await delay(Math.max(250, pollMs || 0))
         }
@@ -18892,6 +18980,30 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         console.log(`[HOTBAR-PROACTIVE] ${proactiveResult.action} ${proactiveResult.blockName}`)
       }
 
+      // Adaptive slow-down (wires the previously dead scannerAdaptive* config):
+      // a cell sent twice with an expired echo window and still no world echo is
+      // an exhausted retry -- the server is dropping our packets faster than the
+      // sprint carries us past them. Walk until the backlog clears so the
+      // retrying cells stay in reach; resume the requested sprint afterwards.
+      if (advanced.scannerAdaptiveSlowdown === true) {
+        let retryBacklog = 0
+        for (const [pendingKey, until] of pendingUntil.entries()) {
+          if (until > now) continue
+          if ((sendCounts.get(pendingKey) || 0) >= 2) retryBacklog += 1
+        }
+        const slowNow = retryBacklog > 0
+        if (slowNow !== (bot.__nervTraversalSlow === true)) {
+          bot.__nervTraversalSlow = slowNow
+          if (slowNow) traversalSlowTicks += 1
+          if (placementNoiseLogsEnabled(config)) {
+            console.log(`[TRAVERSAL-SLOW] ${slowNow ? 'engaged' : 'released'} retryBacklog=${retryBacklog}`)
+          }
+          try {
+            bot.setControlState('sprint', bot.__nervTraversalWantSprint === true && !slowNow)
+          } catch { }
+        }
+      }
+
       const rawAllowed = placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : effectiveCatchup
 
       if (rawAllowed <= 0) {
@@ -18906,7 +19018,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       cappedTotal += Math.max(0, rawAllowed - allowed)
       maxAllowedSeen = Math.max(maxAllowedSeen, rawAllowed)
 
-      const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint' || currentAction === 'inline-repair'
+      const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint' || currentAction === 'inline-repair' || currentAction === 'uTurn'
       if (allowPlacement) {
         const burstExcluded = new Set([...seen, ...stallSkipped])
         for (const [key, until] of pendingUntil.entries()) {
@@ -19041,6 +19153,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const echoRetryMs = Math.max(50, toNumber(advanced.scannerEchoRetryMs, 250))
               const existingUntil = pendingUntil.get(key) || 0
               pendingUntil.set(key, Math.max(existingUntil, Date.now() + echoRetryMs))
+              sendCounts.set(key, (sendCounts.get(key) || 0) + 1)
             } else if (result.state === 'already') {
               already += 1
               markTargetPlacedInWorld(target, key)
@@ -19066,6 +19179,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 inventoryDesyncHits.delete(`${target.blockName}:${key}`)
               } else {
                 const haveNow = countInventoryItems(bot, target.blockName)
+                // Bonus head-row cells offered during the uTurn leg may belong to
+                // colours the next band stages AFTER arrival: never let an
+                // opportunistic bonus cell trigger a mid-turn emergency stop.
+                if (currentAction === 'uTurn') {
+                  pendingUntil.set(key, Date.now() + optimisticRetryMs)
+                  continue
+                }
                 if (allowEmergencyRestock && haveNow <= 0) {
                   hardStops += 1
                   emergencyRestockBlock = target.blockName
@@ -19139,12 +19259,33 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           const echoRetryMs = Math.max(50, toNumber(advanced.scannerEchoRetryMs, 250))
           const existingUntil = pendingUntil.get(key) || 0
           pendingUntil.set(key, Math.max(existingUntil, Date.now() + echoRetryMs))
+          sendCounts.set(key, (sendCounts.get(key) || 0) + 1)
         }
       } catch { }
     }
     return placedCount
   }
 
+  // Edge awareness: count world-absent cells in the band's first/last rows.
+  // Awareness only -- no repair trigger. `rows` are the distinct z values.
+  const logLaneEdgeVerify = (edge) => {
+    try {
+      const rowSet = [...new Set(batchTargets.map((target) => target.position.z))].sort((a, b) => a - b)
+      const edgeRows = new Set(edge === 'entry' ? rowSet.slice(0, 6) : rowSet.slice(-6))
+      let absent = 0
+      let checked = 0
+      const Vec3Edge = bot.entity.position.constructor
+      for (const target of batchTargets) {
+        if (!edgeRows.has(target.position.z)) continue
+        checked += 1
+        const actual = bot.blockAt(new Vec3Edge(target.position.x, target.position.y, target.position.z))
+        if (actual?.name !== target.blockName) absent += 1
+      }
+      console.log(`[LANE-EDGE-VERIFY] edge=${edge} rows=${edgeRows.size} checked=${checked} absent=${absent}`)
+    } catch { }
+  }
+
+  const traversalStartAt = Date.now()
   try {
     // Actively place entrance boundary row targets while stationary before forward movement starts
     await placeReachableActiveTargets(40)
@@ -19162,7 +19303,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         const sprintMode = String(printer.sprintMode || 'notPlacing').toLowerCase()
         const repairSprint = advanced.repairSprintMode === 'true' || advanced.repairSprintMode === true
         const shouldSprint = sprintMode === 'always' || (sprintMode !== 'off' && (currentAction === 'sprint' || (repairSprint && currentAction === 'inline-repair')))
-        bot.setControlState('sprint', shouldSprint)
+        // Adaptive slow-down: while the placement loop reports exhausted
+        // in-flight retries, walk instead of sprint so the retrying cells do
+        // not slip out of reach behind us. The placement loop re-toggles
+        // sprint mid-walk when the backlog clears.
+        bot.__nervTraversalWantSprint = shouldSprint
+        bot.setControlState('sprint', shouldSprint && bot.__nervTraversalSlow !== true)
         const beforeMove = bot.entity.position
         checkpointMoveTimeoutMs = getWorkloadCheckpointMoveTimeoutMs(
           distanceToPoint(beforeMove, checkpoint.position),
@@ -19259,8 +19405,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       if ((checkpoint === checkpoints[0] || checkpoint.action === '') && !emergencyRestockBlock) {
         // Actively place entrance boundary row targets while stationary before forward sprint starts
+        const entryDrainStartAt = Date.now()
         await placeReachableActiveTargets(40)
         await drainActiveColumnTargets(150)
+        lineEndDrainMs += Date.now() - entryDrainStartAt
+        logLaneEdgeVerify('entry')
       }
 
       if (checkpoint.action === 'inline-repair' && !emergencyRestockBlock) {
@@ -19269,16 +19418,27 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       if (checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
         // Actively place any remaining exit boundary row targets while stationary before settle
+        const exitDrainStartAt = Date.now()
         await placeReachableActiveTargets(40)
         await drainActiveColumnTargets(Math.max(400, lineEndSettleMs))
+        lineEndDrainMs += Date.now() - exitDrainStartAt
+        logLaneEdgeVerify('exit')
       }
 
       if (missRecoveryEnabled && !emergencyRestockBlock && prevCheckpointPos) {
+        const backtrackStartAt = Date.now()
         const Vec3Miss = bot.entity.position.constructor
         const missedInCols = batchTargets.filter((target) => {
           if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) return false
           const key = getTargetKey(target)
           if (seen.has(key) || stallSkipped.has(key)) return false
+          // Only EXHAUSTED retries count as misses: sent at least twice, echo
+          // window expired, world still disagrees. A cell whose echo simply has
+          // not arrived yet is lag, and treating it as a miss made the recovery
+          // sneak-back fire on healthy lanes.
+          if ((sendCounts.get(key) || 0) < 2) return false
+          const pendingExpiry = pendingUntil.get(key)
+          if (pendingExpiry !== undefined && pendingExpiry > Date.now()) return false
           const actual = bot.blockAt(new Vec3Miss(target.position.x, target.position.y, target.position.z))
           return actual?.name !== target.blockName
         })
@@ -19337,6 +19497,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             const actual = bot.blockAt(new Vec3Miss(target.position.x, target.position.y, target.position.z))
             return actual?.name !== target.blockName
           })
+          unresolvedInCount += missedInCols.length
+          unresolvedOutCount += stillMissed.length
 
           if (stillMissed.length > 0) {
             console.log(`[NERV-WORKLOAD-MISS-RECOVERY] ${stillMissed.length} still unresolved after backtrack; running targeted repair.`)
@@ -19353,6 +19515,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             }
           }
         }
+        backtrackMs += Date.now() - backtrackStartAt
       }
 
       prevCheckpointPos = { x: checkpoint.position.x, y: checkpoint.position.y, z: checkpoint.position.z }
@@ -19361,6 +19524,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         const rowErrors = getUnresolvedTargetsForActiveCols(currentActiveCols)
         if (rowErrors.length > 0) {
           const previousAction = currentAction
+          const lineEndRepairStartAt = Date.now()
           currentAction = 'lineEnd-repair'
           try {
             console.log(`[NERV-WORKLOAD-LINEEND-REPAIR] unresolved=${rowErrors.length}; repairing before next traversal leg.`)
@@ -19380,6 +19544,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           } finally {
             currentAction = previousAction
             lastTickTime = Date.now()
+            lineEndRepairMs += Date.now() - lineEndRepairStartAt
           }
         }
       }
@@ -19388,7 +19553,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     active = false
     delete bot.__nervActiveBatchTargets
     delete bot.__nervTraversalDirection
+    delete bot.__nervTraversalSlow
+    delete bot.__nervTraversalWantSprint
     await placementLoop
+    laneWalkTotalMs = Date.now() - traversalStartAt
   }
 
   if (latencySafeInterrupted) {
@@ -19458,6 +19626,21 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
 
   const Vec3 = bot.entity.position.constructor
+
+  // Per-band phase accounting: where the wall-clock went. One freeze cost 10
+  // minutes with zero diagnostics because nothing timed these phases.
+  {
+    let retriesTotal = 0
+    for (const count of sendCounts.values()) retriesTotal += Math.max(0, count - 1)
+    const totalMs = lineEndDrainMs + backtrackMs + lineEndRepairMs
+    console.log(
+      `[LANE-PHASE] targets=${batchTargets.length} placed=${placed} retries=${retriesTotal} ` +
+      `walkMs=${Math.max(0, laneWalkTotalMs - totalMs)} drainMs=${lineEndDrainMs} ` +
+      `backtrackMs=${backtrackMs} repairMs=${lineEndRepairMs} ` +
+      `unresolvedIn=${unresolvedInCount} unresolvedOut=${unresolvedOutCount} ` +
+      `slowTicks=${traversalSlowTicks}`
+    )
+  }
 
   // Report what the world actually shows, not what the ledger claims. The ledger
   // is an optimistic record of accepted packets; the world is the only evidence
@@ -20522,11 +20705,37 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       const useLitematicRowMode = isLitematicBandMode
 
       if (useLitematicRowMode) {
+        // Continuous-turn setup: hand the batch the NEXT band's entry point and
+        // the head-row cells that come into reach during the lateral leg, so the
+        // U-turn prints instead of being dead traversal.
+        const batchOptions = { windowTargets: inventoryWindow.targets }
+        const linesPerRunCount = Math.max(1, toNumber(linesPerRun, 1))
+        const nextColBatch = inventoryCols.slice(j + linesPerRunCount, j + 2 * linesPerRunCount)
+        if (nextColBatch.length > 0) {
+          const nextStartOnNorth = !batchStartOnNorthSide
+          const nextRowOrder = nextStartOnNorth ? sortedRowsAsc : [...sortedRowsAsc].reverse()
+          const nextBatchTargets = []
+          for (const row of nextRowOrder) {
+            for (const col of nextColBatch) {
+              const target = byColRow.get(`${col}:${row}`)
+              if (target) nextBatchTargets.push(target)
+            }
+          }
+          const nextEntry = buildNervUCheckpoints(nextBatchTargets, nextStartOnNorth)[0]?.position
+          if (nextEntry) {
+            // Head rows: the rows at the shared-turn side, within reach of the
+            // whole lateral leg.
+            const headSideZ = nextStartOnNorth ? Math.max(...nextBatchTargets.map((t) => t.position.z)) : Math.min(...nextBatchTargets.map((t) => t.position.z))
+            const placeRangeForHead = Math.max(1, toNumber(printer.placeRange, 5))
+            batchOptions.uTurnPosition = nextEntry
+            batchOptions.uTurnTargets = nextBatchTargets.filter((target) => Math.abs(target.position.z - headSideZ) < placeRangeForHead)
+          }
+        }
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
         await ensureFoodBeforeTraversal(bot, config, `litematic-batch cols=${colBatch.join(',')}`)
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
         await prepareHotbarForBatch(bot, config, batchTargets)
-        const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide, true, { windowTargets: inventoryWindow.targets })
+        const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide, true, batchOptions)
         placed += result.placed
         already += result.already
         skipped += result.skipped
@@ -22392,6 +22601,35 @@ function collectNervScannerCandidates(bot, config, targetByXZ, currentGoal, proc
       const ddz = botZ - tz
       const distance2 = ddx * ddx + ddy * ddy + ddz * ddz
       if (distance2 > placeRange2 || distance2 <= minPlaceDistance2) continue
+
+      // Meteor rule (Printer.java:234-235): never offer a cell that overlaps the
+      // player's own bounding box -- that is the below-the-leg placement. The
+      // box moves with the bot, so this holds at any height: on the entry slab,
+      // mid step-hop, one block up, or jumping.
+      const playerHeight = toNumber(bot.entity?.height, 1.8)
+      if (
+        botX - 0.3 < target.position.x + 1 && botX + 0.3 > target.position.x &&
+        botZ - 0.3 < target.position.z + 1 && botZ + 0.3 > target.position.z &&
+        botY < target.position.y + 1 && botY + playerHeight > target.position.y
+      ) continue
+
+      // Forward-edge margin: at sprint speed the server's view of the bot lags
+      // ~1 block behind ours, so a send at 4.5-5.0 blocks AHEAD lands out of
+      // server reach and is silently dropped (measured: median retry distance
+      // 4.70, p75 4.86). Such a cell is offered again a tick or two later when
+      // it is closer, so holding it costs nothing; sending it wastes a packet
+      // and feeds the retry storm.
+      const forwardEdgeMargin = Math.max(0, toNumber(config.advanced?.scannerForwardEdgeMargin, 0.5))
+      if (forwardEdgeMargin > 0) {
+        const travelDir = bot?.__nervTraversalDirection === 'south' ? 1 : (bot?.__nervTraversalDirection === 'north' ? -1 : 0)
+        if (travelDir !== 0) {
+          const aheadBlocks = (target.position.z + 0.5 - botZ) * travelDir
+          if (aheadBlocks > 0) {
+            const aheadRange = Math.max(1, placeRange - forwardEdgeMargin)
+            if (distance2 > aheadRange * aheadRange) continue
+          }
+        }
+      }
 
       let isMovingSouth = bot?.__nervTraversalDirection === 'south'
       let isMovingNorth = bot?.__nervTraversalDirection === 'north'
