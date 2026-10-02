@@ -228,6 +228,16 @@ function sendSneakRelease(bot) {
 // block_changed_ack cannot grow the ledger unbounded.
 const PLACEMENT_LEDGER_LIMIT = 128
 
+// protocol direction -> offset of the PLACED cell from the clicked block.
+const BLOCK_PLACE_FACE_DELTAS = [
+  [0, -1, 0],
+  [0, 1, 0],
+  [0, 0, -1],
+  [0, 0, 1],
+  [-1, 0, 0],
+  [1, 0, 0]
+]
+
 function installBlockInteractionGuard(bot) {
   const client = bot?._client
   if (!client || typeof client.write !== 'function' || typeof bot?.activateBlock !== 'function') return null
@@ -264,7 +274,11 @@ function installBlockInteractionGuard(bot) {
       state.sentInteractions += 1
       state.lastSequence = sequence
       if (name === 'block_place' && packet.location && Number.isFinite(Number(packet.location.x))) {
-        placementTargets.set(sequence, `${Math.floor(packet.location.x)}:${Math.floor(packet.location.y)}:${Math.floor(packet.location.z)}`)
+        // The packet's location is the block CLICKED (the support under a
+        // carpet); the placed cell is that position offset by the face.
+        // Ledger the placed cell -- that is the key the batch parks.
+        const face = BLOCK_PLACE_FACE_DELTAS[Math.trunc(Number(packet.direction))] || [0, 0, 0]
+        placementTargets.set(sequence, `${Math.floor(packet.location.x) + face[0]}:${Math.floor(packet.location.y) + face[1]}:${Math.floor(packet.location.z) + face[2]}`)
         while (placementTargets.size > PLACEMENT_LEDGER_LIMIT) {
           placementTargets.delete(placementTargets.keys().next().value)
         }

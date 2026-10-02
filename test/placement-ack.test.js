@@ -27,10 +27,15 @@ test('the sequence guard ledgers block_place positions for ack correlation', () 
   assert.ok(guard?.placementLedger, 'guard must expose the placement ledger')
 
   // Sequences start at 2, matching the reference addon's session high-water mark.
-  bot._client.write('block_place', { location: { x: 10, y: 64, z: -5 }, sequence: 0 })
-  assert.equal(guard.placementLedger.take(2), '10:64:-5')
+  // direction 1 = top face: the carpet lands one above the clicked support.
+  bot._client.write('block_place', { location: { x: 10, y: 64, z: -5 }, direction: 1, sequence: 0 })
+  assert.equal(guard.placementLedger.take(2), '10:65:-5', 'the ledger key is the placed cell, not the clicked block')
   assert.equal(guard.placementLedger.take(2), undefined, 'take consumes the entry')
   assert.equal(guard.state.nextSequence, 3)
+
+  // direction 0 = bottom face: placed cell one below.
+  bot._client.write('block_place', { location: { x: 10, y: 64, z: -5 }, direction: 0, sequence: 0 })
+  assert.equal(guard.placementLedger.take(3), '10:63:-5')
 
   // use_item carries a sequence but no placed position: never ledgered.
   bot._client.write('use_item', { sequence: 0 })
