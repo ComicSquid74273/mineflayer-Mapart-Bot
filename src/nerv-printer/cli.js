@@ -19447,6 +19447,36 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 burstTargets.push(cell.target)
                 planEmittedThisTick += 1
               }
+              // Catch-up pass: schedule-tied emission is break-even by
+              // construction (slowing down slows emission equally), so spare
+              // per-tick capacity prints AHEAD of schedule -- any unsent
+              // in-reach cell, closest first. The buffer this builds absorbs
+              // sprint spikes instead of letting debt pile into repair.
+              if (burstTargets.length < allowed && planEmittedThisTick < perTickCap) {
+                const ahead = []
+                for (const cell of bandPlan.cells) {
+                  if (burstExcluded.has(cell.key) || seen.has(cell.key)) continue
+                  const tp = cell.target.position
+                  const dx = bot.entity.position.x - (tp.x + 0.5)
+                  const dy = eyeY - (tp.y + 0.5)
+                  const dz = bot.entity.position.z - (tp.z + 0.5)
+                  const d2 = dx * dx + dy * dy + dz * dz
+                  if (d2 > liveReach2) continue
+                  ahead.push({ cell, d2 })
+                }
+                ahead.sort((l, r) => l.d2 - r.d2)
+                for (const { cell } of ahead) {
+                  if (burstTargets.length >= allowed || planEmittedThisTick >= perTickCap) break
+                  const Vec3Plan = bot.entity.position.constructor
+                  const actual = bot.blockAt(new Vec3Plan(cell.target.position.x, cell.target.position.y, cell.target.position.z))
+                  if (actual?.name === cell.target.blockName) {
+                    markTargetPlacedInWorld(cell.target, cell.key)
+                    continue
+                  }
+                  burstTargets.push(cell.target)
+                  planEmittedThisTick += 1
+                }
+              }
             }
           } catch (planErr) {
             console.log(`[BAND-PLAN-ERR] ${planErr?.message || planErr} -- disabling plan for this band`)
