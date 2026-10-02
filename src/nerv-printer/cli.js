@@ -5870,10 +5870,6 @@ function createDefaultConfig() {
       // re-offer cooldown for cells the server judged rejected.
       ackSettleDelayMs: 75,
       ackRejectCooldownMs: 250,
-      // Rate-ladder probe (one band per process): async control, then aligned
-      // 5/3/2/1 placements per physics tick. Off unless explicitly enabled.
-      placementRateProbe: false,
-      placementRateProbeSegmentMs: 10000,
       // Blocks before the lane end where the turn starts: with reach 5, turning
       // 3 rows early keeps the tail rows printable through the lateral leg.
       workloadTurnEarlyBlocks: 3,
@@ -18774,83 +18770,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     retryPriority.add(key)
   }
   if (ackTracker) ackTracker.settlers.add(handleAckSettle)
-
-  // Rate-ladder probe: overrides ONLY the per-wake allowance so one band
-  // measures where 6b6t's acks stop tracking sends. Aligned segments emit
-  // their quota from the physicsTick event window (packet order becomes
-  // [block_place ... position], the vanilla wire order); the async segment
-  // reproduces today's gate unchanged as the control. Each segment logs the
-  // moment it ends -- during traversal, before any lane repair could mask it.
-  let probe = null
-  if (advanced.placementRateProbe === true && allowEmergencyRestock === true && bot.__nervRateProbeDone !== true) {
-    bot.__nervRateProbeDone = true
-    const tickListener = () => {
-      if (probe) probe.tickIndex += 1
-    }
-    bot.on('physicsTick', tickListener)
-    probe = {
-      segments: [
-        { mode: 'async', perTick: 0, label: 'async-control' },
-        { mode: 'aligned', perTick: 5, label: 'aligned-5pt' },
-        { mode: 'aligned', perTick: 3, label: 'aligned-3pt' },
-        { mode: 'aligned', perTick: 2, label: 'aligned-2pt' },
-        { mode: 'aligned', perTick: 1, label: 'aligned-1pt' }
-      ],
-      segMs: Math.max(2000, toNumber(advanced.placementRateProbeSegmentMs, 10000)),
-      idx: 0,
-      startedAt: Date.now(),
-      sends: 0,
-      acksAtSegStart: null,
-      okAtSegStart: 0,
-      rejectAtSegStart: 0,
-      tickIndex: 0,
-      lastTickIndex: -1,
-      sentThisTick: 0,
-      tickListener
-    }
-  }
-  const stopRateProbe = (reason) => {
-    if (!probe) return
-    console.log(`[RATE-PROBE] ${reason} at seg=${probe.idx + 1}/${probe.segments.length} sends=${probe.sends}`)
-    bot.removeListener('physicsTick', probe.tickListener)
-    probe = null
-  }
-  // Returns: null -> fall through to the normal gate (async control segment or
-  // probe inactive), 0 -> quota used this tick, N -> aligned allowance.
-  const probeAllowance = () => {
-    if (!probe) return null
-    const nowMs = Date.now()
-    if (nowMs - probe.startedAt >= probe.segMs) {
-      const statsNow = ackTracker ? ackTracker.stats : null
-      console.log(
-        `[RATE-PROBE] seg=${probe.idx + 1}/${probe.segments.length} mode=${probe.segments[probe.idx].label} ` +
-        `sends=${probe.sends} ` +
-        `acks=${statsNow && probe.acksAtSegStart ? statsNow.acks - probe.acksAtSegStart.acks : 'na'} ` +
-        `ackOk=${ackSettleConfirmed - probe.okAtSegStart} ` +
-        `ackReject=${ackSettleRejected - probe.rejectAtSegStart} ` +
-        `durMs=${nowMs - probe.startedAt}`
-      )
-      probe.idx += 1
-      if (probe.idx >= probe.segments.length) {
-        stopRateProbe('schedule-complete; normal emission resumed')
-        return null
-      }
-      probe.startedAt = nowMs
-      probe.sends = 0
-      probe.acksAtSegStart = ackTracker ? { ...ackTracker.stats } : null
-      probe.okAtSegStart = ackSettleConfirmed
-      probe.rejectAtSegStart = ackSettleRejected
-      probe.lastTickIndex = probe.tickIndex
-      probe.sentThisTick = 0
-    }
-    const seg = probe.segments[probe.idx]
-    if (seg.mode === 'async') return null
-    if (probe.tickIndex !== probe.lastTickIndex) {
-      probe.lastTickIndex = probe.tickIndex
-      probe.sentThisTick = 0
-    }
-    return Math.max(0, seg.perTick - probe.sentThisTick)
-  }
   const getTargetWorldBlock = (target) => {
     const Vec3Target = bot.entity.position.constructor
     return bot.blockAt(new Vec3Target(target.position.x, target.position.y, target.position.z))
@@ -19270,16 +19189,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         }
       }
 
-      const probeAllowed = probeAllowance()
-      if (probeAllowed === 0) {
-        // Aligned quota already spent this physics tick: wait for the next one
-        // instead of emitting off-phase.
-        await delay(10)
-        continue
-      }
-      const rawAllowed = probeAllowed != null
-        ? probeAllowed
-        : (placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : effectiveCatchup)
+      const rawAllowed = placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : effectiveCatchup
 
       if (rawAllowed <= 0) {
         if (pollMs > 0) await delay(pollMs)
@@ -19287,11 +19197,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         continue
       }
 
-      if (probeAllowed == null) {
-        lastTickTime = placeDelayMs > 0 ? lastTickTime + rawAllowed * placeDelayMs : now
-      }
+      lastTickTime = placeDelayMs > 0 ? lastTickTime + rawAllowed * placeDelayMs : now
       rawAllowedTotal += rawAllowed
-      const allowed = probeAllowed != null ? probeAllowed : Math.min(rawAllowed, effectiveCatchup)
+      const allowed = Math.min(rawAllowed, effectiveCatchup)
       cappedTotal += Math.max(0, rawAllowed - allowed)
       maxAllowedSeen = Math.max(maxAllowedSeen, rawAllowed)
 
@@ -19417,10 +19325,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
             if (result.state === 'placed') {
               placed += 1
-              if (probe) {
-                probe.sends += 1
-                probe.sentThisTick += 1
-              }
               // Meteor-printer semantics: a sent packet is not a printed carpet.
               // The server echoes accepted placements into the client world; a
               // dropped one leaves the cell replaceable and the next scan offers
@@ -19867,7 +19771,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
   } finally {
     active = false
-    stopRateProbe('band-ended-mid-schedule')
     if (ackTracker) ackTracker.settlers.delete(handleAckSettle)
     delete bot.__nervActiveBatchTargets
     delete bot.__nervTraversalDirection

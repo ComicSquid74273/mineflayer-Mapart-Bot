@@ -167,30 +167,3 @@ test('the workload batch registers and unregisters its settle handler', () => {
   assert.match(lanePhase, /acks=/)
   assert.match(lanePhase, /ackOk=/)
 })
-
-test('the rate-ladder probe is opt-in, tick-aligned, and self-disabling', () => {
-  const batchStart = source.indexOf('async function runNervTimeWorkloadPlacementBatch')
-  const batchEnd = source.indexOf('\nasync function ', batchStart + 10)
-  const batch = source.slice(batchStart, batchEnd)
-
-  // Opt-in only: the default config keeps it off, and the gate demands the flag.
-  assert.match(source, /placementRateProbe: false/)
-  assert.match(batch, /advanced\.placementRateProbe === true/)
-
-  // The ladder covers the target rate (5/tick) down to 1/tick plus a control.
-  const ladderAt = batch.indexOf("label: 'async-control'")
-  assert.ok(ladderAt >= 0)
-  assert.match(batch, /perTick: 5/)
-  assert.match(batch, /perTick: 3/)
-  assert.match(batch, /perTick: 1/)
-
-  // Aligned segments must ride the physics tick (vanilla wire order), and the
-  // probe must take over the allowance rather than layering on top of it.
-  assert.match(batch, /bot\.on\('physicsTick', tickListener\)/)
-  assert.match(batch, /const allowed = probeAllowed != null \? probeAllowed : Math\.min\(rawAllowed, effectiveCatchup\)/)
-
-  // It runs once per process and never leaks its listener.
-  assert.match(batch, /bot\.__nervRateProbeDone = true/)
-  assert.match(batch, /stopRateProbe\('band-ended-mid-schedule'\)/)
-  assert.match(batch, /bot\.removeListener\('physicsTick', probe\.tickListener\)/)
-})
