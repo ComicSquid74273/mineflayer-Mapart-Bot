@@ -760,10 +760,24 @@ function placementNoiseLogsEnabled(config) {
 }
 
 function getBotLatencyMs(bot) {
+  // This is the SERVER-REPORTED keep-alive round trip, not a proxy metric: a
+  // saturated event loop delays our keep-alive replies and the server books it
+  // as ping. The lookup is on diagnostic hot paths (called every placement
+  // tick), so the player-entity scan is cached instead of re-running
+  // Object.values over the several-hundred-player tab list each call.
   const playerPing = bot?.players?.[bot?.username]?.ping
   if (typeof playerPing === 'number' && playerPing > 0) return Math.round(playerPing)
-  const namedPlayer = bot?.username ? Object.values(bot?.players || {}).find((player) => player?.username === bot.username) : null
-  if (typeof namedPlayer?.ping === 'number' && namedPlayer.ping > 0) return Math.round(namedPlayer.ping)
+  const cacheAt = bot?.__nervPingPlayerCacheAt || 0
+  if (Date.now() - cacheAt > 5000) {
+    if (bot) {
+      bot.__nervPingPlayerCacheAt = Date.now()
+      bot.__nervPingPlayerRef = bot.username
+        ? Object.values(bot?.players || {}).find((player) => player?.username === bot.username) || null
+        : null
+    }
+  }
+  const cachedPing = bot?.__nervPingPlayerRef?.ping
+  if (typeof cachedPing === 'number' && cachedPing > 0) return Math.round(cachedPing)
   const clientLatency = bot?._client?.latency
   if (typeof clientLatency === 'number' && clientLatency > 0) return Math.round(clientLatency)
   return null
@@ -1026,6 +1040,24 @@ function installRealTimeTpsTracker(bot) {
 function installVanillaSpeed(bot, config) {
   if (!bot || bot.__nervVanillaSpeedInstalled) return
   bot.__nervVanillaSpeedInstalled = true
+
+  // Event-loop lag meter: timer drift measures how long the loop stays blocked.
+  // Correlates code-induced saturation with the server-reported ping and the
+  // rubberband cycle. Logged only when it exceeds 80ms, throttled to 5s.
+  if (!bot.__nervLoopLagMeterInstalled) {
+    bot.__nervLoopLagMeterInstalled = true
+    let lagLastAt = Date.now()
+    const lagSampler = setInterval(() => {
+      const now = Date.now()
+      const lagMs = now - lagLastAt - 1000
+      lagLastAt = now
+      if (lagMs > 80 && Date.now() - (bot.__nervLoopLagLastLogAt || 0) > 5000) {
+        bot.__nervLoopLagLastLogAt = Date.now()
+        console.log(`[LOOP-LAG] eventLoopBlockedMs=${Math.round(lagMs)}`)
+      }
+    }, 1000)
+    bot.once('end', () => clearInterval(lagSampler))
+  }
 
   const advanced = config.advanced || {}
   let prevX = null
@@ -14319,18 +14351,57 @@ async function gateOnCompleteMap(bot, config, orderedTargets, placeRange) {
   const passesUsed = Math.max(1, toNumber(advanced.repairTestMaxPasses, 3))
   let lastCount = 0
 
+  // WORLD-FIRST scan. The ledger is an optimistic record: fast-confirm repair
+  // placements ledger on send, and a job resume seeds the whole processed
+  // prefix into it -- including cells whose packets were dropped before the
+  // restart. Every historical gate pass reported "verified complete" through
+  // those ledgered holes and shipped incomplete maps. A loaded chunk's world
+  // state is the ground truth (the server echoes accepted placements and chunk
+  // resends show them); only genuinely unloaded chunks stay unverifiable here.
+  const scanOutstanding = (logPrefix) => {
+    const Vec3Gate = bot.entity.position.constructor
+    const outstanding = []
+    let unloaded = 0
+    for (const target of orderedTargets) {
+      const actual = bot.blockAt(new Vec3Gate(target.position.x, target.position.y, target.position.z))
+      if (!actual) {
+        unloaded += 1
+        continue
+      }
+      if (actual.name !== target.blockName) outstanding.push(target)
+    }
+    if (unloaded > 0) {
+      console.log(`[${logPrefix}] ${unloaded} target(s) in unloaded chunks were not verifiable; verifying only loaded world state.`)
+    }
+    return { outstanding, unloaded }
+  }
+
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     assertRuntimeContinue(bot, config, 'stopping-during-post-print-gate')
-    const outstanding = scanPlacementErrors(bot, orderedTargets, {
-      config,
-      logPrefix: `POSTPRINT-GATE-${attempt}`,
-      logErrors: config.errorHandling?.logErrors !== false,
-      maxLogs: toNumber(advanced.repairTestMaxErrorLogs, 80),
-      confirmedPlaced: bot.__nervConfirmedPlaced
-    }).map((entry) => entry.target)
+    let { outstanding, unloaded } = scanOutstanding(`POSTPRINT-GATE-${attempt}`)
+
+    // A scan from one edge of a 128-wide map can have unloaded far corners.
+    // From the centre every cell is inside view distance, so re-verify there
+    // before trusting a clean result.
+    if (outstanding.length === 0 && unloaded > 0) {
+      const centerX = orderedTargets.reduce((sum, t) => sum + t.position.x, 0) / orderedTargets.length + 0.5
+      const centerZ = orderedTargets.reduce((sum, t) => sum + t.position.z, 0) / orderedTargets.length + 0.5
+      const centerY = orderedTargets[0]?.position?.y
+      if (Number.isFinite(centerX) && Number.isFinite(centerZ) && Number.isFinite(centerY)) {
+        console.log(`[POSTPRINT-GATE] ${unloaded} target(s) unverifiable from here; walking to the map centre to re-verify.`)
+        try {
+          await walkStraightToPointWithHardTimeout(bot, { x: centerX, y: centerY, z: centerZ }, 2.0, 60000, 'postprint-gate-center-recheck', {
+            config, sprint: true, jump: false, tickMs: 50, shouldPauseTimeout: () => false
+          })
+        } catch { /* pathfinder fallback below */ }
+        const rescan = scanOutstanding(`POSTPRINT-GATE-${attempt}-CENTER`)
+        outstanding = rescan.outstanding
+        unloaded = rescan.unloaded
+      }
+    }
 
     if (outstanding.length === 0) {
-      console.log(`[POSTPRINT-GATE] map verified complete after ${attempt - 1} gate repair pass(es); ${lastCount ? `${lastCount} repaired, ` : ''}proceeding to post-print.`)
+      console.log(`[POSTPRINT-GATE] map verified complete after ${attempt - 1} gate repair pass(es)${unloaded > 0 ? ` (${unloaded} still unverifiable)` : ''}; ${lastCount ? `${lastCount} repaired, ` : ''}proceeding to post-print.`)
       return { ok: true, repaired: lastCount }
     }
 
@@ -14340,13 +14411,8 @@ async function gateOnCompleteMap(bot, config, orderedTargets, placeRange) {
     await delay(toNumber(advanced.repairVerifySettleMs, 300))
   }
 
-  const blocked = scanPlacementErrors(bot, orderedTargets, {
-    config,
-    logPrefix: 'POSTPRINT-GATE-BLOCKED',
-    logErrors: config.errorHandling?.logErrors !== false,
-    maxLogs: toNumber(advanced.repairTestMaxErrorLogs, 80),
-    confirmedPlaced: bot.__nervConfirmedPlaced
-  }).map((entry) => entry.target)
+  const blockedScan = scanOutstanding('POSTPRINT-GATE-BLOCKED')
+  const blocked = blockedScan.outstanding
 
   if (blocked.length > 0) {
     console.log(`[POSTPRINT-GATE-BLOCKED] ${blocked.length} carpet(s) remain unplaced or misplaced. Holding the job before post-print; an incomplete map must not be filled, cartographed or stored.`)
@@ -18422,6 +18488,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let unresolvedOutCount = 0
   let laneWalkTotalMs = 0
   let traversalSlowTicks = 0
+  let slowBacklogTicks = 0
+  let slowClearTicks = 0
+  let retriesTotalCount = 0
   const seen = new Set()
   const stallSkipped = new Set()
   const pendingUntil = new Map()
@@ -18991,12 +19060,24 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (until > now) continue
           if ((sendCounts.get(pendingKey) || 0) >= 2) retryBacklog += 1
         }
-        const slowNow = retryBacklog > 0
+        // Hysteresis: a single expired window is normal churn (engage flickered
+        // 371 times in one observed band). Engage after the backlog persists a
+        // few consecutive ticks; release only after it stays clear.
+        if (retryBacklog > 0) {
+          slowBacklogTicks += 1
+          slowClearTicks = 0
+        } else {
+          slowClearTicks += 1
+          slowBacklogTicks = 0
+        }
+        const slowNow = bot.__nervTraversalSlow === true
+          ? slowBacklogTicks >= 1
+          : slowBacklogTicks >= 3
         if (slowNow !== (bot.__nervTraversalSlow === true)) {
           bot.__nervTraversalSlow = slowNow
           if (slowNow) traversalSlowTicks += 1
           if (placementNoiseLogsEnabled(config)) {
-            console.log(`[TRAVERSAL-SLOW] ${slowNow ? 'engaged' : 'released'} retryBacklog=${retryBacklog}`)
+            console.log(`[TRAVERSAL-SLOW] ${slowNow ? 'engaged' : 'released'} retryBacklog=${retryBacklog} backlogTicks=${slowBacklogTicks}`)
           }
           try {
             bot.setControlState('sprint', bot.__nervTraversalWantSprint === true && !slowNow)
@@ -19153,7 +19234,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const echoRetryMs = Math.max(50, toNumber(advanced.scannerEchoRetryMs, 250))
               const existingUntil = pendingUntil.get(key) || 0
               pendingUntil.set(key, Math.max(existingUntil, Date.now() + echoRetryMs))
-              sendCounts.set(key, (sendCounts.get(key) || 0) + 1)
+              const priorSends = sendCounts.get(key) || 0
+              if (priorSends >= 1) retriesTotalCount += 1
+              sendCounts.set(key, priorSends + 1)
             } else if (result.state === 'already') {
               already += 1
               markTargetPlacedInWorld(target, key)
@@ -19229,8 +19312,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       await handlePlacementStall()
 
-      if (pollMs > 0) await delay(pollMs)
-      else await delay(1)
+      // Idle floor: this loop does a full reach-grid scan plus hotbar
+      // bookkeeping every wake-up. At the 10ms config poll that is ~100
+      // wake-ups/s whose only product between bursts is event-loop pressure --
+      // which delays keep-alive replies and shows up as server-reported ping.
+      // The rate gate carries unused allowance forward, so a 25ms floor still
+      // allows 4 sends every wake (160/s ceiling vs ~28/s demand).
+      await delay(Math.max(25, pollMs || 25))
     }
   })())
 
@@ -19259,7 +19347,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           const echoRetryMs = Math.max(50, toNumber(advanced.scannerEchoRetryMs, 250))
           const existingUntil = pendingUntil.get(key) || 0
           pendingUntil.set(key, Math.max(existingUntil, Date.now() + echoRetryMs))
-          sendCounts.set(key, (sendCounts.get(key) || 0) + 1)
+          const priorSends = sendCounts.get(key) || 0
+          if (priorSends >= 1) retriesTotalCount += 1
+          sendCounts.set(key, priorSends + 1)
         }
       } catch { }
     }
@@ -19630,11 +19720,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // Per-band phase accounting: where the wall-clock went. One freeze cost 10
   // minutes with zero diagnostics because nothing timed these phases.
   {
-    let retriesTotal = 0
-    for (const count of sendCounts.values()) retriesTotal += Math.max(0, count - 1)
     const totalMs = lineEndDrainMs + backtrackMs + lineEndRepairMs
     console.log(
-      `[LANE-PHASE] targets=${batchTargets.length} placed=${placed} retries=${retriesTotal} ` +
+      `[LANE-PHASE] targets=${batchTargets.length} placed=${placed} retries=${retriesTotalCount} ` +
       `walkMs=${Math.max(0, laneWalkTotalMs - totalMs)} drainMs=${lineEndDrainMs} ` +
       `backtrackMs=${backtrackMs} repairMs=${lineEndRepairMs} ` +
       `unresolvedIn=${unresolvedInCount} unresolvedOut=${unresolvedOutCount} ` +
