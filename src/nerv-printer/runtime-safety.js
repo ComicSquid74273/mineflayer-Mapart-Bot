@@ -612,7 +612,8 @@ function shouldUseStraightWorkloadCheckpoint(action, enabled = true) {
   return normalizedAction === '' ||
     normalizedAction === 'inline-repair' ||
     normalizedAction === 'lineEnd' ||
-    normalizedAction === 'sprint'
+    normalizedAction === 'sprint' ||
+    normalizedAction === 'uTurn'
 }
 
 function configureStepHeight(bot, config = {}) {
