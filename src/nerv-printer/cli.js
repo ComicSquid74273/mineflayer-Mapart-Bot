@@ -20873,8 +20873,28 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         }
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
         await ensureFoodBeforeTraversal(bot, config, `litematic-batch cols=${colBatch.join(',')}`)
+        // Stage the hotbar DURING the walk back to the entry instead of after
+        // arrival: silent swaps are fire-and-forget packets, safe mid-movement,
+        // so the bot never stands at the lane start waiting to prepare.
+        // Bounded retry: if a staging pass raced world/inventory loading, it
+        // re-verifies and re-runs instead of sticking the band start.
+        const stagingRun = (async () => {
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            try { await prepareHotbarForBatch(bot, config, batchTargets) } catch { }
+            const headColors = new Set(batchTargets.slice(0, 200).map((t) => t.blockName))
+            let unstocked = 0
+            for (const color of headColors) {
+              if (findHotbarIndexForItem(bot, color) < 0 && countInventoryItems(bot, color) <= 0) unstocked += 1
+            }
+            if (unstocked === 0 || attempt === 3) return { unstocked, attempt }
+            await delay(500)
+          }
+        })()
         await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
-        await prepareHotbarForBatch(bot, config, batchTargets)
+        const stagingResult = await stagingRun
+        if (stagingResult.unstocked > 0 && config.errorHandling?.logErrors !== false) {
+          console.log(`[BAND-STAGING-WARN] ${stagingResult.unstocked} head colour(s) unstocked after ${stagingResult.attempt} staging attempt(s); relying on restock/emergency paths.`)
+        }
         const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide, true, batchOptions)
         placed += result.placed
         already += result.already
