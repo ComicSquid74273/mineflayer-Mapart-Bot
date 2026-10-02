@@ -18794,8 +18794,29 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // stays as the default and the fallback.
   let bandPlan = null
   let planStartedAt = 0
-  let planAnchored = false
-  let planLastWakeMs = 0
+  // The plan's clock is the bot's POSITION, not the wall clock: reality has
+  // checkpoint pauses, drains and turns the simulation does not, so a
+  // time-based planTick drifts ahead of the bot and emits cells before they
+  // are in server reach (the first live band lost 256 cells exactly this way).
+  // currentPlanTick() = the simulated tick whose position is nearest the bot.
+  const currentPlanTick = () => {
+    if (!bandPlan?.positions) return -1
+    const pos = bot.entity?.position
+    if (!pos) return -1
+    let best = -1
+    let bestD = Number.POSITIVE_INFINITY
+    const ps = bandPlan.positions
+    for (let t = 0; t < ps.length; t += 2) {
+      const dx = ps[t].x - pos.x
+      const dz = ps[t].z - pos.z
+      const d = dx * dx + dz * dz
+      if (d < bestD) {
+        bestD = d
+        best = t
+      }
+    }
+    return best
+  }
   if (advanced.bandSchedulerEnabled === true && allowEmergencyRestock === true && bot.__nervBandPlanActive !== true) {
     try {
       const route = checkpoints.map((cp) => ({
@@ -19232,10 +19253,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           slowBacklogTicks = 0
         }
         // Band scheduler pacing: the plan already knows which intervals are
-        // capacity-tight (walk) — it outranks the backlog heuristic.
+        // capacity-tight (walk) — it outranks the backlog heuristic. The
+        // clock is position-derived (see currentPlanTick).
         const planPaceWalk = (() => {
-          if (!bandPlan || !planAnchored) return false
-          const planTick = Math.floor((Date.now() - planStartedAt) / 50)
+          if (!bandPlan) return false
+          const planTick = currentPlanTick()
+          if (planTick < 0) return false
           const seg = bandPlan.pacing.find((s) => planTick >= s.fromTick && planTick < s.toTick)
           return seg?.pace === 'walk'
         })()
@@ -19270,23 +19293,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint' || currentAction === 'inline-repair' || currentAction === 'uTurn'
       if (bandPlan) {
-        // Anchor the simulated clock to the first emission-legal moment, then
-        // slide it across pauses (restock waits, stall recovery, entry nav) so
-        // the schedule tracks the bot instead of the wall clock.
-        const nowMs = Date.now()
-        if (allowPlacement && !planAnchored) {
-          planStartedAt = nowMs
-          planAnchored = true
-        }
-        if (planAnchored && planLastWakeMs > 0 && nowMs - planLastWakeMs > 1500) {
-          planStartedAt += nowMs - planLastWakeMs - 100
-        }
-        planLastWakeMs = nowMs
         // Scheduled staging: execute the plan's swap ops slightly ahead of
         // their stop tick, one per wake, while no emission is in flight on
         // that slot (placements are echo-gated anyway).
-        if (planAnchored) {
-          const planTick = Math.floor((nowMs - planStartedAt) / 50)
+        const stagePlanTick = currentPlanTick()
+        if (stagePlanTick >= 0) {
           for (const op of bandPlan.swaps) {
             if (op.__done || !op.inColour || op.tick > planTick + 5) continue
             const resident = findHotbarIndexesForItem(bot, op.inColour)
@@ -19330,23 +19341,34 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         // first and then emits up to blocks-per-tick from it.
         let burstTargets
         if (bandPlan) {
-          // Schedule-driven emission: due = scheduled tick reached, window
-          // still open (grace 10 ticks), and not parked/confirmed. Parking,
-          // echo waits, hotbar readiness and the per-tick rate gate below are
-          // shared with the heuristic path.
-          const planTick = Math.floor((Date.now() - planStartedAt) / 50)
+          // Schedule-driven emission: the plan's clock is the bot's live
+          // position (see currentPlanTick), so checkpoint pauses cannot make
+          // the schedule outrun the bot. Due = scheduled tick reached, window
+          // still open (grace 10 ticks), not parked/confirmed, AND inside
+          // live reach — the belt-and-braces geometry gate: schedule says
+          // when, the eye-range confirms now.
+          const planTick = currentPlanTick()
           burstTargets = []
-          for (const cell of bandPlan.cells) {
-            if (burstTargets.length >= allowed) break
-            if (cell.emitTick > planTick || planTick > cell.exit + 10) continue
-            if (burstExcluded.has(cell.key)) continue
-            const Vec3Plan = bot.entity.position.constructor
-            const actual = bot.blockAt(new Vec3Plan(cell.target.position.x, cell.target.position.y, cell.target.position.z))
-            if (actual?.name === cell.target.blockName) {
-              markTargetPlacedInWorld(cell.target, cell.key)
-              continue
+          if (planTick >= 0) {
+            const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
+            const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
+            for (const cell of bandPlan.cells) {
+              if (burstTargets.length >= allowed) break
+              if (cell.emitTick > planTick || planTick > cell.exit + 10) continue
+              if (burstExcluded.has(cell.key)) continue
+              const tp = cell.target.position
+              const dx = bot.entity.position.x - (tp.x + 0.5)
+              const dy = eyeY - (tp.y + 0.5)
+              const dz = bot.entity.position.z - (tp.z + 0.5)
+              if (dx * dx + dy * dy + dz * dz > liveReach2) continue
+              const Vec3Plan = bot.entity.position.constructor
+              const actual = bot.blockAt(new Vec3Plan(tp.x, tp.y, tp.z))
+              if (actual?.name === cell.target.blockName) {
+                markTargetPlacedInWorld(cell.target, cell.key)
+                continue
+              }
+              burstTargets.push(cell.target)
             }
-            burstTargets.push(cell.target)
           }
         } else {
           burstTargets = collectNervScannerCandidates(
@@ -19994,7 +20016,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // Per-band phase accounting: where the wall-clock went. One freeze cost 10
   // minutes with zero diagnostics because nothing timed these phases.
   if (bandPlan) {
-    const nowTick = Math.floor((Date.now() - planStartedAt) / 50)
+    const nowTick = currentPlanTick()
     const lateWindow = bandPlan.cells.filter((cell) => !seen.has(cell.key) && nowTick > cell.exit + 10).length
     console.log(`[BAND-EXEC] scheduled=${bandPlan.cells.length} seen=${seen.size} lateWindow=${lateWindow} infeasible=${bandPlan.infeasible.length}`)
   }

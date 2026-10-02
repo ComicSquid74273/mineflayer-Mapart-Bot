@@ -236,16 +236,19 @@ test('step 3: scheduled staging executes at plan stops', () => {
   assert.match(batch, /silentHotbarSwap\(bot, source\.slot, dest\)/)
 })
 
-test('step 4: plan anchoring, pause-slide, and pacing', () => {
+test('step 4: position-derived plan clock and live reach gate', () => {
   const batchStart = cliSource.indexOf('async function runNervTimeWorkloadPlacementBatch')
   const batchEnd = cliSource.indexOf('\nasync function ', batchStart + 10)
   const batch = cliSource.slice(batchStart, batchEnd)
 
-  // The simulated clock anchors to the first emission-legal moment, not compile time.
-  assert.match(batch, /if \(allowPlacement && !planAnchored\)/)
-  // Pauses slide the schedule instead of invalidating it.
-  assert.match(batch, /planStartedAt \+= nowMs - planLastWakeMs - 100/)
-  // Plan pacing outranks the backlog heuristic for sprint/walk.
-  assert.match(batch, /const slowNow = planPaceWalk \|\|/)
+  // The plan's clock is the bot's position, not wall time: pauses (drains,
+  // checkpoints, turns) cannot make the schedule outrun the bot.
+  assert.match(batch, /const currentPlanTick = \(\) => \{/, 'position-derived plan tick must exist')
   assert.match(batch, /bandPlan\.pacing\.find\(\(s\) => planTick >= s\.fromTick && planTick < s\.toTick\)/)
+  assert.match(batch, /const slowNow = planPaceWalk \|\|/)
+  // Every planned emission passes a live reach gate before the packet goes
+  // out (schedule says when, eye-range confirms now).
+  const dueAt = batch.indexOf('cell.emitTick > planTick')
+  assert.ok(dueAt >= 0)
+  assert.match(batch.slice(dueAt, dueAt + 1600), /liveReach2/, 'due cells must pass the live reach gate')
 })

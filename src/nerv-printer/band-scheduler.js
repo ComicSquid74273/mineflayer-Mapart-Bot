@@ -255,7 +255,7 @@ function compileBandPlan (input) {
     }
 
     return {
-      cells, infeasible, runs, selects, swaps, refills, pacing, stopTicks, bounds,
+      cells, infeasible, runs, selects, swaps, refills, pacing, stopTicks, bounds, positions,
       slackCells, totalTicks,
       stats: {
         cells: cells.length, runs: runs.length, switches: selects.length,
