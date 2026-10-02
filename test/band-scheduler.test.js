@@ -172,3 +172,37 @@ test('a plan compiles fast enough to recompile mid-band on drift', () => {
   assert.equal(plan.infeasible.length, 0)
   assert.ok(ms < 500, `compile took ${ms}ms for a full 640-cell band`)
 })
+
+// --- Executor wiring (source-level, mirrors the runtime gate) ---
+
+const fs = require('node:fs')
+const cliSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'nerv-printer', 'cli.js'), 'utf8')
+
+test('the executor is opt-in and falls back to the heuristic scan', () => {
+  assert.match(cliSource, /bandSchedulerEnabled: false/, 'flag must default off')
+  assert.match(cliSource, /advanced\.bandSchedulerEnabled === true/, 'gate must require the flag')
+  assert.match(cliSource, /require\('\.\/band-scheduler'\)/)
+  assert.match(cliSource, /\[BAND-PLAN-ERR\]/, 'a compile failure must fall back, not crash')
+})
+
+test('schedule-driven emission replaces the scan only when a plan exists', () => {
+  const batchStart = cliSource.indexOf('async function runNervTimeWorkloadPlacementBatch')
+  const batchEnd = cliSource.indexOf('\nasync function ', batchStart + 10)
+  const batch = cliSource.slice(batchStart, batchEnd)
+
+  const planBranch = batch.indexOf('if (bandPlan) {')
+  const scanBranch = batch.indexOf('burstTargets = collectNervScannerCandidates(')
+  assert.ok(planBranch >= 0 && scanBranch > planBranch, 'planned branch first, heuristic in else')
+
+  // Due-filter semantics: emission honors the scheduled tick, the window with
+  // a grace, and the shared parking bookkeeping.
+  assert.match(batch, /cell\.emitTick > planTick \|\| planTick > cell\.exit \+ 10/, 'due = scheduled tick reached and window still open')
+  assert.match(batch, /burstExcluded\.has\(cell\.key\)/, 'parked cells are never re-offered by the plan')
+
+  // Planned-vs-actual telemetry before any repair phase.
+  assert.match(batch, /\[BAND-EXEC\] scheduled=/)
+  assert.match(batch, /lateWindow=/)
+
+  // The plan state is per-band: reset in the finally so the next band recompiles.
+  assert.match(batch, /bot\.__nervBandPlanActive = false/)
+})

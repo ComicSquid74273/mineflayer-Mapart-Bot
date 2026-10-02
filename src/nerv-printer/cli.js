@@ -104,6 +104,7 @@ const {
   updateLobbyHostFailoverState
 } = require('./connection/host-failover')
 const { installBlockInteractionGuard } = require('./block-interaction')
+const { compileBandPlan } = require('./band-scheduler')
 const {
   runWithOffPlatformNavigation,
   taskAllowsOffPlatformNavigation
@@ -18773,6 +18774,44 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     retryPriority.add(key)
   }
   if (ackTracker) ackTracker.settlers.add(handleAckSettle)
+
+  // Band scheduler (docs/BOT20-BAND-SCHEDULER-PLAN.md step 2): compile the
+  // deterministic U-traversal into an emission schedule and drive the burst
+  // from it. Behind advanced.bandSchedulerEnabled; the heuristic scan path
+  // stays as the default and the fallback.
+  let bandPlan = null
+  let planStartedAt = 0
+  if (advanced.bandSchedulerEnabled === true && allowEmergencyRestock === true && bot.__nervBandPlanActive !== true) {
+    try {
+      const route = checkpoints.map((cp) => ({
+        x: cp.position.x,
+        y: cp.position.y,
+        z: cp.position.z,
+        // '' is the entry stand; inline-repair checkpoints are walk-throughs.
+        action: cp.action === '' ? 'entry' : (cp.action === 'uTurn' || cp.action === 'lineEnd' ? cp.action : undefined)
+      }))
+      bandPlan = compileBandPlan({
+        targets: batchTargets,
+        route,
+        options: {
+          placeRange,
+          blocksPerTick: Math.max(1, Math.trunc(toNumber(advanced.bandSchedulerBlocksPerTick, toNumber(config.printer?.maxPlacementsPerTick, 4)))),
+          serverLagBlocks: toNumber(advanced.bandSchedulerLagBlocks, 1.4),
+          hotbarCapacity: 7
+        }
+      })
+      planStartedAt = Date.now()
+      bot.__nervBandPlanActive = true
+      console.log(
+        `[BAND-PLAN] cells=${bandPlan.stats.cells} runs=${bandPlan.stats.runs} switches=${bandPlan.stats.switches} ` +
+        `stops=${bandPlan.stats.stops} slackCells=${bandPlan.stats.slackCells} infeasible=${bandPlan.stats.infeasible} ` +
+        `compileMs=${bandPlan.compileMs}${bandPlan.stats.fellBackToWalk ? ' fellBackToWalk=true' : ''}`
+      )
+    } catch (err) {
+      bandPlan = null
+      console.log(`[BAND-PLAN-ERR] ${err?.message || err} -- falling back to heuristic scan`)
+    }
+  }
   const getTargetWorldBlock = (target) => {
     const Vec3Target = bot.entity.position.constructor
     return bot.blockAt(new Vec3Target(target.position.x, target.position.y, target.position.z))
@@ -19218,16 +19257,38 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         // Re-scanning the reach grid per placement is what capped us at ~1
         // block per tick; the reference printer sorts the whole candidate set
         // first and then emits up to blocks-per-tick from it.
-        const burstTargets = collectNervScannerCandidates(
-          bot,
-          config,
-          targetByXZ,
-          currentGoal,
-          burstExcluded,
-          currentActiveCols,
-          retryPriority,
-          allowed
-        )
+        let burstTargets
+        if (bandPlan) {
+          // Schedule-driven emission: due = scheduled tick reached, window
+          // still open (grace 10 ticks), and not parked/confirmed. Parking,
+          // echo waits, hotbar readiness and the per-tick rate gate below are
+          // shared with the heuristic path.
+          const planTick = Math.floor((Date.now() - planStartedAt) / 50)
+          burstTargets = []
+          for (const cell of bandPlan.cells) {
+            if (burstTargets.length >= allowed) break
+            if (cell.emitTick > planTick || planTick > cell.exit + 10) continue
+            if (burstExcluded.has(cell.key)) continue
+            const Vec3Plan = bot.entity.position.constructor
+            const actual = bot.blockAt(new Vec3Plan(cell.target.position.x, cell.target.position.y, cell.target.position.z))
+            if (actual?.name === cell.target.blockName) {
+              markTargetPlacedInWorld(cell.target, cell.key)
+              continue
+            }
+            burstTargets.push(cell.target)
+          }
+        } else {
+          burstTargets = collectNervScannerCandidates(
+            bot,
+            config,
+            targetByXZ,
+            currentGoal,
+            burstExcluded,
+            currentActiveCols,
+            retryPriority,
+            allowed
+          )
+        }
 
         // Readiness gate: the burst never starts with insufficient material.
         //
@@ -19774,6 +19835,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
   } finally {
     active = false
+    bot.__nervBandPlanActive = false
     if (ackTracker) ackTracker.settlers.delete(handleAckSettle)
     delete bot.__nervActiveBatchTargets
     delete bot.__nervTraversalDirection
@@ -19853,6 +19915,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
   // Per-band phase accounting: where the wall-clock went. One freeze cost 10
   // minutes with zero diagnostics because nothing timed these phases.
+  if (bandPlan) {
+    const nowTick = Math.floor((Date.now() - planStartedAt) / 50)
+    const lateWindow = bandPlan.cells.filter((cell) => !seen.has(cell.key) && nowTick > cell.exit + 10).length
+    console.log(`[BAND-EXEC] scheduled=${bandPlan.cells.length} seen=${seen.size} lateWindow=${lateWindow} infeasible=${bandPlan.infeasible.length}`)
+  }
   {
     const totalMs = lineEndDrainMs + backtrackMs + lineEndRepairMs
     console.log(
