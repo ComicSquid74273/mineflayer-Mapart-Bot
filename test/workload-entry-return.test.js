@@ -194,9 +194,11 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   const collect = source.slice(source.indexOf('function collectNervScannerCandidates('), collectEnd)
 
   assert.match(collect, /scored\.sort\(\(left, right\) => left\.score - right\.score\)/)
-  // Distance must dominate; the row schedule is only a tiebreak.
-  assert.match(collect, /score: repairPriority \+ distance2 \* 1000 - rowTiebreak/)
+  // Distance is the ONLY ranking term (meteor Nearest): no retry override may
+  // outrank a nearer fresh cell. The row schedule is only a tiebreak.
+  assert.match(collect, /score: distance2 \* 1000 - rowTiebreak/)
   assert.doesNotMatch(collect, /rowPriority/)
+  assert.doesNotMatch(collect, /repairPriority \+ distance2/)
   // The grid walk happens once and world reads happen after the sort.
   assert.ok(collect.indexOf('scored.push') < collect.indexOf('scored.sort'))
 

@@ -22815,8 +22815,14 @@ function collectNervScannerCandidates(bot, config, targetByXZ, currentGoal, proc
       else if (zRel === -1) rowTiebreak = 2
       else if (zRel === 1) rowTiebreak = 1
       else if (zRel === -2) rowTiebreak = -1
-      const repairPriority = priorityKeys instanceof Set && priorityKeys.has(key) ? -1e6 : 0
-      scored.push({ target, key, score: repairPriority + distance2 * 1000 - rowTiebreak })
+      // Pure closest-first order (meteor SortAlgorithm.Nearest): distance is
+      // the ONLY ranking term. The old -1e6 retry override let any retried
+      // cell anywhere in the reach bubble beat every nearer fresh cell, so
+      // with retry overhead the print order looked random instead of
+      // expanding outward from the bot. Retries keep their cooldown-bypass
+      // (they re-enter the pool at their true distance rank).
+      void priorityKeys
+      scored.push({ target, key, score: distance2 * 1000 - rowTiebreak })
     }
   }
 
