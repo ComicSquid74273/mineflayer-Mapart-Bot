@@ -5870,6 +5870,9 @@ function createDefaultConfig() {
       // re-offer cooldown for cells the server judged rejected.
       ackSettleDelayMs: 75,
       ackRejectCooldownMs: 250,
+      // Band scheduler (docs/BOT20-BAND-SCHEDULER-PLAN.md): schedule-driven
+      // emission behind this flag while the executor is wired in.
+      bandSchedulerEnabled: false,
       // Blocks before the lane end where the turn starts: with reach 5, turning
       // 3 rows early keeps the tail rows printable through the lateral leg.
       workloadTurnEarlyBlocks: 3,
