@@ -132,15 +132,14 @@ test('runtime staging picks slots by live forecast (pickStagingSlot)', () => {
   const batch = cliSource.slice(batchStart, batchEnd)
 
   assert.match(batch, /const planNextUseTick = \(colour, fromTick\)/, 'live forecast over plan emitTicks')
-  assert.match(batch, /const pickStagingSlot = \(explicitSlot, refillColor\)/)
+  assert.match(batch, /const pickStagingSlot = \(explicitSlot, refillColor, excludeSlot\)/)
   // Priority: explicit, refill, NEVER-NEEDED victim first, free, victim, weakest.
   assert.match(batch, /victimUse === Number\.POSITIVE_INFINITY\) return victimSlot/)
-  // Both staging paths use the picker; the only remaining 0-8 scan is the
-  // picker's own.
+  // Both staging paths use the picker; the handover pass gets an exclusion so
+  // it never restages into the slot it is relieving.
   assert.match(batch, /pickStagingSlot\(op\.intoSlot, op\.inColour\)/)
   assert.match(batch, /pickStagingSlot\(null, deferredColor\)/)
-  const scanCount = (batch.match(/for \(let index = 0; index <= 8; index \+= 1\)/g) || []).length
-  assert.equal(scanCount, 1, `exactly one hotbar scan (the picker), found ${scanCount}`)
+  assert.match(batch, /pickStagingSlot\(null, null, index\)/, 'handover excludes the draining slot')
 })
 
 test('belady eviction removes the never-used-again colour first', () => {

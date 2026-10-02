@@ -7519,6 +7519,72 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
 // (lib/plugins/inventory.js:33-35, :611). A hardcoded stateId against a live window is
 // a stale revision: the server rejects the transaction and the slot change is lost,
 // which is what a held-item-desync actually is.
+// In-flight placement ledger (§8.A): local slot counts overstate the server
+// by every placement sent but not yet echoed (~RTT behind). At a stack
+// boundary that means empty-hand sends the server silently ignores. Each
+// send increments the held slot's in-flight count; each authoritative
+// set_slot for that slot decrements it; entries decay after the echo window
+// so dropped sends (no echo ever) cannot starve a colour.
+function installInFlightLedger (bot) {
+  if (bot.__nervInFlight) return bot.__nervInFlight
+  const ledger = {
+    slots: new Map(), // hotbar index -> { sent, lastAt }
+    echoWindowMs: 800,
+    noteSend (hotbarIndex) {
+      const entry = this.slots.get(hotbarIndex) || { sent: 0, lastAt: 0 }
+      entry.sent += 1
+      entry.lastAt = Date.now()
+      this.slots.set(hotbarIndex, entry)
+    },
+    noteEcho (hotbarIndex) {
+      const entry = this.slots.get(hotbarIndex)
+      if (!entry) return
+      entry.sent = Math.max(0, entry.sent - 1)
+    },
+    effectiveCount (hotbarIndex) {
+      const entry = this.slots.get(hotbarIndex)
+      if (!entry) return null
+      if (entry.sent > 0 && Date.now() - entry.lastAt > this.echoWindowMs) entry.sent = 0
+      if (entry.sent <= 0) {
+        this.slots.delete(hotbarIndex)
+        return null
+      }
+      const stack = bot.inventory?.slots?.[getHotbarWindowSlot(hotbarIndex)]
+      return (Number(stack?.count) || 0) - entry.sent
+    },
+    reset () {
+      this.slots.clear()
+    }
+  }
+  if (typeof bot._client?.on === 'function') {
+    bot._client.on('set_slot', (packet) => {
+      try {
+        if (Number(packet?.windowId) !== 0) return
+        const slot = Number(packet?.slot)
+        if (!(slot >= 36 && slot <= 44)) return
+        ledger.noteEcho(slot - 36)
+      } catch { }
+    })
+    // A full authoritative snapshot (our -1 swaps) re-bases every slot:
+    // in-flight bookkeeping starts from zero again.
+    bot._client.on('window_items', (packet) => {
+      try {
+        if (Number(packet?.windowId) === 0) ledger.reset()
+      } catch { }
+    })
+  }
+  bot.__nervInFlight = ledger
+  return ledger
+}
+
+// Effective count of the currently held stack, ledger-aware; null when no
+// in-flight correction applies.
+function effectiveHeldCount (bot) {
+  const ledger = bot.__nervInFlight
+  if (!ledger || !Number.isFinite(bot.quickBarSlot)) return null
+  return ledger.effectiveCount(bot.quickBarSlot)
+}
+
 function getWindowStateId(bot) {
   if (!Number.isFinite(bot.__nervWindowStateId)) {
     bot.__nervWindowStateId = 0
@@ -13185,6 +13251,32 @@ async function equipFoodItem(bot, foodItem) {
   return true
 }
 
+// §9.1: after eating, the food remainder goes back to a main inventory slot
+// and the offhand is free for printing again. Two authoritative swaps
+// (offhand -> free hotbar slot -> free main slot); if the hotbar is full the
+// remainder simply stays in the offhand until the next cycle.
+function unequipFoodFromOffhand(bot, foodItem) {
+  const offHand = bot.inventory?.slots?.[45]
+  if (!offHand || offHand.name !== foodItem || !bot._client) return
+  try {
+    let hop = -1
+    for (let index = 0; index <= 8; index += 1) {
+      const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+      if (!stack || Number(stack.count) <= 0) { hop = index; break }
+    }
+    if (hop < 0) return
+    const cursorItem = serializeCursorItem(bot, bot.inventory)
+    bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
+    const mainFree = bot.inventory.firstEmptyInventorySlot?.()
+    if (Number.isFinite(mainFree) && mainFree >= 9) {
+      bot._client.write('window_click', { windowId: 0, stateId: -1, slot: mainFree, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
+    }
+    console.log(`[EAT-CYCLE] food returned to inventory; offhand free`)
+  } catch (err) {
+    console.log(`[EAT-CYCLE-WARN] return food failed: ${err?.message || err}`)
+  }
+}
+
 async function eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, reason) {
   let hunger = getBotHunger(bot)
   if (hunger == null || hunger >= minHunger) return true
@@ -13211,6 +13303,7 @@ async function eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, rea
       hunger = getBotHunger(bot)
       if (hunger == null || hunger >= minHunger) {
         console.log(`[AUTO-EAT] ${reason}: server confirmed ${foodItem} consumption after client error; hunger=${hunger ?? 'unknown'}/${minHunger}.`)
+        unequipFoodFromOffhand(bot, foodItem)
         return true
       }
       if (hunger > previousHunger) {
@@ -13227,6 +13320,7 @@ async function eatConfiguredFoodUntilReady(bot, config, foodItem, minHunger, rea
     if (hunger == null) return true
     if (hunger >= minHunger) {
       console.log(`[AUTO-EAT] ${reason}: ate ${foodItem}; hunger=${hunger}/${minHunger}.`)
+      unequipFoodFromOffhand(bot, foodItem)
       return true
     }
     if (hunger <= previousHunger && !hasFoodInInventoryOrOffhand(bot, foodItem)) {
@@ -16979,7 +17073,22 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   }
 
   const isHeldReady = String(bot.heldItem?.name || '') === target.blockName && Number(bot.heldItem?.count) > 0
-  if (!isHeldReady) {
+  // §9.2: the offhand is a select-free fallback hand -- when the main hand
+  // does not already hold the colour but the offhand does, place with
+  // hand=1 and skip the select entirely.
+  const offHandStack = bot.inventory?.slots?.[45]
+  const offHandReady = !isHeldReady
+    && String(offHandStack?.name || '') === target.blockName
+    && Number(offHandStack?.count) > 0
+  if (isHeldReady) {
+    // §8.A boundary guard: the local count includes sends whose echoes have
+    // not landed; offering more would place with an empty server-side hand.
+    const effective = effectiveHeldCount(bot)
+    if (effective != null && effective <= 0) {
+      return { state: 'skip', reason: `stack-in-flight-${target.blockName}` }
+    }
+  }
+  if (!isHeldReady && !offHandReady) {
     const equipped = await equipMaterial(bot, config, target.blockName, {
       fastSwap: isFastNoWaitPlacement,
       allowRestock: !isFastNoWaitPlacement
@@ -17057,7 +17166,8 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
           // No arm swing: the server accepts block_place without it. One
           // packet per placement instead of two halves the burst profile
           // that 6b6t's rate limiter kicks for (measured 263 swings per 5s).
-          forceLook: 'ignore'
+          forceLook: 'ignore',
+          ...(offHandReady ? { offhand: true } : {})
         })
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
@@ -17133,7 +17243,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   if (bot.__nervConfirmedPlaced instanceof Set) {
     bot.__nervConfirmedPlaced.add(`${target.position.x}:${target.position.y}:${target.position.z}`)
   }
-  return { state: 'placed' }
+  return { state: 'placed', offhand: offHandReady === true }
 }
 
 function isTargetAlreadyResolved(bot, config, target) {
@@ -18854,11 +18964,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // Slot picker for staging: explicit plan slot, the same colour's drained
   // slot (refill), then the FORECAST victim (farthest/never next use), then
   // any free slot, then the weakest stack as a last resort.
-  const pickStagingSlot = (explicitSlot, refillColor) => {
+  const pickStagingSlot = (explicitSlot, refillColor, excludeSlot) => {
     if (Number.isInteger(explicitSlot) && explicitSlot >= 0 && explicitSlot <= 8) return explicitSlot
     if (refillColor) {
       const drained = findHotbarIndexForItem(bot, refillColor)
-      if (drained >= 0) return drained
+      if (drained >= 0 && drained !== excludeSlot) return drained
     }
     const planTick = currentPlanTick()
     let victimSlot = -1
@@ -18867,6 +18977,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     let weakestSlot = -1
     let weakestCount = Number.POSITIVE_INFINITY
     for (let index = 0; index <= 8; index += 1) {
+      if (index === excludeSlot) continue
       const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
       if (!stack || Number(stack.count) <= 0) {
         if (freeSlot < 0) freeSlot = index
@@ -19426,6 +19537,63 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
             }
           }
+          // §8.C gapless handover: while a still-needed colour's EFFECTIVE
+          // stack runs low (echoes lag sends by an RTT), pre-stage its next
+          // stack into a DIFFERENT slot now -- the draining slot keeps
+          // printing through the swap and the fullest-stack equip rule
+          // flips the pointer automatically once the echo lands.
+          if (bot.__nervInFlight) {
+            for (let index = 0; index <= 8; index += 1) {
+              const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+              if (!stack || Number(stack.count) <= 0) continue
+              if (planNextUseTick(stack.name, stagePlanTick) < 0) continue
+              const ledgerCount = bot.__nervInFlight.effectiveCount(index)
+              const effective = ledgerCount == null ? Number(stack.count) : ledgerCount
+              if (effective > 8) continue
+              if ((bot.__nervSwapWaitUntil || 0) > stageNowMs) break
+              if (planDeferredColors.has(stack.name)) continue // restage path owns it
+              const source = findBestInventorySlotForItem(bot, stack.name)
+              if (!source) continue
+              const dest = pickStagingSlot(null, null, index)
+              if (!(dest >= 0 && dest <= 8) || dest === index) continue
+              const destStack = bot.inventory?.slots?.[getHotbarWindowSlot(dest)]
+              if (destStack?.name === stack.name && Number(destStack.count) > 0) continue
+              bot.__nervSwapWaitUntil = stageNowMs + 150 // backoff on success AND failure
+              if (silentHotbarSwap(bot, source.slot, dest)) {
+                console.log(`[BAND-STAGE] colour=${stack.name} slot=${dest} reason=handover from=${index} effective=${effective}`)
+              }
+            }
+          }
+          // §9.3 opportunistic offhand pairing: with food resident in the
+          // main inventory, a free offhand can hold one more needed colour
+          // and print it select-free (hand=1). Two authoritative swaps:
+          // main -> free hotbar slot, hotbar slot -> offhand.
+          if (!bot.inventory?.slots?.[45] && (bot.__nervSwapWaitUntil || 0) <= stageNowMs) {
+            const offhandCandidate = (() => {
+              for (const cell of bandPlan.cells) {
+                if (cell.emitTick < stagePlanTick || cell.emitTick > stagePlanTick + 120) continue
+                if (seen.has(cell.key) || pendingUntil.has(cell.key)) continue
+                if (findHotbarIndexesForItem(bot, cell.blockName).some((entry) => entry.count > 0)) continue
+                return cell.blockName
+              }
+              return null
+            })()
+            if (offhandCandidate) {
+              const source = findBestInventorySlotForItem(bot, offhandCandidate)
+              let hop = -1
+              for (let index = 0; index <= 8; index += 1) {
+                const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+                if (!stack || Number(stack.count) <= 0) { hop = index; break }
+              }
+              if (source && hop >= 0) {
+                const cursorItem = serializeCursorItem(bot, bot.inventory)
+                bot._client.write('window_click', { windowId: 0, stateId: -1, slot: source.slot, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
+                bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
+                bot.__nervSwapWaitUntil = stageNowMs + 300
+                console.log(`[BAND-STAGE] colour=${offhandCandidate} slot=offhand reason=offhand-pair`)
+              }
+            }
+          }
           // Demand-driven restage: a colour whose placement deferred (stack
           // drained mid-band, never staged, swap rejected) restages from main
           // the moment it is not resident-with-stock. Echo-truth inventory
@@ -19683,6 +19851,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
             if (result.state === 'placed') {
               placed += 1
+              if (!result.offhand && Number.isFinite(bot.quickBarSlot)) bot.__nervInFlight?.noteSend(bot.quickBarSlot)
               // Meteor-printer semantics: a sent packet is not a printed carpet.
               // The server echoes accepted placements into the client world; a
               // dropped one leaves the cell replaceable and the next scan offers
@@ -19719,6 +19888,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 }, { force: true })
               }
 
+              if (String(result.reason || '').startsWith('stack-in-flight-')) {
+                // §8.A boundary guard tripped: echoes pending, re-offer as soon
+                // as the ledger clears (or the handover swaps a fresh stack in).
+                pendingUntil.set(key, Date.now() + 150)
+                retryPriority.add(key)
+                continue
+              }
               if (String(result.reason || '').startsWith('plan-not-staged-')) {
                 // Colour is in stock but not in the hotbar: record it for the
                 // staging pass, refund the per-tick emission cap (a defer is
@@ -21890,6 +22066,7 @@ function createBot(config) {
     installBlockInteractionGuard(bot)
     installAdaptiveLatencyGuard(bot, config)
     installPlacementAckTracking(bot, config)
+    installInFlightLedger(bot)
   })
   installServerInventoryTracker(bot)
   // A server can send the one full 128x128 map snapshot immediately after

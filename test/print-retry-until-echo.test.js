@@ -18,7 +18,7 @@ test('a sent placement parks for one echo window instead of being ledgered as do
   assert.ok(workloadAt >= 0, 'time workload batch must exist')
   const burstStart = source.indexOf("const result = await placeNervScannerTarget(bot, config, target)", workloadAt)
   assert.ok(burstStart >= 0, 'burst emit must exist inside the time workload batch')
-  const burst = source.slice(burstStart, burstStart + 1600)
+  const burst = source.slice(burstStart, burstStart + 2900)
 
   assert.match(burst, /if \(result\.state === 'placed'\) \{[\s\S]*?pendingUntil\.set\(key, Math\.max\(existingUntil, Date\.now\(\) \+ echoRetryMs\)\)/)
   // Only the world-confirmed 'already' path may mark the target complete.
