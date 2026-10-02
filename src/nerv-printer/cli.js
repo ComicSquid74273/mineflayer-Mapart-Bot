@@ -18847,8 +18847,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         options: {
           placeRange,
           blocksPerTick: Math.max(1, Math.trunc(toNumber(advanced.bandSchedulerBlocksPerTick, toNumber(config.printer?.maxPlacementsPerTick, 4)))),
-          serverLagBlocks: toNumber(advanced.bandSchedulerLagBlocks, 1.4),
-          hotbarCapacity: 7
+          serverLagBlocks: toNumber(advanced.bandSchedulerLagBlocks, 1.4)
         }
       })
       planStartedAt = Date.now()
@@ -19364,7 +19363,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               let dest = Number.isInteger(op.intoSlot) ? op.intoSlot : findHotbarIndexForItem(bot, op.outColour)
               if (!(dest >= 0 && dest <= 8)) dest = findHotbarIndexForItem(bot, op.inColour)
               if (!(dest >= 0 && dest <= 8)) {
-                for (let index = 2; index <= 8; index += 1) {
+                for (let index = 0; index <= 8; index += 1) {
                   const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
                   if (!stack || Number(stack.count) <= 0) { dest = index; break }
                 }
@@ -19398,7 +19397,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             // else evict the smallest resident stack (weakest loss).
             let dest = findHotbarIndexForItem(bot, deferredColor)
             if (!(dest >= 0 && dest <= 8)) {
-              for (let index = 2; index <= 8; index += 1) {
+              for (let index = 0; index <= 8; index += 1) {
                 const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
                 if (!stack || Number(stack.count) <= 0) { dest = index; break }
               }
@@ -19406,7 +19405,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             if (!(dest >= 0 && dest <= 8)) {
               let weakest = -1
               let weakestCount = Number.POSITIVE_INFINITY
-              for (let index = 2; index <= 8; index += 1) {
+              for (let index = 0; index <= 8; index += 1) {
                 const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
                 const count = stack ? Number(stack.count) || 0 : 0
                 if (count < weakestCount) { weakestCount = count; weakest = index }

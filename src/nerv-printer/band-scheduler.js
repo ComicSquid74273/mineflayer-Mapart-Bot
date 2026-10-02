@@ -63,7 +63,9 @@ function compileBandPlan (input) {
   const placeRange = num(options.placeRange, 5)
   const serverLagBlocks = num(options.serverLagBlocks, 1.4)
   const eyeHeight = num(options.eyeHeight, 1.62)
-  const hotbarCapacity = Math.max(1, Math.trunc(num(options.hotbarCapacity, 7)))
+  // All nine hotbar slots are one dynamic pool: residency is decided per band
+  // by demand, staging uses whatever is free. No fixed scratch reservation.
+  const hotbarCapacity = Math.max(1, Math.trunc(num(options.hotbarCapacity, 9)))
   const stackSize = Math.max(1, Math.trunc(num(options.stackSize, 64)))
   const attempt2DelayTicks = Math.max(1, Math.trunc(num(options.attempt2DelayTicks, 5)))
   const capacityPerSec = blocksPerTick * 1000 / tickMs
@@ -186,7 +188,7 @@ function compileBandPlan (input) {
     const freeSlots = () => {
       const used = new Set(residents.values())
       const free = []
-      for (let slot = 2; slot <= 1 + hotbarCapacity; slot += 1) if (!used.has(slot)) free.push(slot)
+      for (let slot = 0; slot < Math.min(9, hotbarCapacity); slot += 1) if (!used.has(slot)) free.push(slot)
       return free
     }
     const nextUseTick = (colour, fromTick) => {
@@ -235,7 +237,7 @@ function compileBandPlan (input) {
       for (const colour of needed) {
         const demand = list.filter((cell) => cell.blockName === colour).length
         if (demand > stackSize) {
-          const dupSlots = [0, 1].filter((slot) => ![...residents.values()].includes(slot))
+          const dupSlots = freeSlots()
           if (dupSlots.length > 0) swaps.push({ tick: stopTick, inColour: colour, intoSlot: dupSlots[0], reason: 'duplicate-stack' })
         }
         const nextBound = bounds[i + 1]

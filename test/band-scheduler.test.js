@@ -98,6 +98,14 @@ test('a 9-colour band forces synthetic stops and never exceeds hotbar capacity p
   assert.ok(plan.stats.stops > 5, `expected synthetic stops, got ${plan.stats.stops}`)
 })
 
+test('the hotbar is one dynamic 9-slot pool: nine colours need no synthetic stops', () => {
+  const targets = bandTargets(36, 3, (x) => `c${x % 9}_carpet`)
+  const plan = compileBandPlan({ targets, route: serpentineRoute(36, 3), options: { ...OPTIONS, hotbarCapacity: 9 } })
+  assert.equal(plan.infeasible.length, 0)
+  assert.equal(plan.stats.stops, 5, 'natural stops only -- no slot reservation forces extra stops')
+  assertInvariants(plan, targets)
+})
+
 test('belady eviction removes the never-used-again colour first', () => {
   // Lane 1 ends with purple used once early and never again; later the band
   // needs more colours than slots at that stop.
