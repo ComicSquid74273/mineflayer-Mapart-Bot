@@ -1103,12 +1103,19 @@ function installVanillaSpeed(bot, config) {
     if (!isMoving) return
     if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
 
-    const allowJump = config?.printer?.allowJump === true
-    const maxSafeBps = allowJump ? 7.192 : 5.612
-    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, allowJump ? 7.123 : 5.612) : (allowJump ? 7.123 : 5.612)
+    // Flat sprint boost does not need jump inputs: 7.192 bps is the server-safe
+    // ceiling for sustained ground sprint, with or without allowJump.
+    const maxSafeBps = 7.192
+    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, 7.123) : 7.123
     const serverTps = bot.__nervServerTps || 20.0
-    // Dynamic TPS speed throttling: scale down if server TPS falls below 17.0
-    const tpsSpeedLimit = serverTps >= 19.0 ? maxSafeBps : (serverTps < 14.0 ? 4.317 : 5.0)
+    // Dynamic TPS speed throttling with hysteresis: full boost at TPS >= 19,
+    // fallback 5.6 bps below 17, and the band between retains the previous mode
+    // so the boost does not oscillate when TPS hovers at the threshold.
+    let throttleState = bot.__nervSpeedThrottleState || 'boost'
+    if (serverTps >= 19.0) throttleState = 'boost'
+    else if (serverTps < 17.0) throttleState = 'fallback'
+    bot.__nervSpeedThrottleState = throttleState
+    const tpsSpeedLimit = throttleState === 'boost' ? maxSafeBps : 5.6
     const effectiveBps = Math.min(targetBps, tpsSpeedLimit)
     const bps = Math.min(maxSafeBps, Math.max(1.0, effectiveBps))
     const targetPerTick = bps / 20.0
@@ -5889,6 +5896,10 @@ function createDefaultConfig() {
       // How many upcoming placements the hotbar eviction lookahead may consider.
       // 9 slots serve an entire lane through continuous replenishment inside this window.
       hotbarLookaheadHorizon: 50,
+      // A horizon-needed colour whose total hotbar count drops to this level is
+      // topped up from the main inventory before the next burst, not when a
+      // burst is already short. 15 leaves well over a second of sprint slack.
+      hotbarRefillThreshold: 15,
       // Hotbar slots held back from the residency plan so staging always has a
       // destination. A window can carry more distinct materials than free slots
       // (10 against 9 is observed in production), so without a reserve every new
@@ -6962,6 +6973,99 @@ function countUpcomingDemand(targets, blockName, limit = Number.MAX_SAFE_INTEGER
     if (count >= limit) break
   }
   return count
+}
+
+// Proactive hotbar maintenance: top stacks up BEFORE the burst is short.
+//
+// The burst gate reacts to a shortfall that already exists in the current burst.
+// This pass runs every tick, independent of the placement-rate gate, and acts on
+// stacks that are merely LOW so a burst never finds them short in the first place:
+//
+//   1. Threshold refill -- any colour needed within the lookahead horizon whose
+//      total hotbar count has dropped to hotbarRefillThreshold (default 15) or
+//      below is topped up from the main inventory immediately: merged into the
+//      fullest resident stack (a 1-3 click PICKUP move) or wholesale-SWAPPED
+//      into an empty slot. At 4 carpets/tick a 64 stack drains in ~2.7 s of
+//      single-colour sprint, so refilling at 15 leaves well over a second of
+//      slack -- far more than a window_click round trip needs.
+//   2. Duplicate guarantee -- a colour whose REMAINING-batch demand exceeds one
+//      full stack keeps at least two hotbar stacks. prepareHotbarForBatch stages
+//      this at lane entry; this pass restores it mid-lane after an eviction or a
+//      merge collapses the duplicates back into one stack.
+//
+// At most ONE mutation per tick. The swaps are single packets, but serialising
+// them keeps the local slot prediction exact for the burst gate that reads it a
+// few lines later in the same tick.
+function runProactiveHotbarMaintenance(bot, config, batchTargets, seen) {
+  if (!Array.isArray(batchTargets) || batchTargets.length === 0) return { action: 'none' }
+  if (!Array.isArray(bot.inventory?.slots)) return { action: 'none' }
+  const advanced = config?.advanced || {}
+  const horizonCount = Math.max(1, toNumber(advanced.hotbarLookaheadHorizon, 50))
+  const refillThreshold = Math.max(0, toNumber(advanced.hotbarRefillThreshold, 15))
+
+  // Remaining batch targets in placement order. `seen` keys are "x:y:z".
+  const remaining = []
+  for (const target of batchTargets) {
+    if (!target?.blockName) continue
+    const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+    if (seen instanceof Set && seen.has(key)) continue
+    remaining.push(target)
+  }
+  if (remaining.length === 0) return { action: 'none' }
+
+  const windowTargets = remaining.length > horizonCount ? remaining.slice(0, horizonCount) : remaining
+  const windowDemand = countUpcomingTargetsByBlock(windowTargets)
+  const remainingDemand = remaining.length > windowTargets.length ? countUpcomingTargetsByBlock(remaining) : windowDemand
+
+  // 1. Threshold refill over the immediate horizon.
+  for (const [blockName] of windowDemand.entries()) {
+    let hotbarCount = 0
+    for (let index = 0; index < 9; index += 1) {
+      const stack = bot.inventory.slots[getHotbarWindowSlot(index)]
+      if (stack?.name === blockName) hotbarCount += Math.max(0, toNumber(stack.count, 0))
+    }
+    if (hotbarCount > refillThreshold) continue
+    if (countInventoryItems(bot, blockName) <= 0) continue
+
+    const residentIndex = findHotbarIndexForItem(bot, blockName)
+    const source = findBestInventorySlotForItem(bot, blockName)
+    if (!source) continue
+
+    if (residentIndex >= 0) {
+      if (source.slot === getHotbarWindowSlot(residentIndex)) continue
+      replenishHotbarSlot(bot, residentIndex, source.slot, blockName)
+      return { action: 'refill', blockName }
+    }
+    const destIndex = chooseMaterialHotbarIndex(bot, blockName, windowTargets)
+    if (destIndex >= 0 && destIndex <= 8 && source.slot !== getHotbarWindowSlot(destIndex)) {
+      silentHotbarSwap(bot, source.slot, destIndex)
+      return { action: 'stage', blockName }
+    }
+  }
+
+  // 2. Duplicate guarantee over the remaining batch. Carpets stack to 64.
+  const stackSize = 64
+  for (const [blockName, demand] of remainingDemand.entries()) {
+    if (demand <= stackSize) continue
+    const holders = findHotbarIndexesForItem(bot, blockName)
+    if (holders.length >= 2) continue
+    const source = findBestInventorySlotForItem(bot, blockName)
+    if (!source || (source.slot >= 36 && source.slot <= 44)) continue
+
+    // Stage the second stack into a reserved staging slot: empty first, or one
+    // already holding this colour (a merge, which is the same net effect).
+    const reserved = getReservedHotbarSlotCount()
+    const slots = bot.inventory.slots
+    for (let index = 0; index < reserved && index < 9; index += 1) {
+      const stack = slots[getHotbarWindowSlot(index)]
+      if (stack && stack.name !== blockName) continue
+      if (source.slot === getHotbarWindowSlot(index)) continue
+      silentHotbarSwap(bot, source.slot, index)
+      return { action: 'duplicate', blockName }
+    }
+  }
+
+  return { action: 'none' }
 }
 
 // Eviction rank for one hotbar slot.
@@ -18718,7 +18822,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           markTargetPlacedInWorld(target, key)
           return false
         }
-        if (!pendingUntil.has(key)) return false
+        // A cell the world says is unusable (non-air, non-carpet) is repair work,
+        // not drain work: waiting for it would burn the whole budget.
+        if (actual && actual.name !== 'air' && !String(actual.name).endsWith('_carpet')) return false
+        // A target that has never been attempted is not in pendingUntil, but it is
+        // still work in reach. Waiting only for attempted-and-cooling targets let
+        // the drain exit while tail carpets were still unplaced, which surfaced as
+        // the north/south-end misses the lane repair then had to walk back for.
         const dx = botPos.x - (target.position.x + 0.5)
         const dy = botPos.y - (target.position.y + 0.5)
         const dz = botPos.z - (target.position.z + 0.5)
@@ -18766,6 +18876,15 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       const tpsBurstCap = serverTps >= 19.0 ? 4 : (serverTps < 17.0 ? 3 : (bot.__nervCurrentBurstCap || 4))
       bot.__nervCurrentBurstCap = tpsBurstCap
       const effectiveCatchup = Math.min(maxCatchup, tpsBurstCap)
+
+      // Proactive maintenance runs every tick, even when the placement-rate gate
+      // below would skip this tick: refilling a low stack is exactly what the
+      // rate-gated ticks are FOR. One mutation per tick, predicted locally, so
+      // the burst gate below reads the post-maintenance state in the same tick.
+      const proactiveResult = runProactiveHotbarMaintenance(bot, config, batchTargets, seen)
+      if (proactiveResult.action !== 'none' && placementNoiseLogsEnabled(config)) {
+        console.log(`[HOTBAR-PROACTIVE] ${proactiveResult.action} ${proactiveResult.blockName}`)
+      }
 
       const rawAllowed = placeDelayMs > 0 ? Math.floor((now - lastTickTime) / placeDelayMs) : effectiveCatchup
 
@@ -20340,7 +20459,11 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       windowed: true,
       cols: inventoryWindow.cols,
       materials: inventoryWindow.materials,
-      dumpAllUnneededBeforeRestock: false
+      // One dump visit per restock window: dump every unneeded slot up front
+      // instead of the minimum needed for the next pull. The minimized dumps
+      // revisited the station several times per window (dump, retreat, wait,
+      // dump again), which is where the slow dump pattern came from.
+      dumpAllUnneededBeforeRestock: true
     })
     if (!materialsReady) {
       console.log('[NERV-INVENTORY-WARN] Could not fully clean/refill inventory for this window; continuing with current inventory. Emergency restocks will handle any shortfalls.')
