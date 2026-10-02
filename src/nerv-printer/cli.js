@@ -14530,10 +14530,21 @@ async function gateOnCompleteMap(bot, config, orderedTargets, placeRange) {
       if (Number.isFinite(centerX) && Number.isFinite(centerZ) && Number.isFinite(centerY)) {
         console.log(`[POSTPRINT-GATE] ${unloaded} target(s) unverifiable from here; walking to the map centre to re-verify.`)
         try {
-          await walkStraightToPointWithHardTimeout(bot, { x: centerX, y: centerY, z: centerZ }, 2.0, 60000, 'postprint-gate-center-recheck', {
-            config, sprint: true, jump: false, tickMs: 50, shouldPauseTimeout: () => false
-          })
+          // Hard-bounded: the walk's own "hard timeout" was observed not to
+          // fire when the walk never starts moving (bot idle 300s+ in this
+          // exact phase). Race it; on timeout, skip the re-verify -- the
+          // loaded-world scan plus the final scan already gate correctness,
+          // and unloaded cells get re-verified by the downstream pass.
+          const walkMs = Math.max(30000, toNumber(advanced.postPrintGateCenterWalkMs, 90000))
+          await Promise.race([
+            walkStraightToPointWithHardTimeout(bot, { x: centerX, y: centerY, z: centerZ }, 2.0, 60000, 'postprint-gate-center-recheck', {
+              config, sprint: true, jump: false, tickMs: 50, shouldPauseTimeout: () => false
+            }),
+            new Promise((resolve) => setTimeout(resolve, walkMs))
+          ])
         } catch { /* pathfinder fallback below */ }
+        try { bot.setControlState('sprint', false) } catch { }
+        try { bot.setControlState('forward', false) } catch { }
         const rescan = scanOutstanding(`POSTPRINT-GATE-${attempt}-CENTER`)
         outstanding = rescan.outstanding
         unloaded = rescan.unloaded
