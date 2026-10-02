@@ -14414,6 +14414,63 @@ async function gateOnCompleteMap(bot, config, orderedTargets, placeRange) {
       }
     }
 
+    // Fast first pass: plain missing carpets are placed with the lane printer's
+    // own burst path (4/tick, echo-verified, nearest-cluster-first) instead of
+    // the confirmed per-target repair choreography. Whatever survives --
+    // wrong blocks, unreachable cells -- still goes to the frozen repair
+    // fallback below, and nothing enters post-print until the world-first
+    // re-scan says complete. Bounded by a deadline so the sweep itself can
+    // never stall the gate.
+    if (outstanding.length > 0) {
+      const sweepStartAt = Date.now()
+      const sweepDeadlineMs = Math.max(30000, toNumber(advanced.postPrintGateFastSweepMs, 120000))
+      const sweepPlaceRange = placeRange
+      const Vec3Sweep = bot.entity.position.constructor
+      const remaining = new Map(outstanding.map((t) => [`${t.position.x}:${t.position.y}:${t.position.z}`, t]))
+      const echoWaitMs = Math.max(100, toNumber(advanced.scannerEchoRetryMs, 400))
+      while (remaining.size > 0 && Date.now() < sweepStartAt + sweepDeadlineMs) {
+        assertRuntimeContinue(bot, config, 'postprint-gate-fast-sweep')
+        const pos = bot.entity.position
+        let nearest = null
+        let nearestD2 = Infinity
+        for (const [key, t] of remaining) {
+          const dx = t.position.x + 0.5 - pos.x
+          const dy = t.position.y + 0.5 - (pos.y + 1.44)
+          const dz = t.position.z + 0.5 - pos.z
+          const d2 = dx * dx + dy * dy + dz * dz
+          if (d2 < nearestD2) { nearestD2 = d2; nearest = { key, t } }
+        }
+        if (!nearest) break
+        if (Math.sqrt(nearestD2) > sweepPlaceRange - 0.75) {
+          try {
+            await gotoGoalWithHardTimeout(
+              bot,
+              new GoalNear(nearest.t.position.x + 0.5, nearest.t.position.y, nearest.t.position.z + 0.5, Math.max(1, sweepPlaceRange - 1.5)),
+              15000,
+              'gate-fast-sweep-approach',
+              { config, shouldPauseTimeout: () => false }
+            )
+          } catch { break }
+          continue
+        }
+        let burst = 0
+        for (const [key, t] of remaining) {
+          if (burst >= 4) break
+          try {
+            const result = await placeNervScannerTarget(bot, config, t)
+            if (result.state === 'placed' || result.state === 'already') burst += 1
+          } catch { }
+        }
+        await delay(echoWaitMs)
+        for (const [key, t] of remaining) {
+          const actual = bot.blockAt(new Vec3Sweep(t.position.x, t.position.y, t.position.z))
+          if (actual?.name === t.blockName) remaining.delete(key)
+        }
+      }
+      outstanding = [...remaining.values()]
+      console.log(`[POSTPRINT-GATE-FAST] swept in ${Date.now() - sweepStartAt}ms; leftover for repair=${outstanding.length}`)
+    }
+
     if (outstanding.length === 0) {
       console.log(`[POSTPRINT-GATE] map verified complete after ${attempt - 1} gate repair pass(es)${unloaded > 0 ? ` (${unloaded} still unverifiable)` : ''}; ${lastCount ? `${lastCount} repaired, ` : ''}proceeding to post-print.`)
       return { ok: true, repaired: lastCount }
