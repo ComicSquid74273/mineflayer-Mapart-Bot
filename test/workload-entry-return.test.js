@@ -169,8 +169,12 @@ test('post-print is gated on a verified-complete map', () => {
   assert.match(source, /\[POSTPRINT-GATE\] map verified complete after/)
 
   // It must be enforced at BOTH final-scan sites, not just one branch.
-  const gateCalls = source.match(/const postPrintGate = await gateOnCompleteMap\(/g) || []
+  const gateCalls = source.match(/await gateOnCompleteMap\(bot, config, orderedTargets, placeRange\)/g) || []
   assert.equal(gateCalls.length, 2, `expected the gate before both post-print entries, found ${gateCalls.length}`)
+
+  // Resuming a job whose map was already delivered (reset-phase crash, canvas
+  // intentionally flushed) must SKIP the gate instead of re-printing the map.
+  assert.match(source, /resumePhase === 'post_print'[\s\S]{0,160}POSTPRINT-GATE\] skipped: resuming a delivered job/)
 
   // A blocked map must return without running post-print, and say why.
   assert.match(source, /\[POSTPRINT-GATE-BLOCKED\] \$\{blocked\.length\} carpet\(s\) remain unplaced or misplaced/)

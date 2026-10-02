@@ -20562,8 +20562,17 @@ async function runPrint(bot, config, dashboardRuntime = null) {
 
   console.log(`[SWEEP-FINAL] placed=${placed} already=${already} skipped=${skipped} ErrorCount=${errorList.length}`)
 
-  // Never hand an unverified map to post-print.
-  const postPrintGate = await gateOnCompleteMap(bot, config, orderedTargets, placeRange)
+  // Never hand an unverified map to post-print -- except when resuming a job
+  // that already MADE and delivered its map: a reset-phase crash leaves the
+  // canvas intentionally flushed (the output is already cartographed and
+  // deposited), and demanding a full canvas there re-printed the entire map
+  // through the repair machinery for carpets the next reset would flush again.
+  let postPrintGate = { ok: true, skipped: true }
+  if (resumePhase === 'post_print') {
+    console.log('[POSTPRINT-GATE] skipped: resuming a delivered job; canvas state after reset is irrelevant.')
+  } else {
+    postPrintGate = await gateOnCompleteMap(bot, config, orderedTargets, placeRange)
+  }
   if (!postPrintGate.ok) {
     return {
       completed: false,
