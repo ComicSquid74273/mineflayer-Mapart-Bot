@@ -20801,7 +20801,10 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         const batchOptions = { windowTargets: inventoryWindow.targets }
         const linesPerRunCount = Math.max(1, toNumber(linesPerRun, 1))
         const nextColBatch = inventoryCols.slice(j + linesPerRunCount, j + 2 * linesPerRunCount)
-        if (nextColBatch.length > 0) {
+        // Bonus next-band head cells during the turn are opt-in: default is
+        // ACTIVE LANE ONLY -- printing outside the active lane looks random
+        // and fights the lane's own material staging.
+        if (nextColBatch.length > 0 && advanced.workloadUTurnBonusEnabled === true) {
           const nextStartOnNorth = !batchStartOnNorthSide
           const nextRowOrder = nextStartOnNorth ? sortedRowsAsc : [...sortedRowsAsc].reverse()
           const nextBatchTargets = []
