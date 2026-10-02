@@ -19418,6 +19418,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         console.log(`[NERV-WORKLOAD-CHECKPOINT] action=${currentAction || 'place'} goal=${checkpoint.position.x.toFixed(2)} ${checkpoint.position.y.toFixed(2)} ${checkpoint.position.z.toFixed(2)} range=${checkpointBuffer} from=${beforeMove.x.toFixed(2)} ${beforeMove.y.toFixed(2)} ${beforeMove.z.toFixed(2)} timeoutMs=${checkpointMoveTimeoutMs} mode=${movementMode}`)
         checkpointMoveInProgress = true
         try {
+          // An emergency restock aborts the lane walk IMMEDIATELY. Without
+          // this, the walk kept asserting forward toward the print goal while
+          // the restock navigation pulled toward the chest -- the bot dragged
+          // itself in two directions a few blocks at a time, froze the loop,
+          // and the resulting keep-alive stall showed up as a ping spike.
+          const abortForRestock = () => emergencyRestockBlock != null || latencySafeInterrupted
           if (useStraightCheckpoint) {
             await walkStraightToPointWithHardTimeout(
               bot,
@@ -19431,7 +19437,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 jump: false,
                 tickMs: straightCheckpointTickMs,
                 shouldPauseTimeout: () => !isWorkloadPlatformReady(),
-                isGoalSatisfied: checkpointIsCloseEnough
+                isGoalSatisfied: () => abortForRestock() || checkpointIsCloseEnough()
               }
             )
           } else {
@@ -19444,7 +19450,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 config,
                 shouldPauseTimeout: () => !isWorkloadPlatformReady(),
                 pollMs: Math.max(100, Math.min(1000, toNumber(advanced.platformWatchdogPollMs, toNumber(config.advanced?.platformWatchdogPollMs, 1000)))),
-                isGoalSatisfied: checkpointIsCloseEnough
+                isGoalSatisfied: () => abortForRestock() || checkpointIsCloseEnough()
               }
             )
           }
