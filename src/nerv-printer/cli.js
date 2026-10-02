@@ -5865,6 +5865,11 @@ function createDefaultConfig() {
       // echo before the scan may re-offer the cell. Roughly 1.5x RTT; a
       // shorter value re-sends packets the server is still processing.
       scannerEchoRetryMs: 250,
+      // block_changed_ack settle: ms after the ack to read the world (the
+      // server's block updates ride with or just before the ack), and the
+      // re-offer cooldown for cells the server judged rejected.
+      ackSettleDelayMs: 75,
+      ackRejectCooldownMs: 250,
       // Blocks before the lane end where the turn starts: with reach 5, turning
       // 3 rows early keeps the tail rows printable through the lateral leg.
       workloadTurnEarlyBlocks: 3,
@@ -18564,6 +18569,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let slowBacklogTicks = 0
   let slowClearTicks = 0
   let retriesTotalCount = 0
+  let ackSettleConfirmed = 0
+  let ackSettleRejected = 0
   const seen = new Set()
   const stallSkipped = new Set()
   const pendingUntil = new Map()
@@ -18578,6 +18585,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let checkpointMoveInProgress = false
   const maxInventoryDesyncHits = Math.max(1, toNumber(advanced.scannerInventoryDesyncMaxHits, 3))
   const inventoryDesyncCooldownMs = Math.max(retryCooldownMs, toNumber(advanced.scannerInventoryDesyncCooldownMs, 250))
+  const ackRejectCooldownMs = Math.max(50, toNumber(advanced.ackRejectCooldownMs, 250))
   const stall = {
     lastWorldProgressAt: Date.now(),
     attemptsSinceWorldProgress: 0,
@@ -18589,6 +18597,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
 
   const getTargetKey = (target) => `${target.position.x}:${target.position.y}:${target.position.z}`
+  const targetByKey = new Map(batchTargets.map((target) => [getTargetKey(target), target]))
   const captureEmergencyRestockAnchor = (target, reason) => {
     if (!target?.position) return
     const botPos = bot?.entity?.position
@@ -18739,6 +18748,28 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     noteWorldPlacementProgress()
     confirmedPlaced.add(key)
   }
+  // Ack-driven settle: block_changed_ack says the server has judged our send,
+  // so the world read behind it is truth. An exact-colour match releases the
+  // blind echo park immediately; anything else re-enters the offer pool after
+  // a short cooldown instead of waiting out the full window. Acks for cells
+  // this batch is not parking (late, foreign, or already resolved) are ignored.
+  const ackTracker = bot.__nervPlacementAckTracker || null
+  const ackStatsAtStart = ackTracker ? { ...ackTracker.stats } : null
+  const handleAckSettle = (key, worldName) => {
+    if (emergencyRestockBlock) return
+    if (!pendingUntil.has(key)) return
+    const target = targetByKey.get(key)
+    if (!target) return
+    if (worldName === target.blockName) {
+      ackSettleConfirmed += 1
+      markTargetPlacedInWorld(target, key)
+      return
+    }
+    ackSettleRejected += 1
+    pendingUntil.set(key, Date.now() + ackRejectCooldownMs)
+    retryPriority.add(key)
+  }
+  if (ackTracker) ackTracker.settlers.add(handleAckSettle)
   const getTargetWorldBlock = (target) => {
     const Vec3Target = bot.entity.position.constructor
     return bot.blockAt(new Vec3Target(target.position.x, target.position.y, target.position.z))
@@ -19740,6 +19771,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
   } finally {
     active = false
+    if (ackTracker) ackTracker.settlers.delete(handleAckSettle)
     delete bot.__nervActiveBatchTargets
     delete bot.__nervTraversalDirection
     delete bot.__nervTraversalSlow
@@ -19825,7 +19857,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       `walkMs=${Math.max(0, laneWalkTotalMs - totalMs)} drainMs=${lineEndDrainMs} ` +
       `backtrackMs=${backtrackMs} repairMs=${lineEndRepairMs} ` +
       `unresolvedIn=${unresolvedInCount} unresolvedOut=${unresolvedOutCount} ` +
-      `slowTicks=${traversalSlowTicks}`
+      `slowTicks=${traversalSlowTicks} ` +
+      `acks=${ackTracker && ackStatsAtStart ? ackTracker.stats.acks - ackStatsAtStart.acks : 0} ` +
+      `ackOk=${ackSettleConfirmed} ackReject=${ackSettleRejected}`
     )
   }
 
@@ -21379,6 +21413,59 @@ async function runPrint(bot, config, dashboardRuntime = null) {
   }
 }
 
+// The server answers every sequenced block_place with block_changed_ack
+// (minecraft-data legacy name: acknowledge_player_digging). The ack means
+// "sequence N is judged": the block updates the server sent for it have
+// already been applied to our world, so one blockAt read at that moment is
+// authoritative truth -- accepted placements release their blind echo park
+// immediately and judged-rejected ones re-enter the offer pool without
+// waiting out the full window. No client-side prediction is involved, so a
+// missing or lying ack can only ever leave the blind-window behaviour intact.
+function installPlacementAckTracking(bot, config, options = {}) {
+  const guard = bot?.__nervBlockInteractionGuard
+  if (!guard?.placementLedger || !bot?._client || typeof bot._client.on !== 'function') return null
+  if (bot.__nervPlacementAckTracker) return bot.__nervPlacementAckTracker
+
+  const schedule = typeof options.scheduler === 'function' ? options.scheduler : (fn, ms) => setTimeout(fn, ms)
+  const settleDelayMs = Math.max(0, toNumber(config?.advanced?.ackSettleDelayMs, 75))
+  const { Vec3 } = require('vec3')
+  const stats = { acks: 0, blockPresent: 0, blockAbsent: 0, unmatched: 0 }
+  const settlers = new Set()
+  const tracker = { stats, settlers }
+  bot.__nervPlacementAckTracker = tracker
+
+  bot._client.on('acknowledge_player_digging', (packet) => {
+    const sequence = Number(packet?.sequenceId)
+    if (!Number.isFinite(sequence)) return
+    const key = guard.placementLedger.take(sequence)
+    if (!key) {
+      stats.unmatched += 1
+      return
+    }
+    stats.acks += 1
+    // The block updates ride with (or just before) the ack; give the packet
+    // parser a beat before judging the cell.
+    schedule(() => {
+      let worldName = 'unknown'
+      try {
+        const [x, y, z] = key.split(':').map(Number)
+        worldName = bot.blockAt(new Vec3(x, y, z))?.name || 'unknown'
+      } catch {
+        worldName = 'unknown'
+      }
+      if (worldName === 'air' || worldName === 'unknown') stats.blockAbsent += 1
+      else stats.blockPresent += 1
+      for (const settle of settlers) {
+        try {
+          settle(key, worldName)
+        } catch { }
+      }
+    }, settleDelayMs)
+  })
+
+  return tracker
+}
+
 function createBot(config) {
   const botCfg = config.bot || {}
   const username = botCfg.username || 'MapartBot'
@@ -21428,6 +21515,7 @@ function createBot(config) {
   bot.once('inject_allowed', () => {
     installBlockInteractionGuard(bot)
     installAdaptiveLatencyGuard(bot, config)
+    installPlacementAckTracking(bot, config)
   })
   installServerInventoryTracker(bot)
   // A server can send the one full 128x128 map snapshot immediately after

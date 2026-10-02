@@ -223,6 +223,11 @@ function sendSneakRelease(bot) {
   }
 }
 
+// Cap on remembered sequence->position pairs: enough to cover a placement
+// burst plus in-flight acks, small enough that a server which never answers
+// block_changed_ack cannot grow the ledger unbounded.
+const PLACEMENT_LEDGER_LIMIT = 128
+
 function installBlockInteractionGuard(bot) {
   const client = bot?._client
   if (!client || typeof client.write !== 'function' || typeof bot?.activateBlock !== 'function') return null
@@ -234,6 +239,21 @@ function installBlockInteractionGuard(bot) {
     sentInteractions: 0,
     lastSequence: null
   }
+  // Sequence -> placed-position key. The server's block_changed_ack
+  // (minecraft-data legacy name: acknowledge_player_digging) names the
+  // sequence it finished judging; mapping it back to the position lets the
+  // caller read the authoritative world state at exactly that moment.
+  const placementTargets = new Map()
+  const placementLedger = {
+    take(sequence) {
+      const key = placementTargets.get(sequence)
+      placementTargets.delete(sequence)
+      return key
+    },
+    size() {
+      return placementTargets.size
+    }
+  }
   const previousWrite = client.write.bind(client)
   const sequencedWrite = (packetName, packet = {}) => {
     const name = String(packetName || '')
@@ -243,6 +263,12 @@ function installBlockInteractionGuard(bot) {
       state.nextSequence = sequence + 1
       state.sentInteractions += 1
       state.lastSequence = sequence
+      if (name === 'block_place' && packet.location && Number.isFinite(Number(packet.location.x))) {
+        placementTargets.set(sequence, `${Math.floor(packet.location.x)}:${Math.floor(packet.location.y)}:${Math.floor(packet.location.z)}`)
+        while (placementTargets.size > PLACEMENT_LEDGER_LIMIT) {
+          placementTargets.delete(placementTargets.keys().next().value)
+        }
+      }
       return previousWrite(packetName, { ...packet, sequence })
     }
     return previousWrite(packetName, packet)
@@ -275,7 +301,7 @@ function installBlockInteractionGuard(bot) {
   activateBlock.__nervBlockInteractionWrapped = true
   bot.activateBlock = activateBlock
 
-  const guard = { state, previousWrite, previousActivateBlock }
+  const guard = { state, previousWrite, previousActivateBlock, placementLedger }
   bot.__nervBlockInteractionGuard = guard
   return guard
 }
