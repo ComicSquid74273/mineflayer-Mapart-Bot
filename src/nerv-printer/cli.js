@@ -18978,6 +18978,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     let weakestCount = Number.POSITIVE_INFINITY
     for (let index = 0; index <= 8; index += 1) {
       if (index === excludeSlot) continue
+      // Never stage into the slot the hand is on, nor one with unsettled
+      // sends: swapping the stack under an in-flight placement makes the
+      // next block_place land the NEW colour in a cell scheduled for the
+      // old one -- a self-inflicted misprint (seen as ackReject bursts).
+      if (index === bot.quickBarSlot) continue
+      if (bot.__nervInFlight?.effectiveCount(index) != null) continue
       const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
       if (!stack || Number(stack.count) <= 0) {
         if (freeSlot < 0) freeSlot = index
@@ -19585,7 +19591,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
                 if (!stack || Number(stack.count) <= 0) { hop = index; break }
               }
-              if (source && hop >= 0) {
+              if (source && hop >= 0 && hop !== bot.quickBarSlot) {
                 const cursorItem = serializeCursorItem(bot, bot.inventory)
                 bot._client.write('window_click', { windowId: 0, stateId: -1, slot: source.slot, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
                 bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
