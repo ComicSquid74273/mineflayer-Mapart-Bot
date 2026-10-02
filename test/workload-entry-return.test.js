@@ -128,7 +128,7 @@ test('the per-band lane verify consults the ledger instead of the silent client 
   // job and `[LANE-VERIFY] missing` reported hundreds of false misses.
   const verifyStart = source.indexOf('const laneMisses = []')
   assert.ok(verifyStart >= 0, 'lane verify must exist')
-  const verify = source.slice(verifyStart, verifyStart + 1200)
+  const verify = source.slice(verifyStart, verifyStart + 2200)
 
   assert.match(verify, /__nervConfirmedPlaced\.has\(key\)\) continue/)
   // The miss classification must still happen for anything the ledger never claimed.
@@ -136,6 +136,9 @@ test('the per-band lane verify consults the ledger instead of the silent client 
   assert.match(verify, /actual\.name !== target\.blockName/)
   // An unloaded chunk is not a miss.
   assert.match(verify, /if \(!actual\) continue/)
+  // Ledgered-but-absent targets (server-rejected packets) come from the batch's
+  // own verify and are repaired at the lane end instead of the final sweep.
+  assert.match(verify, /for \(const target of result\.missingTargets \|\| \[\]\)/)
 
   // The residual re-read after repair must honour the ledger too, or a completed
   // repair is immediately re-reported as still absent.

@@ -19439,6 +19439,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // lane look perfect while carpets were still absent.
   let missing = 0
   let unverified = 0
+  const missingTargets = []
   for (const target of batchTargets) {
     const key = getTargetKey(target)
     const actual = bot.blockAt(new Vec3(target.position.x, target.position.y, target.position.z))
@@ -19449,6 +19450,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     if (!confirmedPlaced.has(key)) continue
     // The ledger says we placed it but the world disagrees: count it as missing.
     missing += 1
+    missingTargets.push(target)
   }
   for (const target of batchTargets) {
     const key = getTargetKey(target)
@@ -19459,6 +19461,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
   if (missing > 0 || unverified > 0) {
     console.log(`[LANE-VERIFY] missing=${missing} unverified=${unverified} of ${batchTargets.length}; repairing before the next lane.`)
+    if (missingTargets.length > 0) {
+      // Positions only, capped: these are server-rejected placements and their
+      // layout (lane ends vs scattered) says whether the cause is geometry or rate.
+      const samples = missingTargets.slice(0, 8).map((t) => `${t.position.x},${t.position.y},${t.position.z}`)
+      console.log(`[LANE-VERIFY-MISS-SAMPLES] ${missingTargets.length} ledgered-but-absent: ${samples.join(' ; ')}`)
+    }
     if (unverifiedPlacementSamples.length > 0) {
       console.log(`[UNVERIFIED-PLACEMENT-SAMPLES] ${JSON.stringify(unverifiedPlacementSamples)}`)
       unverifiedPlacementSamples.length = 0
@@ -19472,6 +19480,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     seen: seen.size + latencySafeSeen,
     seenSet: seen,
     missing,
+    missingTargets,
     hardStops,
     rawAllowed: rawAllowedTotal,
     capped: cappedTotal,
@@ -20520,15 +20529,26 @@ async function runPrint(bot, config, dashboardRuntime = null) {
           const Vec3Batch = bot.entity.position.constructor
           const batchErrorKeys = new Set(errorList.map(e => `${e.position.x}:${e.position.y}:${e.position.z}`))
           const laneMisses = []
+          const laneMissKeys = new Set()
+          // Ledgered-but-absent targets come straight from the batch's own verify:
+          // these are placement packets the server silently rejected. Without this
+          // they waited for the final sweep, which is a full-map walkback for work
+          // that is a few blocks behind the bot at the lane end.
+          for (const target of result.missingTargets || []) {
+            const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+            if (batchErrorKeys.has(key) || laneMissKeys.has(key)) continue
+            laneMissKeys.add(key)
+            laneMisses.push(target)
+          }
           for (const target of batchTargets) {
             const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-            if (batchErrorKeys.has(key)) continue
+            if (batchErrorKeys.has(key) || laneMissKeys.has(key)) continue
             if (bot.__nervConfirmedPlaced instanceof Set && bot.__nervConfirmedPlaced.has(key)) continue
             const actual = bot.blockAt(new Vec3Batch(target.position.x, target.position.y, target.position.z))
             if (!actual) continue
             if (actual.name !== target.blockName) {
+              laneMissKeys.add(key)
               laneMisses.push(target)
-              errorList.push(target)
               if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 const reason = actual.name === 'air' ? 'missing' : `wrong-${actual.name}`
                 console.log(`[LANE-MISS] ${target.position.x} ${target.position.y} ${target.position.z} (${reason})`)
