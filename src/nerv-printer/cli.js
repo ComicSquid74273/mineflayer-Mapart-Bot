@@ -19514,9 +19514,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       if (latencySafeInterrupted) break
 
       if ((checkpoint === checkpoints[0] || checkpoint.action === '') && !emergencyRestockBlock) {
-        // Actively place entrance boundary row targets while stationary before forward sprint starts
+        // The entry stands one block BEFORE the first row, so every boundary
+        // cell is ahead of the bot and stays in reach for the first ~2s of
+        // travel: sprint immediately and let the on-the-move scan print them.
+        // The old stationary 40-placement pre-drain predates that geometry and
+        // showed up as a visible pause at every lane start.
         const entryDrainStartAt = Date.now()
-        await placeReachableActiveTargets(40)
         await drainActiveColumnTargets(150)
         lineEndDrainMs += Date.now() - entryDrainStartAt
         logLaneEdgeVerify('entry')
