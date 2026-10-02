@@ -247,8 +247,11 @@ test('step 4: position-derived plan clock and live reach gate', () => {
   assert.match(batch, /bandPlan\.pacing\.find\(\(s\) => planTick >= s\.fromTick && planTick < s\.toTick\)/)
   assert.match(batch, /const slowNow = planPaceWalk \|\|/)
   // Every planned emission passes a live reach gate before the packet goes
-  // out (schedule says when, eye-range confirms now).
-  const dueAt = batch.indexOf('cell.emitTick > planTick')
+  // out (schedule says when, eye-range confirms now). Anchor on the
+  // due-filter's occurrence (the pacing block also reads emitTick).
+  const dueAt = batch.lastIndexOf('cell.emitTick > planTick')
   assert.ok(dueAt >= 0)
   assert.match(batch.slice(dueAt, dueAt + 1600), /liveReach2/, 'due cells must pass the live reach gate')
+  // Schedule-debt pacing: the bot walks when due-but-unsent cells pile up.
+  assert.match(batch, /bot\.__nervTraversalSlow === true \? due > 0 : due > 4/)
 })

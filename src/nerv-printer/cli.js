@@ -19258,15 +19258,27 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           slowClearTicks += 1
           slowBacklogTicks = 0
         }
-        // Band scheduler pacing: the plan already knows which intervals are
-        // capacity-tight (walk) — it outranks the backlog heuristic. The
-        // clock is position-derived (see currentPlanTick).
+        // Band scheduler pacing: two signals, both outranking the backlog
+        // heuristic. (1) compile-time: intervals the plan already marked
+        // capacity-tight. (2) runtime schedule debt: cells whose scheduled
+        // tick has arrived but are neither sent nor confirmed -- when the
+        // bot outruns the printer (2/tick cap vs sprint), debt piles up and
+        // the bot walks until the printer catches up. Hysteresis: engage
+        // above 4 due cells, release only at zero.
         const planPaceWalk = (() => {
           if (!bandPlan) return false
           const planTick = currentPlanTick()
           if (planTick < 0) return false
           const seg = bandPlan.pacing.find((s) => planTick >= s.fromTick && planTick < s.toTick)
-          return seg?.pace === 'walk'
+          if (seg?.pace === 'walk') return true
+          let due = 0
+          for (const cell of bandPlan.cells) {
+            if (cell.emitTick > planTick) continue
+            if (planTick > cell.exit + 10) continue // window gone: repair's job, not pacing debt
+            if (seen.has(cell.key) || pendingUntil.has(cell.key)) continue
+            due += 1
+          }
+          return bot.__nervTraversalSlow === true ? due > 0 : due > 4
         })()
         const slowNow = planPaceWalk || (bot.__nervTraversalSlow === true
           ? slowBacklogTicks >= 1
