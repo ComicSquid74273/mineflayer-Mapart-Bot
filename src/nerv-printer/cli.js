@@ -19490,6 +19490,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               // sprint spikes instead of letting debt pile into repair.
               if (burstTargets.length < allowed && planEmittedThisTick < perTickCap) {
                 const ahead = []
+                // Colour-coherent fill: prefer cells matching what the hand
+                // already holds, then distance -- mixing colours against the
+                // scheduled pass churns held_item_slot selects every wake and
+                // steals the server's interaction budget.
+                const heldName = String(bot.heldItem?.name || '')
                 for (const cell of bandPlan.cells) {
                   if (burstExcluded.has(cell.key) || seen.has(cell.key)) continue
                   const tp = cell.target.position
@@ -19498,9 +19503,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                   const dz = bot.entity.position.z - (tp.z + 0.5)
                   const d2 = dx * dx + dy * dy + dz * dz
                   if (d2 > liveReach2) continue
-                  ahead.push({ cell, d2 })
+                  ahead.push({ cell, d2, colourMismatch: cell.target.blockName !== heldName ? 1 : 0 })
                 }
-                ahead.sort((l, r) => l.d2 - r.d2)
+                ahead.sort((l, r) => l.colourMismatch - r.colourMismatch || l.d2 - r.d2)
                 for (const { cell } of ahead) {
                   if (burstTargets.length >= allowed || planEmittedThisTick >= perTickCap) break
                   const Vec3Plan = bot.entity.position.constructor
