@@ -263,6 +263,10 @@ test('step 3: no inventory mutation inside the emission window', () => {
   const swapAt = cliSource.indexOf('function silentHotbarSwap(')
   const swap = cliSource.slice(swapAt, cliSource.indexOf('\nfunction ', swapAt))
   assert.match(swap, /bot\.__nervBandPlanActive !== true && Array\.isArray\(slots\)/, 'slot prediction must be skipped under a plan')
+  // Authoritative swaps (Staircase revision -1): the click always executes
+  // and always answers with a full window snapshot -- no stateId race with
+  // the placement set_slot stream, no echo-less applied clicks.
+  assert.match(swap, /stateId: -1/, 'swaps must force the authoritative full-sync path')
 
   // Deferrals are explicit, cheap, and never counted as desyncs.
   assert.match(cliSource, /plan-not-staged-/)

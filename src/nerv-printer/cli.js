@@ -7550,14 +7550,19 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
   if (!window || !bot._client) return false
   try { bot.lastDigTime = null } catch { }
 
-  const stateId = getWindowStateId(bot)
   const cursorItem = serializeCursorItem(bot, window)
   if (!cursorItem) return false
 
   try {
     bot._client.write('window_click', {
       windowId: window.id,
-      stateId,
+      // stateId -1 (Staircase's authoritative-swap trick): a "matching"
+      // revision races our own placement set_slot stream and loses silently,
+      // and a correct prediction can legitimately produce NO echo at all.
+      // Forcing -1 makes the server execute the click regardless and answer
+      // with one full authoritative window snapshot -- click plus guaranteed
+      // confirmation and full inventory resync in a single round trip.
+      stateId: -1,
       slot: sourceSlot,
       // mode 2 is SWAP: the button carries the HOTBAR INDEX to swap against, not a
       // constant. Sending 0 made the server swap into hotbar 0 while we predicted

@@ -384,13 +384,13 @@ test('hotbar swaps bypass clickWindow so no burst pays a server round trip', () 
   assert.match(helper, /mouseButton: Math\.max\(0, Math\.min\(8, destHotbarIndex\)\)/)
   assert.doesNotMatch(helper, /mouseButton: 0,/)
 
-  // stateId must be the live window revision, not a constant. mineflayer tracks it
-  // from window_items/set_slot (lib/plugins/inventory.js:33-35) and sends the tracked
-  // value on every real click (:611); a hardcoded 0 is a stale revision that the server
-  // rejects, which is exactly what a held-item-desync is. The tracking lives in a
-  // shared helper now, so both the swap and the merge path read the same revision.
+  // stateId is deliberately -1 (Staircase authoritative-swap): a tracked
+  // "current" revision races our own placement set_slot stream mid-print and
+  // loses silently, and a matching revision can legitimately produce no echo
+  // at all. -1 forces the server to execute the click and answer with a full
+  // authoritative window snapshot. A hardcoded 0 remains forbidden.
   assert.doesNotMatch(helper, /stateId: 0/)
-  assert.match(helper, /getWindowStateId\(bot\)/)
+  assert.match(helper, /stateId: -1/)
 
   const trackerStart = source.indexOf('function getWindowStateId(')
   assert.ok(trackerStart >= 0, 'getWindowStateId must exist')
