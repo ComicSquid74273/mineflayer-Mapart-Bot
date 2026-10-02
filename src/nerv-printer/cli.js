@@ -19428,11 +19428,15 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           try {
             if (planTick >= 0) {
               // Hard per-tick cap: the server silently drops burst catch-up
-              // (measured intake ~1-2 per 50ms tick regardless of send rate),
-              // so the plan never bursts to catch up -- the schedule absorbs
-              // delay by shifting cells into their later attempt/window.
-              if (planTick !== planEmitTickSeen) {
-                planEmitTickSeen = planTick
+              // (measured intake ~1-2 per 50ms tick regardless of send rate).
+              // The cap refills per REAL 50ms window -- tying it to the
+              // position-derived planTick throttled emission to ~2x walking
+              // speed (planTick advances 9-12/s while walking), which is why
+              // the printer could never catch up and pacing compensated by
+              // slowing the bot. The 40/s budget must not move with the bot.
+              const emitWindow = Math.floor(Date.now() / 50)
+              if (emitWindow !== planEmitTickSeen) {
+                planEmitTickSeen = emitWindow
                 planEmittedThisTick = 0
               }
               const perTickCap = Math.max(1, Math.trunc(toNumber(advanced.bandSchedulerBlocksPerTick, 4)))
