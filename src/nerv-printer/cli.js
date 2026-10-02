@@ -5864,7 +5864,13 @@ function createDefaultConfig() {
       // Echo window: how long a sent placement waits for the server's world
       // echo before the scan may re-offer the cell. Roughly 1.5x RTT; a
       // shorter value re-sends packets the server is still processing.
+      // With placement prediction on, this window only paces RETRIES of
+      // server-corrected cells (IceTank uses 10 ticks ~= 500ms).
       scannerEchoRetryMs: 250,
+      // Vanilla-client placement prediction: write the block into our world
+      // and decrement the held stack the moment the packet is sent. The
+      // server's block_update corrections are the only retry signal.
+      scannerPredictPlacements: true,
       // Blocks before the lane end where the turn starts: with reach 5, turning
       // 3 rows early keeps the tail rows printable through the lateral leg.
       workloadTurnEarlyBlocks: 3,
@@ -16849,6 +16855,76 @@ function noteUnverifiedPlacement(bot, target, attempt, support) {
   }
 }
 
+// Vanilla-client placement prediction (the mechanism IceTank's printer and every
+// real client runs on): the moment a placement packet is written, the client
+// world shows the block and the held stack shrinks. The server later confirms
+// (no-op) or corrects (block_update back to air) each prediction, and the scan
+// simply follows the world: a predicted cell is never re-offered, a corrected
+// cell re-enters the candidate pool after its cooldown. One send per cell in
+// the success case -- replacing the echo-window guessing that produced the
+// measured 2.0 sends/cell retry storm.
+function predictPlacementInWorld(bot, target) {
+  try {
+    const pos = target.position
+    const block = bot.registry?.blocksByName?.[target.blockName]
+    const stateId = Number.isFinite(Number(block?.minStateId)) ? Number(block.minStateId) : null
+    if (stateId != null && typeof bot._updateBlockState === 'function') {
+      const Vec3Predict = bot.entity.position.constructor
+      bot._updateBlockState(new Vec3Predict(pos.x, pos.y, pos.z), stateId)
+    }
+    // Decrement the held stack the way the vanilla client does, so readiness
+    // math and duplicate staging stay accurate before the server's set_slot
+    // arrives. The live getter reads this immediately.
+    const held = bot.heldItem
+    if (held && held.name === target.blockName) {
+      held.count = Math.max(0, toNumber(held.count, 1) - 1)
+      if (held.count <= 0) {
+        const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0
+        if (Array.isArray(bot.inventory?.slots)) bot.inventory.slots[36 + selectedIndex] = null
+      }
+    }
+    if (!(bot.__nervPredictedPlacements instanceof Map)) bot.__nervPredictedPlacements = new Map()
+    const key = `${pos.x}:${pos.y}:${pos.z}`
+    bot.__nervPredictedPlacements.set(key, { selfEcho: false, name: target.blockName, at: Date.now() })
+    bot.__nervPredictedCount = (bot.__nervPredictedCount || 0) + 1
+    if (bot.__nervPredictedPlacements.size > 4096) {
+      const oldest = bot.__nervPredictedPlacements.keys().next().value
+      bot.__nervPredictedPlacements.delete(oldest)
+    }
+  } catch { }
+}
+
+// Server corrections are the retry signal: a block_update to air at a predicted
+// position is a REAL rejection (reach, rate, state). Each correction removes
+// the optimistic ledger entry so the scan and the lane checks see the cell as
+// outstanding again, and increments a counter that names the true rejection
+// rate per band. The first blockUpdate for a key is always our own prediction
+// write (synchronous, single thread), so it is swallowed as the self-echo.
+function installPlacementCorrectionTracker(bot) {
+  if (!bot || bot.__nervCorrectionTrackerInstalled || typeof bot.on !== 'function') return
+  bot.__nervCorrectionTrackerInstalled = true
+  bot.on('blockUpdate', (oldBlock, newBlock) => {
+    try {
+      const map = bot.__nervPredictedPlacements
+      if (!(map instanceof Map) || map.size === 0) return
+      const pos = newBlock?.position ?? oldBlock?.position
+      if (!pos) return
+      const key = `${pos.x}:${pos.y}:${pos.z}`
+      const entry = map.get(key)
+      if (!entry) return
+      if (!entry.selfEcho) {
+        entry.selfEcho = true
+        return
+      }
+      map.delete(key)
+      if (!newBlock || newBlock.name === 'air') {
+        bot.__nervCorrectedCount = (bot.__nervCorrectedCount || 0) + 1
+        if (bot.__nervConfirmedPlaced instanceof Set) bot.__nervConfirmedPlaced.delete(key)
+      }
+    } catch { }
+  })
+}
+
 async function placeTarget(bot, config, target, isRepairPass = false) {
   const printer = config.printer || {}
   const errors = config.errorHandling || {}
@@ -17028,6 +17104,10 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
           // that 6b6t's rate limiter kicks for (measured 263 swings per 5s).
           forceLook: 'ignore'
         })
+        if (config.advanced?.scannerPredictPlacements !== false) {
+          installPlacementCorrectionTracker(bot)
+          predictPlacementInWorld(bot, target)
+        }
       } else {
         await bot.placeBlock(attempt.block, attempt.face)
       }
@@ -18560,6 +18640,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let unresolvedInCount = 0
   let unresolvedOutCount = 0
   let laneWalkTotalMs = 0
+  const predictBaseline = {
+    predicted: bot.__nervPredictedCount || 0,
+    corrected: bot.__nervCorrectedCount || 0
+  }
   let traversalSlowTicks = 0
   let slowBacklogTicks = 0
   let slowClearTicks = 0
@@ -19825,6 +19909,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       `walkMs=${Math.max(0, laneWalkTotalMs - totalMs)} drainMs=${lineEndDrainMs} ` +
       `backtrackMs=${backtrackMs} repairMs=${lineEndRepairMs} ` +
       `unresolvedIn=${unresolvedInCount} unresolvedOut=${unresolvedOutCount} ` +
+      `predicted=${(bot.__nervPredictedCount || 0) - predictBaseline.predicted} ` +
+      `serverCorrected=${(bot.__nervCorrectedCount || 0) - predictBaseline.corrected} ` +
       `slowTicks=${traversalSlowTicks}`
     )
   }
