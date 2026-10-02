@@ -16966,7 +16966,9 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         // was justified by an incorrect "cursor is a 0-15 integer" reading of the
         // protocol and moved the hit point off the face for no reason.
         await bot._genericPlace(attempt.block, attempt.face, {
-          swingArm: 'right',
+          // No arm swing: the server accepts block_place without it. One
+          // packet per placement instead of two halves the burst profile
+          // that 6b6t's rate limiter kicks for (measured 263 swings per 5s).
           forceLook: 'ignore'
         })
       } else {
