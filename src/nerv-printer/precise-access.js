@@ -1235,6 +1235,13 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
   const startDistance = horizontalDistance(bot?.entity?.position, target)
   let reachedDistance = startDistance
   let isMovingForward = false
+  // Spin/orbit instrumentation only -- no behavior change. A 360 at an access
+  // point shows up as rapid yaw-error sign flips while forward stays asserted,
+  // or as near-zero net displacement against a goal that never gets closer.
+  let lastYawDiffSign = 0
+  const yawFlipTimes = []
+  const orbitSamples = []
+  let lastSpinLogAt = 0
 
   if (!Number.isFinite(startDistance)) {
     throw new Error('precise-access-position-unavailable')
@@ -1379,6 +1386,28 @@ async function walkToPreciseAccessPoint(bot, target, options = {}) {
           } catch { }
         }, 80)
         lastAdvanceAt = Date.now()
+      }
+      // Spin/orbit detection: evidence for the reported 360 at openpos/map
+      // center. Throttled, position-free (deltas and angles only).
+      if (Number.isFinite(yawDiff) && Math.abs(yawDiff) > 0.05) {
+        const sign = yawDiff > 0 ? 1 : -1
+        if (lastYawDiffSign !== 0 && sign !== lastYawDiffSign) {
+          const nowMs = Date.now()
+          yawFlipTimes.push(nowMs)
+          while (yawFlipTimes.length > 0 && nowMs - yawFlipTimes[0] > 3000) yawFlipTimes.shift()
+          orbitSamples.push({ at: nowMs, x: position.x, z: position.z, distance })
+          while (orbitSamples.length > 0 && nowMs - orbitSamples[0].at > 3000) orbitSamples.shift()
+          if (yawFlipTimes.length >= 6 && nowMs - lastSpinLogAt > 5000) {
+            lastSpinLogAt = nowMs
+            const first = orbitSamples[0]
+            const net = Math.hypot(position.x - first.x, position.z - first.z)
+            console.log(
+              `[PRECISE-APPROACH-SPIN] yawFlips=${yawFlipTimes.length}/3s netMove=${net.toFixed(2)} distance=${distance.toFixed(2)} ` +
+              `startDistance=${startDistance.toFixed(2)} moving=${isMovingForward} sprint=${bot.getControlState?.('sprint') === true}`
+            )
+          }
+        }
+        lastYawDiffSign = sign
       }
       await wait(pollMs)
     }

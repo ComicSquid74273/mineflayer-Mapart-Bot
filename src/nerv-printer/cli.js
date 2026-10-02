@@ -5815,6 +5815,10 @@ function createDefaultConfig() {
       scannerAdaptiveMaxPlaceDelayMs: 16,
       scannerAdaptiveMinPlaceDelayMs: 6,
       scannerRetryCooldownMs: 30,
+      // Echo window: how long a sent placement waits for the server's world
+      // echo before the scan may re-offer the cell. Roughly 1.5x RTT; a
+      // shorter value re-sends packets the server is still processing.
+      scannerEchoRetryMs: 250,
       scannerPlaceConfirmMs: 80,
       scannerPlaceConfirmPollMs: 15,
       workloadCheckpointMoveTimeoutMs: 30000,
@@ -16647,7 +16651,7 @@ function fastBreakInstantBlock(bot, block) {
 // to see *why* a carpet is dropped: reach, look vector, support validity, or a
 // hotbar item the server did not agree with.
 const unverifiedPlacementSamples = []
-function noteUnverifiedPlacement(target, attempt, support) {
+function noteUnverifiedPlacement(bot, target, attempt, support) {
   if (unverifiedPlacementSamples.length >= 40) return
   void attempt
   const pos = bot.entity.position
@@ -16659,6 +16663,8 @@ function noteUnverifiedPlacement(target, attempt, support) {
   const dy = ty - (pos.y + eyeY)
   const dz = tz - pos.z
   const dist = Math.hypot(dx, dy, dz)
+  const selectedIndex = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : -1
+  const selectedStack = selectedIndex >= 0 ? bot.inventory?.slots?.[getHotbarWindowSlot(selectedIndex)] : null
   unverifiedPlacementSamples.push({
     target: `${target.position.x},${target.position.y},${target.position.z}`,
     block: target.blockName,
@@ -16667,7 +16673,7 @@ function noteUnverifiedPlacement(target, attempt, support) {
     supportBelow: support?.name && String(support.name).endsWith('_carpet') ? 'carpet' : 'solid',
     held: bot.heldItem?.name || 'none',
     heldCount: toNumber(bot.heldItem?.count, 0),
-    selected: getSelectedHotbarName(),
+    selected: selectedStack?.name || 'empty',
     pitch: Number(toNumber(bot.entity?.pitch, 0).toFixed(2)),
     yawDeltaFromTarget: Number(toNumber(bot.entity?.yaw, 0).toFixed(2)),
     onGround: bot.entity?.onGround === true,
@@ -16865,7 +16871,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         // world (Paper does not echo block_change). Sample the placement
         // conditions so a lane that reports missing carpets can be explained.
         placedSuccessfully = true
-        noteUnverifiedPlacement(target, attempt, support)
+        noteUnverifiedPlacement(bot, target, attempt, support)
         break
       }
       if (await waitForTargetBlockPlaced(bot, targetPos, target.blockName, effectiveConfirmMs, fastConfirmPollMs)) {
@@ -16874,7 +16880,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       }
       if (isFastNoWaitPlacement) {
         placedSuccessfully = true
-        noteUnverifiedPlacement(target, attempt, support)
+        noteUnverifiedPlacement(bot, target, attempt, support)
         break
       }
       // Paper never echoes block_change to the placing client, so a fast-confirm
@@ -19022,7 +19028,19 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
             if (result.state === 'placed') {
               placed += 1
-              markTargetPlacedInWorld(target, key)
+              // Meteor-printer semantics: a sent packet is not a printed carpet.
+              // The server echoes accepted placements into the client world; a
+              // dropped one leaves the cell replaceable and the next scan offers
+              // it again. Park this target for one echo window instead of
+              // ledgering it as done -- the packets 6b6t silently drops were
+              // becoming lane-end holes only the repair walkback could fill,
+              // because the optimistic ledger kept the scanner from ever trying
+              // again. The line-end drain holds until the in-range cells either
+              // echo or exhaust their retries, and whatever is still absent
+              // after that flows to the frozen repair fallback as designed.
+              const echoRetryMs = Math.max(50, toNumber(advanced.scannerEchoRetryMs, 250))
+              const existingUntil = pendingUntil.get(key) || 0
+              pendingUntil.set(key, Math.max(existingUntil, Date.now() + echoRetryMs))
             } else if (result.state === 'already') {
               already += 1
               markTargetPlacedInWorld(target, key)
@@ -19109,10 +19127,18 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       attempted.add(key)
       try {
         const result = await placeNervScannerTarget(bot, config, target)
-        if (result.state === 'placed' || result.state === 'already') {
+        if (result.state === 'already') {
           placed += 1
           markTargetPlacedInWorld(target, key)
           placedCount += 1
+        } else if (result.state === 'placed') {
+          // Same echo-window parking as the sprint burst: the drain that follows
+          // re-offers the cell if the server dropped the packet.
+          placed += 1
+          placedCount += 1
+          const echoRetryMs = Math.max(50, toNumber(advanced.scannerEchoRetryMs, 250))
+          const existingUntil = pendingUntil.get(key) || 0
+          pendingUntil.set(key, Math.max(existingUntil, Date.now() + echoRetryMs))
         }
       } catch { }
     }
@@ -22402,6 +22428,10 @@ function collectNervScannerCandidates(bot, config, targetByXZ, currentGoal, proc
     if (results.length >= maxResults) break
     const actual = bot.blockAt(new Vec3(entry.target.position.x, entry.target.position.y, entry.target.position.z))
     if (actual?.name === entry.target.blockName) {
+      // World echo is the only real completion signal for a bot-placed carpet.
+      // Ledger it here so the downstream gates see verified cells, not
+      // optimistic sends.
+      if (bot.__nervConfirmedPlaced instanceof Set) bot.__nervConfirmedPlaced.add(entry.key)
       processed.add(entry.key)
       continue
     }
