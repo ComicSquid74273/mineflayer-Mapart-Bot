@@ -19295,37 +19295,44 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       if (bandPlan) {
         // Scheduled staging: execute the plan's swap ops slightly ahead of
         // their stop tick, one per wake, while no emission is in flight on
-        // that slot (placements are echo-gated anyway).
-        const stagePlanTick = currentPlanTick()
-        if (stagePlanTick >= 0) {
-          for (const op of bandPlan.swaps) {
-            if (op.__done || !op.inColour || op.tick > planTick + 5) continue
-            const resident = findHotbarIndexesForItem(bot, op.inColour)
-            if (resident.some((entry) => entry.count > 0)) {
-              op.__done = true
-              continue
-            }
-            if ((bot.__nervSwapWaitUntil || 0) > nowMs) break
-            const source = findBestInventorySlotForItem(bot, op.inColour)
-            if (!source) {
-              op.__done = 'no-source'
-              continue
-            }
-            let dest = Number.isInteger(op.intoSlot) ? op.intoSlot : findHotbarIndexForItem(bot, op.outColour)
-            if (!(dest >= 0 && dest <= 8)) dest = findHotbarIndexForItem(bot, op.inColour)
-            if (!(dest >= 0 && dest <= 8)) {
-              for (let index = 2; index <= 8; index += 1) {
-                const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
-                if (!stack || Number(stack.count) <= 0) { dest = index; break }
+        // that slot (placements are echo-gated anyway). A staging error must
+        // degrade to the heuristic path, never kill the batch.
+        try {
+          const stagePlanTick = currentPlanTick()
+          const stageNowMs = Date.now()
+          if (stagePlanTick >= 0) {
+            for (const op of bandPlan.swaps) {
+              if (op.__done || !op.inColour || op.tick > stagePlanTick + 5) continue
+              const resident = findHotbarIndexesForItem(bot, op.inColour)
+              if (resident.some((entry) => entry.count > 0)) {
+                op.__done = true
+                continue
+              }
+              if ((bot.__nervSwapWaitUntil || 0) > stageNowMs) break
+              const source = findBestInventorySlotForItem(bot, op.inColour)
+              if (!source) {
+                op.__done = 'no-source'
+                continue
+              }
+              let dest = Number.isInteger(op.intoSlot) ? op.intoSlot : findHotbarIndexForItem(bot, op.outColour)
+              if (!(dest >= 0 && dest <= 8)) dest = findHotbarIndexForItem(bot, op.inColour)
+              if (!(dest >= 0 && dest <= 8)) {
+                for (let index = 2; index <= 8; index += 1) {
+                  const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+                  if (!stack || Number(stack.count) <= 0) { dest = index; break }
+                }
+              }
+              if (!(dest >= 0 && dest <= 8)) { op.__done = 'no-slot'; continue }
+              if (silentHotbarSwap(bot, source.slot, dest)) {
+                op.__done = true
+                bot.__nervSwapWaitUntil = stageNowMs + 150
+                console.log(`[BAND-STAGE] tick=${op.tick} colour=${op.inColour} slot=${dest} reason=${op.reason}${op.outColour ? ` evicts=${op.outColour}` : ''}`)
               }
             }
-            if (!(dest >= 0 && dest <= 8)) { op.__done = 'no-slot'; continue }
-            if (silentHotbarSwap(bot, source.slot, dest)) {
-              op.__done = true
-              bot.__nervSwapWaitUntil = nowMs + 150
-              console.log(`[BAND-STAGE] tick=${op.tick} colour=${op.inColour} slot=${dest} reason=${op.reason}${op.outColour ? ` evicts=${op.outColour}` : ''}`)
-            }
           }
+        } catch (stageErr) {
+          console.log(`[BAND-STAGE-ERR] ${stageErr?.message || stageErr} -- disabling plan for this band`)
+          bandPlan = null
         }
       }
       if (allowPlacement) {
@@ -19349,26 +19356,44 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           // when, the eye-range confirms now.
           const planTick = currentPlanTick()
           burstTargets = []
-          if (planTick >= 0) {
-            const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
-            const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
-            for (const cell of bandPlan.cells) {
-              if (burstTargets.length >= allowed) break
-              if (cell.emitTick > planTick || planTick > cell.exit + 10) continue
-              if (burstExcluded.has(cell.key)) continue
-              const tp = cell.target.position
-              const dx = bot.entity.position.x - (tp.x + 0.5)
-              const dy = eyeY - (tp.y + 0.5)
-              const dz = bot.entity.position.z - (tp.z + 0.5)
-              if (dx * dx + dy * dy + dz * dz > liveReach2) continue
-              const Vec3Plan = bot.entity.position.constructor
-              const actual = bot.blockAt(new Vec3Plan(tp.x, tp.y, tp.z))
-              if (actual?.name === cell.target.blockName) {
-                markTargetPlacedInWorld(cell.target, cell.key)
-                continue
+          try {
+            if (planTick >= 0) {
+              const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
+              const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
+              for (const cell of bandPlan.cells) {
+                if (burstTargets.length >= allowed) break
+                if (cell.emitTick > planTick || planTick > cell.exit + 10) continue
+                if (burstExcluded.has(cell.key)) continue
+                const tp = cell.target.position
+                const dx = bot.entity.position.x - (tp.x + 0.5)
+                const dy = eyeY - (tp.y + 0.5)
+                const dz = bot.entity.position.z - (tp.z + 0.5)
+                if (dx * dx + dy * dy + dz * dz > liveReach2) continue
+                const Vec3Plan = bot.entity.position.constructor
+                const actual = bot.blockAt(new Vec3Plan(tp.x, tp.y, tp.z))
+                if (actual?.name === cell.target.blockName) {
+                  markTargetPlacedInWorld(cell.target, cell.key)
+                  continue
+                }
+                burstTargets.push(cell.target)
               }
-              burstTargets.push(cell.target)
             }
+          } catch (planErr) {
+            console.log(`[BAND-PLAN-ERR] ${planErr?.message || planErr} -- disabling plan for this band`)
+            bandPlan = null
+            burstTargets = []
+          }
+          if (!bandPlan) {
+            burstTargets = collectNervScannerCandidates(
+              bot,
+              config,
+              targetByXZ,
+              currentGoal,
+              burstExcluded,
+              currentActiveCols,
+              retryPriority,
+              allowed
+            )
           }
         } else {
           burstTargets = collectNervScannerCandidates(
