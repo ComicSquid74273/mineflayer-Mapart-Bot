@@ -18924,6 +18924,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // pass re-stages these from main inventory on demand (echo-confirmed), so a
   // mid-band stack drain heals instead of starving the whole lane into repair.
   const planDeferredColors = new Map()
+  // Emission hold around inventory mutations: a block_place dispatched while
+  // a swap is still settling references slot contents that just changed
+  // server-side and lands the wrong colour. Every staging swap holds
+  // emission for the settle window (the quiet half of the quiet-window rule).
+  let swapHoldUntil = 0
+  const noteInventoryMutation = (ms = 250) => {
+    swapHoldUntil = Date.now() + ms
+  }
   // The plan's clock is the bot's POSITION, not the wall clock: reality has
   // checkpoint pauses, drains and turns the simulation does not, so a
   // time-based planTick drifts ahead of the bot and emits cells before they
@@ -19026,6 +19034,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       })
       planStartedAt = Date.now()
       bot.__nervBandPlanActive = true
+      // §9.1: food does not live in the offhand anymore -- if a previous era
+      // (or an interrupted eat cycle) left it there, return it to main now so
+      // the offhand is free for pairing/printing this band.
+      const offHandNow = bot.inventory?.slots?.[45]
+      if (offHandNow && !String(offHandNow.name).endsWith('_carpet')) {
+        unequipFoodFromOffhand(bot, offHandNow.name)
+      }
       console.log(
         `[BAND-PLAN] cells=${bandPlan.stats.cells} runs=${bandPlan.stats.runs} switches=${bandPlan.stats.switches} ` +
         `stops=${bandPlan.stats.stops} slackCells=${bandPlan.stats.slackCells} infeasible=${bandPlan.stats.infeasible} ` +
@@ -19539,6 +19554,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               if (silentHotbarSwap(bot, source.slot, dest)) {
                 op.__done = true
                 bot.__nervSwapWaitUntil = stageNowMs + 150
+                noteInventoryMutation()
                 console.log(`[BAND-STAGE] tick=${op.tick} colour=${op.inColour} slot=${dest} reason=${op.reason}${op.outColour ? ` evicts=${op.outColour}` : ''}`)
               }
             }
@@ -19570,6 +19586,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const destStack = bot.inventory?.slots?.[getHotbarWindowSlot(dest)]
               if (destStack?.name === stack.name && Number(destStack.count) > 0) continue
               bot.__nervSwapWaitUntil = stageNowMs + 150 // backoff on success AND failure
+              noteInventoryMutation()
               if (silentHotbarSwap(bot, source.slot, dest)) {
                 console.log(`[BAND-STAGE] colour=${stack.name} slot=${dest} reason=handover from=${index} effective=${effective}`)
               }
@@ -19601,6 +19618,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 bot._client.write('window_click', { windowId: 0, stateId: -1, slot: source.slot, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
                 bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
                 bot.__nervSwapWaitUntil = stageNowMs + 300
+                noteInventoryMutation(350)
                 console.log(`[BAND-STAGE] colour=${offhandCandidate} slot=offhand reason=offhand-pair`)
               }
             }
@@ -19628,6 +19646,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             if (!(dest >= 0 && dest <= 8)) continue
             if (silentHotbarSwap(bot, source.slot, dest)) {
               bot.__nervSwapWaitUntil = stageNowMs + 150
+              noteInventoryMutation()
               console.log(`[BAND-STAGE] colour=${deferredColor} slot=${dest} reason=deferred-restage`)
             }
           }
@@ -19658,7 +19677,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           const planTick = currentPlanTick()
           burstTargets = []
           emitWakes += 1
-          try {
+          // Quiet window: emission pauses while an inventory mutation settles
+          // (see noteInventoryMutation); the wake offers nothing.
+          const emissionHeld = Date.now() < swapHoldUntil
+          if (emissionHeld) emitEmptyWakes += 1
+          if (!emissionHeld) try {
             if (planTick >= 0) {
               // Hard per-tick cap: the server silently drops burst catch-up
               // (measured intake ~1-2 per 50ms tick regardless of send rate).
