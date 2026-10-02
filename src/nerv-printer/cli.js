@@ -13264,14 +13264,20 @@ function unequipFoodFromOffhand(bot, foodItem) {
       const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
       if (!stack || Number(stack.count) <= 0) { hop = index; break }
     }
-    if (hop < 0) return
+    if (hop < 0) {
+      // Hotbar full: route through any slot anyway -- the displaced carpet
+      // stack landing in the offhand is useful there (select-free printing).
+      hop = 4
+    }
     const cursorItem = serializeCursorItem(bot, bot.inventory)
+    // s1: offhand(food) <-> hotbar[hop]  -> food sits in hop, hop's stack in hand 45
     bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
     const mainFree = bot.inventory.firstEmptyInventorySlot?.()
     if (Number.isFinite(mainFree) && mainFree >= 9) {
+      // s2: main(free) <-> hotbar[hop]    -> food to main, offhand keeps the carpet stack
       bot._client.write('window_click', { windowId: 0, stateId: -1, slot: mainFree, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
     }
-    console.log(`[EAT-CYCLE] food returned to inventory; offhand free`)
+    console.log(`[EAT-CYCLE] food returned to inventory; offhand holds a carpet stack`)
   } catch (err) {
     console.log(`[EAT-CYCLE-WARN] return food failed: ${err?.message || err}`)
   }
