@@ -22822,9 +22822,21 @@ function collectNervScannerCandidates(bot, config, targetByXZ, currentGoal, proc
         if (!bot.__nervMisprintDigs.has(entry.key)) {
           bot.__nervMisprintDigs.add(entry.key)
           console.log(`[MISPRINT-FIX] breaking ${actual.name} at ${entry.target.position.x} ${entry.target.position.y} ${entry.target.position.z} (expected ${entry.target.blockName})`)
-          Promise.resolve(bot.dig(actual, true)).catch(() => { }).finally(() => {
+          // THM-style insta break: raw dig packets, NO look, NO control
+          // changes. bot.dig(block, forceLook=true) rotated the bot at the
+          // block mid-sprint and desynced traversal; carpets are
+          // instant-mineable, so start+swing+finish in one turn and predict
+          // the cell as air locally so the scan re-offers it immediately.
+          try {
+            const location = { x: entry.target.position.x, y: entry.target.position.y, z: entry.target.position.z }
+            bot._client.write('block_dig', { status: 0, location, face: 1 })
+            bot.swingArm('right')
+            bot._client.write('block_dig', { status: 2, location, face: 1 })
+            if (typeof bot._updateBlockState === 'function') bot._updateBlockState(location, 0)
+          } catch { }
+          setTimeout(() => {
             try { bot.__nervMisprintDigs.delete(entry.key) } catch { }
-          })
+          }, 750)
         }
       }
       continue
