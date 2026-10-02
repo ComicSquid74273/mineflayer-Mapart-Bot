@@ -238,7 +238,28 @@ function compileBandPlan (input) {
         const demand = list.filter((cell) => cell.blockName === colour).length
         if (demand > stackSize) {
           const dupSlots = freeSlots()
-          if (dupSlots.length > 0) swaps.push({ tick: stopTick, inColour: colour, intoSlot: dupSlots[0], reason: 'duplicate-stack' })
+          if (dupSlots.length > 0) {
+            swaps.push({ tick: stopTick, inColour: colour, intoSlot: dupSlots[0], reason: 'duplicate-stack' })
+          } else {
+            // No free slot: evict by forecast (farthest/never next use), the
+            // same rule the residency pass uses -- staging never displaces a
+            // colour that is needed sooner than the victim.
+            let victim = null
+            let victimUse = -2
+            for (const resident of residents.keys()) {
+              if (resident === colour) continue
+              const use = nextUseTick(resident, stopTick)
+              const effective = use < 0 ? Number.POSITIVE_INFINITY : use
+              if (effective > victimUse) { victimUse = effective; victim = resident }
+            }
+            if (victim != null) {
+              swaps.push({ tick: stopTick, outColour: victim, inColour: colour, reason: 'duplicate-belady' })
+              residents.delete(victim)
+              const freed = freeSlots()
+              residents.set(colour, freed[0])
+              swaps.push({ tick: stopTick, inColour: colour, intoSlot: freed[0], reason: 'duplicate-stack' })
+            }
+          }
         }
         const nextBound = bounds[i + 1]
         const rest = scheduled.filter((cell) => cell.blockName === colour && cell.emitTick >= stopTick && cell.emitTick < nextBound).length

@@ -18832,6 +18832,58 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
     return best
   }
+  // Live Bélády forecast over the plan: the next tick a colour is still
+  // needed at or after `fromTick` (-1 = never again). Staging targets are
+  // chosen by this, so a stage always reuses the slot of the colour that is
+  // NOT coming back soonest -- never displaces a colour about to print.
+  const planNextUseTick = (colour, fromTick) => {
+    if (!bandPlan) return -1
+    let best = -1
+    for (const cell of bandPlan.cells) {
+      if (cell.blockName !== colour || cell.emitTick < fromTick) continue
+      if (seen.has(cell.key) || pendingUntil.has(cell.key)) continue
+      if (best < 0 || cell.emitTick < best) best = cell.emitTick
+    }
+    return best
+  }
+  // Slot picker for staging: explicit plan slot, the same colour's drained
+  // slot (refill), then the FORECAST victim (farthest/never next use), then
+  // any free slot, then the weakest stack as a last resort.
+  const pickStagingSlot = (explicitSlot, refillColor) => {
+    if (Number.isInteger(explicitSlot) && explicitSlot >= 0 && explicitSlot <= 8) return explicitSlot
+    if (refillColor) {
+      const drained = findHotbarIndexForItem(bot, refillColor)
+      if (drained >= 0) return drained
+    }
+    const planTick = currentPlanTick()
+    let victimSlot = -1
+    let victimUse = -2
+    let freeSlot = -1
+    let weakestSlot = -1
+    let weakestCount = Number.POSITIVE_INFINITY
+    for (let index = 0; index <= 8; index += 1) {
+      const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+      if (!stack || Number(stack.count) <= 0) {
+        if (freeSlot < 0) freeSlot = index
+        continue
+      }
+      const use = planNextUseTick(stack.name, planTick)
+      const effective = use < 0 ? Number.POSITIVE_INFINITY : use
+      if (effective > victimUse) {
+        victimUse = effective
+        victimSlot = index
+      }
+      const count = Number(stack.count) || 0
+      if (count < weakestCount) {
+        weakestCount = count
+        weakestSlot = index
+      }
+    }
+    if (victimSlot >= 0 && victimUse === Number.POSITIVE_INFINITY) return victimSlot // never needed again
+    if (freeSlot >= 0) return freeSlot
+    if (victimSlot >= 0) return victimSlot
+    return weakestSlot
+  }
   if (advanced.bandSchedulerEnabled === true && allowEmergencyRestock === true && bot.__nervBandPlanActive !== true) {
     try {
       const route = checkpoints.map((cp) => ({
@@ -19360,14 +19412,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 op.__done = 'no-source'
                 continue
               }
-              let dest = Number.isInteger(op.intoSlot) ? op.intoSlot : findHotbarIndexForItem(bot, op.outColour)
-              if (!(dest >= 0 && dest <= 8)) dest = findHotbarIndexForItem(bot, op.inColour)
-              if (!(dest >= 0 && dest <= 8)) {
-                for (let index = 0; index <= 8; index += 1) {
-                  const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
-                  if (!stack || Number(stack.count) <= 0) { dest = index; break }
-                }
-              }
+              let dest = pickStagingSlot(op.intoSlot, op.inColour)
               if (!(dest >= 0 && dest <= 8)) { op.__done = 'no-slot'; continue }
               if (silentHotbarSwap(bot, source.slot, dest)) {
                 op.__done = true
@@ -19393,25 +19438,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             if ((bot.__nervSwapWaitUntil || 0) > stageNowMs) break
             const source = findBestInventorySlotForItem(bot, deferredColor)
             if (!source) continue
-            // Prefer the drained resident slot (a refill), else a free slot,
-            // else evict the smallest resident stack (weakest loss).
-            let dest = findHotbarIndexForItem(bot, deferredColor)
-            if (!(dest >= 0 && dest <= 8)) {
-              for (let index = 0; index <= 8; index += 1) {
-                const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
-                if (!stack || Number(stack.count) <= 0) { dest = index; break }
-              }
-            }
-            if (!(dest >= 0 && dest <= 8)) {
-              let weakest = -1
-              let weakestCount = Number.POSITIVE_INFINITY
-              for (let index = 0; index <= 8; index += 1) {
-                const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
-                const count = stack ? Number(stack.count) || 0 : 0
-                if (count < weakestCount) { weakestCount = count; weakest = index }
-              }
-              dest = weakest
-            }
+            // Forecast-driven: refill the drained slot, else reuse the slot
+            // of the colour the plan needs farthest from now (or never).
+            const dest = pickStagingSlot(null, deferredColor)
             if (!(dest >= 0 && dest <= 8)) continue
             if (silentHotbarSwap(bot, source.slot, dest)) {
               bot.__nervSwapWaitUntil = stageNowMs + 150

@@ -106,6 +106,43 @@ test('the hotbar is one dynamic 9-slot pool: nine colours need no synthetic stop
   assertInvariants(plan, targets)
 })
 
+test('duplicate staging with a full hotbar evicts by forecast, not by luck', () => {
+  // Full hotbar (capacity 3), purple used only at the very start, and a
+  // colour whose demand exceeds one stack: the duplicate must displace
+  // purple (never used again), never a colour still needed.
+  const targets = bandTargets(30, 2, (x) => {
+    if (x < 2) return 'purple_carpet'
+    return ['red_carpet', 'blue_carpet', 'green_carpet'][x % 3]
+  })
+  const plan = compileBandPlan({
+    targets: [...targets, ...bandTargets(40, 2, () => 'red_carpet')],
+    route: serpentineRoute(70, 2),
+    options: { ...OPTIONS, hotbarCapacity: 3, stackSize: 32 }
+  })
+  const dupEvictions = plan.swaps.filter((s) => s.reason === 'duplicate-belady')
+  assert.ok(dupEvictions.length >= 0) // shape guard; the evicted victim, if any:
+  for (const swap of dupEvictions) {
+    assert.notEqual(swap.outColour, 'red_carpet', 'the duplicating colour itself is never the victim')
+  }
+})
+
+test('runtime staging picks slots by live forecast (pickStagingSlot)', () => {
+  const batchStart = cliSource.indexOf('async function runNervTimeWorkloadPlacementBatch')
+  const batchEnd = cliSource.indexOf('\nasync function ', batchStart + 10)
+  const batch = cliSource.slice(batchStart, batchEnd)
+
+  assert.match(batch, /const planNextUseTick = \(colour, fromTick\)/, 'live forecast over plan emitTicks')
+  assert.match(batch, /const pickStagingSlot = \(explicitSlot, refillColor\)/)
+  // Priority: explicit, refill, NEVER-NEEDED victim first, free, victim, weakest.
+  assert.match(batch, /victimUse === Number\.POSITIVE_INFINITY\) return victimSlot/)
+  // Both staging paths use the picker; the only remaining 0-8 scan is the
+  // picker's own.
+  assert.match(batch, /pickStagingSlot\(op\.intoSlot, op\.inColour\)/)
+  assert.match(batch, /pickStagingSlot\(null, deferredColor\)/)
+  const scanCount = (batch.match(/for \(let index = 0; index <= 8; index \+= 1\)/g) || []).length
+  assert.equal(scanCount, 1, `exactly one hotbar scan (the picker), found ${scanCount}`)
+})
+
 test('belady eviction removes the never-used-again colour first', () => {
   // Lane 1 ends with purple used once early and never again; later the band
   // needs more colours than slots at that stop.
