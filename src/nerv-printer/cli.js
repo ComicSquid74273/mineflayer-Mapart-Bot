@@ -21877,7 +21877,9 @@ async function runPrint(bot, config, dashboardRuntime = null) {
     for (let pass = 1; pass <= maxRepairPasses && errorList.length > 0; pass += 1) {
       setRuntimeStopCheckpoint('repair', 'dashboard-stop-during-repair', { pass, maxPasses: maxRepairPasses, errorCount: errorList.length })
       checkRuntimeStop()
+      console.log(`[REPAIR-TRACE] pass=${pass} awaiting platform-water check`)
       await checkPlatformWater('before-repair-pass')
+      console.log('[REPAIR-TRACE] platform-water clear; starting pass')
       console.log(`[REPAIR-PASS] Starting repair pass ${pass}/${maxRepairPasses} for ${errorList.length} error(s).`)
       if (progressEnabled) {
         writeProgressSnapshot(progressFile, input, orderedTargets.length, orderedTargets.length, 'repair', {
