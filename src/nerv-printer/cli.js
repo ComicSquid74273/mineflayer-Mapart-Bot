@@ -19275,12 +19275,19 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (planTick < 0) return false
           const seg = bandPlan.pacing.find((s) => planTick >= s.fromTick && planTick < s.toTick)
           if (seg?.pace === 'walk') return true
+          // Debt counts EVERY unsent cell past its scheduled tick, including
+          // ones whose window already died: dying cells are the strongest
+          // signal the bot is outrunning the printer. (The emission filter
+          // excludes them; pacing must not.)
           let due = 0
           for (const cell of bandPlan.cells) {
             if (cell.emitTick > planTick) continue
-            if (planTick > cell.exit + 10) continue // window gone: repair's job, not pacing debt
             if (seen.has(cell.key) || pendingUntil.has(cell.key)) continue
             due += 1
+          }
+          if (Date.now() - (bot.__nervPlanDebtLoggedAt || 0) >= 1000) {
+            bot.__nervPlanDebtLoggedAt = Date.now()
+            console.log(`[PLAN-DEBT] tick=${planTick} due=${due} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true}`)
           }
           return bot.__nervTraversalSlow === true ? due > 0 : due > 4
         })()
