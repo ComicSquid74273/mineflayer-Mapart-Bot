@@ -7585,6 +7585,23 @@ function effectiveHeldCount (bot) {
   return ledger.effectiveCount(bot.quickBarSlot)
 }
 
+// §8.F authoritative resync: a self-swap (mode 2, clicked hotbar slot ==
+// button) is a server-side no-op that still triggers the stateId=-1 full
+// window_items snapshot. One round trip heals any inventory view divergence
+// -- stuck desyncs that otherwise loop skips forever (the one-cell repair
+// hang).
+function refreshInventoryAuthoritatively(bot) {
+  if (!bot._client) return
+  try {
+    const slot = Math.max(0, Math.min(8, Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0))
+    const cursorItem = serializeCursorItem(bot, bot.currentWindow || bot.inventory)
+    bot._client.write('window_click', { windowId: 0, stateId: -1, slot: getHotbarWindowSlot(slot), mouseButton: slot, mode: 2, changedSlots: [], cursorItem })
+    console.log(`[SWAP-RESYNC] authoritative inventory snapshot requested (slot ${slot})`)
+  } catch (err) {
+    console.log(`[SWAP-RESYNC-WARN] ${err?.message || err}`)
+  }
+}
+
 function getWindowStateId(bot) {
   if (!Number.isFinite(bot.__nervWindowStateId)) {
     bot.__nervWindowStateId = 0
@@ -17127,6 +17144,15 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         return { state: 'skip', reason: `plan-not-staged-${target.blockName}` }
       }
       if (countInventoryItems(bot, target.blockName) > 0) {
+        // Repeated desync = diverged inventory view: heal it with one
+        // authoritative snapshot instead of looping the skip forever.
+        const counts = bot.__nervEquipDesyncCounts || (bot.__nervEquipDesyncCounts = new Map())
+        const n = (counts.get(target.blockName) || 0) + 1
+        counts.set(target.blockName, n)
+        if (n >= 3) {
+          counts.set(target.blockName, 0)
+          refreshInventoryAuthoritatively(bot)
+        }
         return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
       }
       return { state: 'skip', reason: `missing-item-${target.blockName}` }
@@ -17170,6 +17196,13 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     try {
       if (!selectedMaterialMatches(bot, target.blockName)) {
         if (countInventoryItems(bot, target.blockName) > 0) {
+          const counts = bot.__nervEquipDesyncCounts || (bot.__nervEquipDesyncCounts = new Map())
+          const n = (counts.get(target.blockName) || 0) + 1
+          counts.set(target.blockName, n)
+          if (n >= 3) {
+            counts.set(target.blockName, 0)
+            refreshInventoryAuthoritatively(bot)
+          }
           return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
         }
         return { state: 'skip', reason: `missing-item-${target.blockName}` }
@@ -17231,6 +17264,13 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       const errMsg = String(err?.message || '').toLowerCase()
       if (errMsg.includes('must be holding an item')) {
         if (countInventoryItems(bot, target.blockName) > 0) {
+          const counts = bot.__nervEquipDesyncCounts || (bot.__nervEquipDesyncCounts = new Map())
+          const n = (counts.get(target.blockName) || 0) + 1
+          counts.set(target.blockName, n)
+          if (n >= 3) {
+            counts.set(target.blockName, 0)
+            refreshInventoryAuthoritatively(bot)
+          }
           return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
         }
         return { state: 'skip', reason: `missing-item-${target.blockName}` }
