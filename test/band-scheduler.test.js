@@ -206,3 +206,46 @@ test('schedule-driven emission replaces the scan only when a plan exists', () =>
   // The plan state is per-band: reset in the finally so the next band recompiles.
   assert.match(batch, /bot\.__nervBandPlanActive = false/)
 })
+
+test('step 3: no inventory mutation inside the emission window', () => {
+  // The mid-burst cross-inventory swap is banned under a plan.
+  const equipAt = cliSource.indexOf('bot.__nervInventorySwapActive = true')
+  const equip = cliSource.slice(equipAt, equipAt + 1400)
+  assert.match(equip, /if \(bot\.__nervBandPlanActive === true\) return false/, 'equipMaterial must decline cross-inventory swaps under a plan')
+
+  // The swap's local slot prediction is a lie whenever the server can reject
+  // the click: under a plan, slots are server-truth (set_slot echo) only.
+  const swapAt = cliSource.indexOf('function silentHotbarSwap(')
+  const swap = cliSource.slice(swapAt, cliSource.indexOf('\nfunction ', swapAt))
+  assert.match(swap, /bot\.__nervBandPlanActive !== true && Array\.isArray\(slots\)/, 'slot prediction must be skipped under a plan')
+
+  // Deferrals are explicit, cheap, and never counted as desyncs.
+  assert.match(cliSource, /plan-not-staged-/)
+  assert.match(cliSource, /startsWith\('plan-not-staged-'\)/)
+})
+
+test('step 3: scheduled staging executes at plan stops', () => {
+  const batchStart = cliSource.indexOf('async function runNervTimeWorkloadPlacementBatch')
+  const batchEnd = cliSource.indexOf('\nasync function ', batchStart + 10)
+  const batch = cliSource.slice(batchStart, batchEnd)
+
+  assert.match(batch, /for \(const op of bandPlan\.swaps\)/, 'the loop must execute planned swap ops')
+  assert.match(batch, /\[BAND-STAGE\]/)
+  assert.match(batch, /__nervSwapWaitUntil/, 'swaps are paced, not machine-gunned')
+  // Staging uses the wire swap; refills stay on the existing machinery.
+  assert.match(batch, /silentHotbarSwap\(bot, source\.slot, dest\)/)
+})
+
+test('step 4: plan anchoring, pause-slide, and pacing', () => {
+  const batchStart = cliSource.indexOf('async function runNervTimeWorkloadPlacementBatch')
+  const batchEnd = cliSource.indexOf('\nasync function ', batchStart + 10)
+  const batch = cliSource.slice(batchStart, batchEnd)
+
+  // The simulated clock anchors to the first emission-legal moment, not compile time.
+  assert.match(batch, /if \(allowPlacement && !planAnchored\)/)
+  // Pauses slide the schedule instead of invalidating it.
+  assert.match(batch, /planStartedAt \+= nowMs - planLastWakeMs - 100/)
+  // Plan pacing outranks the backlog heuristic for sprint/walk.
+  assert.match(batch, /const slowNow = planPaceWalk \|\|/)
+  assert.match(batch, /bandPlan\.pacing\.find\(\(s\) => planTick >= s\.fromTick && planTick < s\.toTick\)/)
+})

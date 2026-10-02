@@ -7487,6 +7487,10 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   // packet and predicts locally, so there is nothing to wait for: stopping the
   // sprint only walked us further from the targets we were about to place.
   try {
+    // Band scheduler: no inventory mutation inside the emission window.
+    // Staging happens at scheduled stops; a colour that is not already
+    // resident is deferred, never mid-burst swapped.
+    if (bot.__nervBandPlanActive === true) return false
     if (!silentHotbarSwap(bot, source.slot, hotbarIndex)) return false
     if (fastSwap) return true
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
@@ -7567,7 +7571,11 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
 
   const destWindowSlot = getHotbarWindowSlot(destHotbarIndex)
   const slots = bot.inventory?.slots
-  if (Array.isArray(slots)) {
+  // Band scheduler: while a plan is active the inventory is server-truth
+  // only. The local slot prediction below is exactly the lie that put a
+  // phantom colour in the hotbar whenever the server rejected the click --
+  // placements wait for the set_slot echo instead of trusting the forecast.
+  if (bot.__nervBandPlanActive !== true && Array.isArray(slots)) {
     const srcItem = slots[sourceSlot]
     const destItem = slots[destWindowSlot]
     slots[destWindowSlot] = srcItem
@@ -16969,6 +16977,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     })
     const selectedMaterialReady = selectedMaterialMatches(bot, target.blockName)
     if (!equipped || !selectedMaterialReady) {
+      if (bot.__nervBandPlanActive === true && countInventoryItems(bot, target.blockName) > 0) {
+        // In stock but not staged into the hotbar: the plan stages it at the
+        // next stop. Defer the cell without touching the inventory.
+        return { state: 'skip', reason: `plan-not-staged-${target.blockName}` }
+      }
       if (countInventoryItems(bot, target.blockName) > 0) {
         return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
       }
@@ -18781,6 +18794,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // stays as the default and the fallback.
   let bandPlan = null
   let planStartedAt = 0
+  let planAnchored = false
+  let planLastWakeMs = 0
   if (advanced.bandSchedulerEnabled === true && allowEmergencyRestock === true && bot.__nervBandPlanActive !== true) {
     try {
       const route = checkpoints.map((cp) => ({
@@ -19216,9 +19231,17 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           slowClearTicks += 1
           slowBacklogTicks = 0
         }
-        const slowNow = bot.__nervTraversalSlow === true
+        // Band scheduler pacing: the plan already knows which intervals are
+        // capacity-tight (walk) — it outranks the backlog heuristic.
+        const planPaceWalk = (() => {
+          if (!bandPlan || !planAnchored) return false
+          const planTick = Math.floor((Date.now() - planStartedAt) / 50)
+          const seg = bandPlan.pacing.find((s) => planTick >= s.fromTick && planTick < s.toTick)
+          return seg?.pace === 'walk'
+        })()
+        const slowNow = planPaceWalk || (bot.__nervTraversalSlow === true
           ? slowBacklogTicks >= 1
-          : slowBacklogTicks >= 3
+          : slowBacklogTicks >= 3)
         if (slowNow !== (bot.__nervTraversalSlow === true)) {
           bot.__nervTraversalSlow = slowNow
           if (slowNow) traversalSlowTicks += 1
@@ -19246,6 +19269,54 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       maxAllowedSeen = Math.max(maxAllowedSeen, rawAllowed)
 
       const allowPlacement = currentAction === '' || currentAction === 'lineEnd' || currentAction === 'sprint' || currentAction === 'inline-repair' || currentAction === 'uTurn'
+      if (bandPlan) {
+        // Anchor the simulated clock to the first emission-legal moment, then
+        // slide it across pauses (restock waits, stall recovery, entry nav) so
+        // the schedule tracks the bot instead of the wall clock.
+        const nowMs = Date.now()
+        if (allowPlacement && !planAnchored) {
+          planStartedAt = nowMs
+          planAnchored = true
+        }
+        if (planAnchored && planLastWakeMs > 0 && nowMs - planLastWakeMs > 1500) {
+          planStartedAt += nowMs - planLastWakeMs - 100
+        }
+        planLastWakeMs = nowMs
+        // Scheduled staging: execute the plan's swap ops slightly ahead of
+        // their stop tick, one per wake, while no emission is in flight on
+        // that slot (placements are echo-gated anyway).
+        if (planAnchored) {
+          const planTick = Math.floor((nowMs - planStartedAt) / 50)
+          for (const op of bandPlan.swaps) {
+            if (op.__done || !op.inColour || op.tick > planTick + 5) continue
+            const resident = findHotbarIndexesForItem(bot, op.inColour)
+            if (resident.some((entry) => entry.count > 0)) {
+              op.__done = true
+              continue
+            }
+            if ((bot.__nervSwapWaitUntil || 0) > nowMs) break
+            const source = findBestInventorySlotForItem(bot, op.inColour)
+            if (!source) {
+              op.__done = 'no-source'
+              continue
+            }
+            let dest = Number.isInteger(op.intoSlot) ? op.intoSlot : findHotbarIndexForItem(bot, op.outColour)
+            if (!(dest >= 0 && dest <= 8)) dest = findHotbarIndexForItem(bot, op.inColour)
+            if (!(dest >= 0 && dest <= 8)) {
+              for (let index = 2; index <= 8; index += 1) {
+                const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+                if (!stack || Number(stack.count) <= 0) { dest = index; break }
+              }
+            }
+            if (!(dest >= 0 && dest <= 8)) { op.__done = 'no-slot'; continue }
+            if (silentHotbarSwap(bot, source.slot, dest)) {
+              op.__done = true
+              bot.__nervSwapWaitUntil = nowMs + 150
+              console.log(`[BAND-STAGE] tick=${op.tick} colour=${op.inColour} slot=${dest} reason=${op.reason}${op.outColour ? ` evicts=${op.outColour}` : ''}`)
+            }
+          }
+        }
+      }
       if (allowPlacement) {
         const burstExcluded = new Set([...seen, ...stallSkipped])
         for (const [key, until] of pendingUntil.entries()) {
@@ -19425,6 +19496,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 }, { force: true })
               }
 
+              if (String(result.reason || '').startsWith('plan-not-staged-')) {
+                // Colour is in stock but the plan stages it at a stop; re-offer
+                // shortly without counting a desync against the cell.
+                pendingUntil.set(key, Date.now() + 300)
+                retryPriority.add(key)
+                continue
+              }
               if (!String(result.reason || '').startsWith('missing-item-')) {
                 pendingUntil.set(key, 0)
                 inventoryDesyncHits.delete(`${target.blockName}:${key}`)
