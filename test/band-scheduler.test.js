@@ -253,5 +253,30 @@ test('step 4: position-derived plan clock and live reach gate', () => {
   assert.ok(dueAt >= 0)
   assert.match(batch.slice(dueAt, dueAt + 1600), /liveReach2/, 'due cells must pass the live reach gate')
   // Schedule-debt pacing: the bot walks when due-but-unsent cells pile up.
-  assert.match(batch, /bot\.__nervTraversalSlow === true \? due > 0 : due > 4/)
+  assert.match(batch, /bot\.__nervTraversalSlow === true \? liveDue > 0 : liveDue > 4/)
+})
+
+test('regression: pacing latch, window guard, restage eviction, maintenance gate', () => {
+  const batchStart = cliSource.indexOf('async function runNervTimeWorkloadPlacementBatch')
+  const batchEnd = cliSource.indexOf('\nasync function ', batchStart + 10)
+  const batch = cliSource.slice(batchStart, batchEnd)
+
+  // 1. Walk latch: dead windows cannot keep walk engaged forever (they can
+  //    never be sent; only LIVE due drives engage/release, dead is logged).
+  assert.match(batch, /if \(planTick > cell\.exit \+ 10\) deadDue \+= 1/)
+  assert.match(batch, /else liveDue \+= 1/)
+  assert.doesNotMatch(batch, /due > 0 : due > 4/, 'old total-due latch must be gone')
+
+  // 2. Staging never transacts while a container window is open (the swap
+  //    would click into the chest's window id and corrupt it).
+  assert.match(batch, /stagePlanTick >= 0 && !bot\.currentWindow/)
+  assert.match(batch, /if \(bot\.currentWindow\) break/)
+
+  // 3. Restage with a full hotbar evicts the smallest resident stack instead
+  //    of deadlocking into endless defers.
+  assert.match(batch, /count < weakestCount/)
+
+  // 4. Proactive maintenance is an inventory mutation: suppressed under a
+  //    plan (the staging pass owns refills; the burst stays select-only).
+  assert.match(batch, /bot\.__nervBandPlanActive === true\s*\?\s*\{ action: 'none' \}/)
 })

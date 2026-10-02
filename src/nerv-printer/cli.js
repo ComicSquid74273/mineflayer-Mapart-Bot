@@ -19241,7 +19241,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       // below would skip this tick: refilling a low stack is exactly what the
       // rate-gated ticks are FOR. One mutation per tick, predicted locally, so
       // the burst gate below reads the post-maintenance state in the same tick.
-      const proactiveResult = runProactiveHotbarMaintenance(bot, config, batchTargets, seen)
+      // Under an active band plan this is suppressed: it is an inventory
+      // mutation inside the emission window (the exact race the plan bans),
+      // and the plan's staging pass owns refills.
+      const proactiveResult = bot.__nervBandPlanActive === true
+        ? { action: 'none' }
+        : runProactiveHotbarMaintenance(bot, config, batchTargets, seen)
       if (proactiveResult.action !== 'none' && placementNoiseLogsEnabled(config)) {
         console.log(`[HOTBAR-PROACTIVE] ${proactiveResult.action} ${proactiveResult.blockName}`)
       }
@@ -19280,25 +19285,27 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (planTick < 0) return false
           const seg = bandPlan.pacing.find((s) => planTick >= s.fromTick && planTick < s.toTick)
           if (seg?.pace === 'walk') return true
-          // Debt counts EVERY unsent cell past its scheduled tick, including
-          // ones whose window already died: dying cells are the strongest
-          // signal the bot is outrunning the printer. (The emission filter
-          // excludes them; pacing must not.)
-          let due = 0
+          // Pacing debt: LIVE due (window still open) drives engage/release;
+          // DEAD due (window expired, unsent) is logged only -- it can no
+          // longer be helped by walking, and counting it kept walk latched
+          // on for whole bands.
+          let liveDue = 0
+          let deadDue = 0
           for (const cell of bandPlan.cells) {
             if (cell.emitTick > planTick) continue
             if (seen.has(cell.key) || pendingUntil.has(cell.key)) continue
-            due += 1
+            if (planTick > cell.exit + 10) deadDue += 1
+            else liveDue += 1
           }
           if (Date.now() - (bot.__nervPlanDebtLoggedAt || 0) >= 1000) {
             bot.__nervPlanDebtLoggedAt = Date.now()
-            console.log(`[PLAN-DEBT] tick=${planTick} due=${due} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true} wakes=${emitWakes} sched=${emitScheduled} ahead=${emitAhead} empty=${emitEmptyWakes}`)
+            console.log(`[PLAN-DEBT] tick=${planTick} live=${liveDue} dead=${deadDue} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true} wakes=${emitWakes} sched=${emitScheduled} ahead=${emitAhead} empty=${emitEmptyWakes}`)
             emitWakes = 0
             emitScheduled = 0
             emitAhead = 0
             emitEmptyWakes = 0
           }
-          return bot.__nervTraversalSlow === true ? due > 0 : due > 4
+          return bot.__nervTraversalSlow === true ? liveDue > 0 : liveDue > 4
         })()
         const slowNow = planPaceWalk || (bot.__nervTraversalSlow === true
           ? slowBacklogTicks >= 1
@@ -19338,7 +19345,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         try {
           const stagePlanTick = currentPlanTick()
           const stageNowMs = Date.now()
-          if (stagePlanTick >= 0) {
+          // Never transact while a container window is open: silentHotbarSwap
+          // would click into the CHEST's window id and corrupt its inventory.
+          if (stagePlanTick >= 0 && !bot.currentWindow) {
             for (const op of bandPlan.swaps) {
               if (op.__done || !op.inColour || op.tick > stagePlanTick + 5) continue
               const resident = findHotbarIndexesForItem(bot, op.inColour)
@@ -19377,6 +19386,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               planDeferredColors.delete(deferredColor)
               continue
             }
+            if (bot.currentWindow) break
             if (findHotbarIndexesForItem(bot, deferredColor).some((entry) => entry.count > 0)) {
               planDeferredColors.delete(deferredColor)
               continue
@@ -19384,13 +19394,24 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             if ((bot.__nervSwapWaitUntil || 0) > stageNowMs) break
             const source = findBestInventorySlotForItem(bot, deferredColor)
             if (!source) continue
-            // Prefer the drained resident slot (a refill), else a free slot.
+            // Prefer the drained resident slot (a refill), else a free slot,
+            // else evict the smallest resident stack (weakest loss).
             let dest = findHotbarIndexForItem(bot, deferredColor)
             if (!(dest >= 0 && dest <= 8)) {
               for (let index = 2; index <= 8; index += 1) {
                 const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
                 if (!stack || Number(stack.count) <= 0) { dest = index; break }
               }
+            }
+            if (!(dest >= 0 && dest <= 8)) {
+              let weakest = -1
+              let weakestCount = Number.POSITIVE_INFINITY
+              for (let index = 2; index <= 8; index += 1) {
+                const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+                const count = stack ? Number(stack.count) || 0 : 0
+                if (count < weakestCount) { weakestCount = count; weakest = index }
+              }
+              dest = weakest
             }
             if (!(dest >= 0 && dest <= 8)) continue
             if (silentHotbarSwap(bot, source.slot, dest)) {
