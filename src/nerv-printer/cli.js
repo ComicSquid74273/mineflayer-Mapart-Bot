@@ -19615,6 +19615,23 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       if (checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
         const rowErrors = getUnresolvedTargetsForActiveCols(currentActiveCols)
         if (rowErrors.length > 0) {
+          // Name the phase each miss was born in, so the fix targets the real
+          // cause instead of a guess: never-sent = the bot outran the scan
+          // (speed/reach/AABB exclusion); sent-but-no-echo = server rejection
+          // or echo race (swap delay shows as held-item mismatch in the
+          // UNVERIFIED-PLACEMENT-SAMPLES); wrong-carpet = leftover misprint.
+          const classCounts = { neverSent: 0, sentNoEcho: 0, occupiedWrong: 0, digInFlight: 0 }
+          const Vec3Classify = bot.entity.position.constructor
+          for (const target of rowErrors) {
+            const key = getTargetKey(target)
+            if (bot.__nervMisprintDigs instanceof Set && bot.__nervMisprintDigs.has(key)) { classCounts.digInFlight += 1; continue }
+            const actual = bot.blockAt(new Vec3Classify(target.position.x, target.position.y, target.position.z))
+            if (actual && String(actual.name).endsWith('_carpet') && actual.name !== target.blockName) { classCounts.occupiedWrong += 1; continue }
+            if ((sendCounts.get(key) || 0) === 0) classCounts.neverSent += 1
+            else classCounts.sentNoEcho += 1
+          }
+          console.log(`[MISS-CLASSIFY] unresolved=${rowErrors.length} neverSent=${classCounts.neverSent} sentNoEcho=${classCounts.sentNoEcho} occupiedWrong=${classCounts.occupiedWrong} digInFlight=${classCounts.digInFlight}`)
+
           const previousAction = currentAction
           const lineEndRepairStartAt = Date.now()
           currentAction = 'lineEnd-repair'
@@ -22776,6 +22793,24 @@ function collectNervScannerCandidates(bot, config, targetByXZ, currentGoal, proc
       continue
     }
     if (actual && actual.name !== 'air' && !String(actual.name).endsWith('_carpet')) continue
+    // MISPRINT: the cell holds a WRONG carpet (unflushed leftover or a
+    // bad placement). Fix it instantly instead of deferring to lane-end
+    // repair: fire a one-shot dig, then the normal scan offers the cell
+    // again as air on a later tick. Guarded per cell so a slow break never
+    // spams dig packets.
+    if (actual && String(actual.name).endsWith('_carpet') && actual.name !== entry.target.blockName) {
+      if (config.advanced?.scannerInstantMisprintFixEnabled !== false) {
+        if (!(bot.__nervMisprintDigs instanceof Set)) bot.__nervMisprintDigs = new Set()
+        if (!bot.__nervMisprintDigs.has(entry.key)) {
+          bot.__nervMisprintDigs.add(entry.key)
+          console.log(`[MISPRINT-FIX] breaking ${actual.name} at ${entry.target.position.x} ${entry.target.position.y} ${entry.target.position.z} (expected ${entry.target.blockName})`)
+          Promise.resolve(bot.dig(actual, true)).catch(() => { }).finally(() => {
+            try { bot.__nervMisprintDigs.delete(entry.key) } catch { }
+          })
+        }
+      }
+      continue
+    }
     results.push(entry.target)
   }
   return results
