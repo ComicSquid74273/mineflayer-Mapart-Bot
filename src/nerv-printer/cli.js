@@ -14529,22 +14529,31 @@ async function gateOnCompleteMap(bot, config, orderedTargets, placeRange) {
       const centerY = orderedTargets[0]?.position?.y
       if (Number.isFinite(centerX) && Number.isFinite(centerZ) && Number.isFinite(centerY)) {
         console.log(`[POSTPRINT-GATE] ${unloaded} target(s) unverifiable from here; walking to the map centre to re-verify.`)
+        const centerGoal = { x: centerX, y: centerY, z: centerZ }
+        // The walk MUST happen (it is how unloaded corners get verified), but
+        // the straight-walker was observed to hang without moving and its own
+        // hard timeout never fired (bot idle 300s+ right here). Watchdog the
+        // walk, then retry with the pathfinder; the re-verify is never
+        // skipped -- only the mover changes.
+        const walkMs = Math.max(30000, toNumber(advanced.postPrintGateCenterWalkMs, 90000))
         try {
-          // Hard-bounded: the walk's own "hard timeout" was observed not to
-          // fire when the walk never starts moving (bot idle 300s+ in this
-          // exact phase). Race it; on timeout, skip the re-verify -- the
-          // loaded-world scan plus the final scan already gate correctness,
-          // and unloaded cells get re-verified by the downstream pass.
-          const walkMs = Math.max(30000, toNumber(advanced.postPrintGateCenterWalkMs, 90000))
           await Promise.race([
-            walkStraightToPointWithHardTimeout(bot, { x: centerX, y: centerY, z: centerZ }, 2.0, 60000, 'postprint-gate-center-recheck', {
+            walkStraightToPointWithHardTimeout(bot, centerGoal, 2.0, 60000, 'postprint-gate-center-recheck', {
               config, sprint: true, jump: false, tickMs: 50, shouldPauseTimeout: () => false
             }),
             new Promise((resolve) => setTimeout(resolve, walkMs))
           ])
-        } catch { /* pathfinder fallback below */ }
+        } catch { /* straight walk failed; pathfinder fallback below */ }
         try { bot.setControlState('sprint', false) } catch { }
         try { bot.setControlState('forward', false) } catch { }
+        if (distanceToPoint(bot?.entity?.position, centerGoal) > 3.0) {
+          console.log('[POSTPRINT-GATE] straight walk stalled; retrying the centre with the pathfinder.')
+          try {
+            await gotoGoalWithHardTimeout(bot, new GoalNear(centerX, centerY, centerZ, 2), Math.max(30000, walkMs), 'postprint-gate-center-recheck-pathfind', { config })
+          } catch (err) {
+            console.log(`[POSTPRINT-GATE-WARN] pathfinder retry failed: ${err?.message || err}; continuing to rescan.`)
+          }
+        }
         const rescan = scanOutstanding(`POSTPRINT-GATE-${attempt}-CENTER`)
         outstanding = rescan.outstanding
         unloaded = rescan.unloaded
