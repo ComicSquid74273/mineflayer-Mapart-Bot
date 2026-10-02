@@ -18800,6 +18800,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let planStartedAt = 0
   let planEmitTickSeen = -1
   let planEmittedThisTick = 0
+  // Colours whose placement deferred because they are not staged: the staging
+  // pass re-stages these from main inventory on demand (echo-confirmed), so a
+  // mid-band stack drain heals instead of starving the whole lane into repair.
+  const planDeferredColors = new Map()
   // The plan's clock is the bot's POSITION, not the wall clock: reality has
   // checkpoint pauses, drains and turns the simulation does not, so a
   // time-based planTick drifts ahead of the bot and emits cells before they
@@ -19348,6 +19352,36 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
             }
           }
+          // Demand-driven restage: a colour whose placement deferred (stack
+          // drained mid-band, never staged, swap rejected) restages from main
+          // the moment it is not resident-with-stock. Echo-truth inventory
+          // makes this self-correcting; the entry pull sized main for it.
+          for (const [deferredColor, deferredAt] of planDeferredColors) {
+            if (stageNowMs - deferredAt > 10000) {
+              planDeferredColors.delete(deferredColor)
+              continue
+            }
+            if (findHotbarIndexesForItem(bot, deferredColor).some((entry) => entry.count > 0)) {
+              planDeferredColors.delete(deferredColor)
+              continue
+            }
+            if ((bot.__nervSwapWaitUntil || 0) > stageNowMs) break
+            const source = findBestInventorySlotForItem(bot, deferredColor)
+            if (!source) continue
+            // Prefer the drained resident slot (a refill), else a free slot.
+            let dest = findHotbarIndexForItem(bot, deferredColor)
+            if (!(dest >= 0 && dest <= 8)) {
+              for (let index = 2; index <= 8; index += 1) {
+                const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+                if (!stack || Number(stack.count) <= 0) { dest = index; break }
+              }
+            }
+            if (!(dest >= 0 && dest <= 8)) continue
+            if (silentHotbarSwap(bot, source.slot, dest)) {
+              bot.__nervSwapWaitUntil = stageNowMs + 150
+              console.log(`[BAND-STAGE] colour=${deferredColor} slot=${dest} reason=deferred-restage`)
+            }
+          }
         } catch (stageErr) {
           console.log(`[BAND-STAGE-ERR] ${stageErr?.message || stageErr} -- disabling plan for this band`)
           bandPlan = null
@@ -19573,8 +19607,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
 
               if (String(result.reason || '').startsWith('plan-not-staged-')) {
-                // Colour is in stock but the plan stages it at a stop; re-offer
-                // shortly without counting a desync against the cell.
+                // Colour is in stock but not in the hotbar: record it for the
+                // staging pass, refund the per-tick emission cap (a defer is
+                // not a send), and re-offer shortly.
+                planDeferredColors.set(target.blockName, Date.now())
+                planEmittedThisTick = Math.max(0, planEmittedThisTick - 1)
                 pendingUntil.set(key, Date.now() + 300)
                 retryPriority.add(key)
                 continue
