@@ -5874,6 +5874,10 @@ function createDefaultConfig() {
       // Band scheduler (docs/BOT20-BAND-SCHEDULER-PLAN.md): schedule-driven
       // emission behind this flag while the executor is wired in.
       bandSchedulerEnabled: false,
+      // Hard ceiling of planned block_place packets per 50ms tick. The
+      // server's silent intake is burst-shaped: catch-up bursts of 4-5 are
+      // dropped wholesale even when the same cells land one-per-tick.
+      bandSchedulerBlocksPerTick: 4,
       // Blocks before the lane end where the turn starts: with reach 5, turning
       // 3 rows early keeps the tail rows printable through the lateral leg.
       workloadTurnEarlyBlocks: 3,
@@ -18794,6 +18798,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // stays as the default and the fallback.
   let bandPlan = null
   let planStartedAt = 0
+  let planEmitTickSeen = -1
+  let planEmittedThisTick = 0
   // The plan's clock is the bot's POSITION, not the wall clock: reality has
   // checkpoint pauses, drains and turns the simulation does not, so a
   // time-based planTick drifts ahead of the bot and emits cells before they
@@ -19358,10 +19364,20 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           burstTargets = []
           try {
             if (planTick >= 0) {
+              // Hard per-tick cap: the server silently drops burst catch-up
+              // (measured intake ~1-2 per 50ms tick regardless of send rate),
+              // so the plan never bursts to catch up -- the schedule absorbs
+              // delay by shifting cells into their later attempt/window.
+              if (planTick !== planEmitTickSeen) {
+                planEmitTickSeen = planTick
+                planEmittedThisTick = 0
+              }
+              const perTickCap = Math.max(1, Math.trunc(toNumber(advanced.bandSchedulerBlocksPerTick, 4)))
               const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
               const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
               for (const cell of bandPlan.cells) {
                 if (burstTargets.length >= allowed) break
+                if (planEmittedThisTick >= perTickCap) break
                 if (cell.emitTick > planTick || planTick > cell.exit + 10) continue
                 if (burstExcluded.has(cell.key)) continue
                 const tp = cell.target.position
@@ -19376,6 +19392,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                   continue
                 }
                 burstTargets.push(cell.target)
+                planEmittedThisTick += 1
               }
             }
           } catch (planErr) {
