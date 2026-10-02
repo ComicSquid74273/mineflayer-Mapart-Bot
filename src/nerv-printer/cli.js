@@ -19560,6 +19560,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               if (planDeferredColors.has(stack.name)) continue // restage path owns it
               const source = findBestInventorySlotForItem(bot, stack.name)
               if (!source) continue
+              // One handover per drain episode: once a second stack of this
+              // colour exists anywhere in the hotbar, the drained remainder
+              // must NOT trigger another (the loop staged 3+ extra stacks and
+              // the snapshot storms reset the in-flight ledger mid-flight).
+              if (findHotbarIndexesForItem(bot, stack.name).some((entry) => entry.index !== index && entry.count > 0)) continue
               const dest = pickStagingSlot(null, null, index)
               if (!(dest >= 0 && dest <= 8) || dest === index) continue
               const destStack = bot.inventory?.slots?.[getHotbarWindowSlot(dest)]
