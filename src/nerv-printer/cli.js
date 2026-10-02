@@ -20813,7 +20813,7 @@ async function runPrint(bot, config, dashboardRuntime = null) {
         // Bonus next-band head cells during the turn are opt-in: default is
         // ACTIVE LANE ONLY -- printing outside the active lane looks random
         // and fights the lane's own material staging.
-        if (nextColBatch.length > 0 && advanced.workloadUTurnBonusEnabled === true) {
+        if (nextColBatch.length > 0 && config.advanced?.workloadUTurnBonusEnabled === true) {
           const nextStartOnNorth = !batchStartOnNorthSide
           const nextRowOrder = nextStartOnNorth ? sortedRowsAsc : [...sortedRowsAsc].reverse()
           const nextBatchTargets = []
