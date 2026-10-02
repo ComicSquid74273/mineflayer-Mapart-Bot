@@ -1060,8 +1060,6 @@ function installVanillaSpeed(bot, config) {
   }
 
   const advanced = config.advanced || {}
-  let prevX = null
-  let prevZ = null
 
   bot.once('inject_allowed', () => configureStepHeight(bot, config))
   // Re-apply stepHeight on login/spawn in case physics resets (reconnect, respawn)
@@ -1085,8 +1083,6 @@ function installVanillaSpeed(bot, config) {
   }
 
   bot._client.on('position', (packet) => {
-    prevX = null
-    prevZ = null
     lastSetbackAt = Date.now()
     const p = bot.entity?.position
     if (p) {
@@ -1101,42 +1097,52 @@ function installVanillaSpeed(bot, config) {
     }
   })
 
+  // Physics-integrated boost (THM/Meteor Vanilla speed mode semantics): scale
+  // the movement-speed attribute constant so the FULL vanilla pipeline --
+  // inertia, acceleration, sprint modifier, collisions, stepping -- produces
+  // the target speed, exactly like Meteor's Vanilla mode sets the movement
+  // vector inside the physics step. The previous implementation teleported
+  // pos.x/z AFTER physics, which produced positions vanilla math cannot
+  // reach from the reported inputs; the server's movement check answered with
+  // the rubberband corrections. Vanilla flat sprint = 5.612 bps at
+  // playerSpeed 0.1, so the scale is linear.
+  const vanillaSprintBps = 5.612
+  const defaultPlayerSpeed = 0.1
+  const restorePlayerSpeed = () => {
+    if (bot.physics && bot.physics.playerSpeed !== defaultPlayerSpeed) {
+      bot.physics.playerSpeed = defaultPlayerSpeed
+    }
+  }
+  bot.on('end', restorePlayerSpeed)
+
   bot.on('physicsTick', () => {
     if (advanced.vanillaSpeedEnabled === false) return
-    if (Date.now() - lastSetbackAt < setbackCooldownMs) return
+    if (Date.now() - lastSetbackAt < setbackCooldownMs) {
+      restorePlayerSpeed()
+      return
+    }
 
     const pos = bot.entity?.position
     if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.z)) return
 
-    if (prevX == null || prevZ == null) {
-      prevX = pos.x
-      prevZ = pos.z
+    const boostEligible = (() => {
+      if (advanced.vanillaSpeedPlatformOnly !== false) {
+        if (!isPositionInsidePlatformHorizontalBounds(pos, config)) return false
+      }
+      const isSneaking = typeof bot.getControlState === 'function' ? bot.getControlState('sneak') : Boolean(bot.controlState?.sneak)
+      if (isSneaking) return false
+      const isMoving = typeof bot.getControlState === 'function'
+        ? (bot.getControlState('forward') || bot.getControlState('sprint'))
+        : Boolean(bot.controlState?.forward || bot.controlState?.sprint)
+      if (!isMoving) return false
+      if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return false
+      return true
+    })()
+    if (!boostEligible || !bot.physics) {
+      restorePlayerSpeed()
       return
     }
 
-    const movedX = pos.x - prevX
-    const movedZ = pos.z - prevZ
-    prevX = pos.x
-    prevZ = pos.z
-
-    const movedDist = Math.hypot(movedX, movedZ)
-    if (movedDist < 0.01) return
-
-    if (advanced.vanillaSpeedPlatformOnly !== false) {
-      if (!isPositionInsidePlatformHorizontalBounds(pos, config)) return
-    }
-
-    const isSneaking = typeof bot.getControlState === 'function' ? bot.getControlState('sneak') : Boolean(bot.controlState?.sneak)
-    if (isSneaking) return
-
-    const isMoving = typeof bot.getControlState === 'function'
-      ? (bot.getControlState('forward') || bot.getControlState('sprint'))
-      : Boolean(bot.controlState?.forward || bot.controlState?.sprint)
-    if (!isMoving) return
-    if (advanced.vanillaSpeedInLiquids !== true && (bot.entity?.isInWater || bot.entity?.isInLava)) return
-
-    // Flat sprint boost does not need jump inputs: 7.192 bps is the server-safe
-    // ceiling for sustained ground sprint, with or without allowJump.
     const maxSafeBps = 7.192
     const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, 7.123) : 7.123
     const serverTps = bot.__nervServerTps || 20.0
@@ -1150,22 +1156,12 @@ function installVanillaSpeed(bot, config) {
     const tpsSpeedLimit = throttleState === 'boost' ? maxSafeBps : 5.6
     const effectiveBps = Math.min(targetBps, tpsSpeedLimit)
     const bps = Math.min(maxSafeBps, Math.max(1.0, effectiveBps))
-    const targetPerTick = bps / 20.0
 
-    if (movedDist < targetPerTick) {
-      const boost = targetPerTick - movedDist
-      const dirX = movedX / movedDist
-      const dirZ = movedZ / movedDist
-      const nextPos = pos.offset(dirX * boost, 0, dirZ * boost)
-      const Vec3 = pos.constructor
-
-      const checkY = Math.floor(pos.y - 0.1)
-      const blockBelow = bot.blockAt(new Vec3(Math.floor(nextPos.x), checkY, Math.floor(nextPos.z)))
-      if (blockBelow && blockBelow.name !== 'air' && !playerPositionOverlapsBlockCollision(bot, nextPos)) {
-        pos.x = nextPos.x
-        pos.z = nextPos.z
-        prevX = nextPos.x
-        prevZ = nextPos.z
+    const scaled = defaultPlayerSpeed * (bps / vanillaSprintBps)
+    if (bot.physics.playerSpeed !== scaled) {
+      bot.physics.playerSpeed = scaled
+      if (placementNoiseLogsEnabled(config)) {
+        console.log(`[VANILLA-SPEED] playerSpeed=${scaled.toFixed(4)} targetBps=${bps.toFixed(3)} mode=${throttleState}`)
       }
     }
   })
