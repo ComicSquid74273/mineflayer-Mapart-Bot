@@ -1073,9 +1073,27 @@ function installVanillaSpeed(bot, config) {
   if (bot._client && !bot.__nervSentTrackerInstalled) {
     bot.__nervSentTrackerInstalled = true
     const rawWrite = bot._client.write.bind(bot._client)
+    // Packet-rate census: 6b6t kicks for "exceeding packet rate limit"
+    // without naming the packet. Count everything we send per 5s window and
+    // log the breakdown whenever the window total is high, so the offending
+    // burst (restock clicks? held_item_slot churn? dig spam?) is identifiable
+    // from the log alone.
+    const rateCounts = new Map()
+    let rateWindowStart = Date.now()
     bot._client.write = (name, params) => {
+      const now = Date.now()
+      rateCounts.set(name, (rateCounts.get(name) || 0) + 1)
+      if (now - rateWindowStart >= 5000) {
+        const total = [...rateCounts.values()].reduce((sum, count) => sum + count, 0)
+        if (total > 250) {
+          const top = [...rateCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([n, c]) => `${n}:${c}`).join(' ')
+          console.log(`[PKT-RATE] ${total} packets/5s ${top}`)
+        }
+        rateCounts.clear()
+        rateWindowStart = now
+      }
       if (name === 'position' || name === 'position_look' || name === 'look' || name === 'flying' || name === 'block_place' || name === 'use_item') {
-        recentSentPackets.push({ t: Date.now(), name, ...params })
+        recentSentPackets.push({ t: now, name, ...params })
         if (recentSentPackets.length > 10) recentSentPackets.shift()
       }
       return rawWrite(name, params)
