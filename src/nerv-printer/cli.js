@@ -18800,6 +18800,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let planStartedAt = 0
   let planEmitTickSeen = -1
   let planEmittedThisTick = 0
+  // Throughput instrument: where the emission budget actually goes each second.
+  let emitWakes = 0
+  let emitScheduled = 0
+  let emitAhead = 0
+  let emitEmptyWakes = 0
   // Colours whose placement deferred because they are not staged: the staging
   // pass re-stages these from main inventory on demand (echo-confirmed), so a
   // mid-band stack drain heals instead of starving the whole lane into repair.
@@ -19287,7 +19292,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           }
           if (Date.now() - (bot.__nervPlanDebtLoggedAt || 0) >= 1000) {
             bot.__nervPlanDebtLoggedAt = Date.now()
-            console.log(`[PLAN-DEBT] tick=${planTick} due=${due} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true}`)
+            console.log(`[PLAN-DEBT] tick=${planTick} due=${due} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true} wakes=${emitWakes} sched=${emitScheduled} ahead=${emitAhead} empty=${emitEmptyWakes}`)
+            emitWakes = 0
+            emitScheduled = 0
+            emitAhead = 0
+            emitEmptyWakes = 0
           }
           return bot.__nervTraversalSlow === true ? due > 0 : due > 4
         })()
@@ -19415,6 +19424,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           // when, the eye-range confirms now.
           const planTick = currentPlanTick()
           burstTargets = []
+          emitWakes += 1
           try {
             if (planTick >= 0) {
               // Hard per-tick cap: the server silently drops burst catch-up
@@ -19446,6 +19456,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 }
                 burstTargets.push(cell.target)
                 planEmittedThisTick += 1
+                emitScheduled += 1
               }
               // Catch-up pass: schedule-tied emission is break-even by
               // construction (slowing down slows emission equally), so spare
@@ -19475,8 +19486,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                   }
                   burstTargets.push(cell.target)
                   planEmittedThisTick += 1
+                  emitAhead += 1
                 }
               }
+              if (burstTargets.length === 0) emitEmptyWakes += 1
             }
           } catch (planErr) {
             console.log(`[BAND-PLAN-ERR] ${planErr?.message || planErr} -- disabling plan for this band`)
