@@ -20432,13 +20432,21 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) return false
           const key = getTargetKey(target)
           if (seen.has(key) || stallSkipped.has(key)) return false
-          // Only EXHAUSTED retries count as misses: sent at least twice, echo
-          // window expired, world still disagrees. A cell whose echo simply has
-          // not arrived yet is lag, and treating it as a miss made the recovery
-          // sneak-back fire on healthy lanes.
-          if ((sendCounts.get(key) || 0) < 2) return false
           const pendingExpiry = pendingUntil.get(key)
           if (pendingExpiry !== undefined && pendingExpiry > Date.now()) return false
+          // Only EXHAUSTED cells count as misses: either sent twice without
+          // landing, or sent once and now BEHIND the bot (outside live reach)
+          // -- the trailing one-send drops (sentNoEcho) the forward retry
+          // could not recover. A single-send cell still in reach is just
+          // echo lag, not a miss.
+          const sends = sendCounts.get(key) || 0
+          if (sends < 2) {
+            if (sends < 1) return false
+            const tp = target.position
+            const reach = toNumber(printer.placeRange, 5)
+            const behind = Math.hypot(bot.entity.position.x - (tp.x + 0.5), bot.entity.position.z - (tp.z + 0.5)) > reach
+            if (!behind) return false
+          }
           const actual = bot.blockAt(new Vec3Miss(target.position.x, target.position.y, target.position.z))
           return actual?.name !== target.blockName
         })

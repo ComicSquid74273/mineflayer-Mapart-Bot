@@ -77,13 +77,18 @@ test('the uTurn leg prints: gate, bonus cells, and no mid-turn emergency stop', 
   assert.match(bandLoop.slice(0, 2200), /batchOptions\.uTurnTargets = nextBatchTargets\.filter/)
 })
 
-test('miss recovery counts only exhausted retries, not echo lag', () => {
+test('miss recovery counts exhausted retries and trailing one-send drops, not echo lag', () => {
   const workloadAt = source.indexOf('async function runNervTimeWorkloadPlacementBatch(')
   const batch = source.slice(workloadAt, source.indexOf('\nfunction probeStartupSupport(', workloadAt))
   const missAt = batch.indexOf('const missedInCols = batchTargets.filter')
-  const miss = batch.slice(missAt, missAt + 800)
+  const miss = batch.slice(missAt, missAt + 1000)
 
-  assert.match(miss, /sendCounts\.get\(key\) \|\| 0\) < 2\) return false/)
+  // Two-send cells are always misses; a one-send cell only once it is
+  // BEHIND the bot (outside live reach) -- in-reach single-sends are lag.
+  assert.match(miss, /const sends = sendCounts\.get\(key\) \|\| 0/)
+  assert.match(miss, /if \(sends < 2\) \{/)
+  assert.match(miss, /if \(sends < 1\) return false/)
+  assert.match(miss, /outside live reach/, 'the behind-the-bot comment must survive')
   assert.match(miss, /pendingExpiry !== undefined && pendingExpiry > Date\.now\(\)\) return false/)
 })
 
