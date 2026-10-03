@@ -19153,7 +19153,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     if (worldName === target.blockName) {
       ackSettleConfirmed += 1
       markTargetPlacedInWorld(target, key)
+      return
     }
+    // Acked but echo not visible yet (echo latency under load exceeds the
+    // short park): TRUST THE ACK -- extend the park so the world-scan does
+    // not re-send while the echo is in flight. Genuinely rejected cells
+    // (~3%) re-offer after this window.
+    const ackedEchoWaitMs = Math.max(200, toNumber(advanced.ackedEchoWaitMs, 500))
+    pendingUntil.set(key, Math.max(pendingUntil.get(key) || 0, Date.now() + ackedEchoWaitMs))
   }
   if (ackTracker) ackTracker.settlers.add(handleAckSettle)
 
