@@ -7515,8 +7515,18 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
     // Band scheduler: no inventory mutation inside the emission window.
     // Staging happens at scheduled stops; a colour that is not already
     // resident is deferred, never mid-burst swapped.
-    if (isBandPlanLive(bot)) return false
-    if (!silentHotbarSwap(bot, source.slot, hotbarIndex)) return false
+    if (isBandPlanLive(bot)) {
+      console.log(`[EQUIP-FAIL] ${blockName}: plan live (ban)`)
+      return false
+    }
+    if (!(hotbarIndex >= 0 && hotbarIndex <= 8)) {
+      console.log(`[EQUIP-FAIL] ${blockName}: no hotbar dest (chooseMaterialHotbarIndex=${hotbarIndex})`)
+      return false
+    }
+    if (!silentHotbarSwap(bot, source.slot, hotbarIndex)) {
+      console.log(`[EQUIP-FAIL] ${blockName}: swap write failed src=${source.slot} dest=${hotbarIndex} window=${bot.currentWindow ? bot.currentWindow.id : 'inv'}`)
+      return false
+    }
     if (fastSwap) return true
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
     if (!swapped) return false
