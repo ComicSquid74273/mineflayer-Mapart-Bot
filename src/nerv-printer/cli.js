@@ -20432,7 +20432,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         const backtrackStartAt = Date.now()
         const Vec3Miss = bot.entity.position.constructor
         const missedInCols = batchTargets.filter((target) => {
-          if (currentActiveCols instanceof Set && !currentActiveCols.has(target.col)) return false
+          // Deliberately NOT gated on currentActiveCols: a miss behind the
+          // bot belongs to whichever segment it died in, and column-gating
+          // made intermediate checkpoints blind to earlier segments' misses
+          // -- they accumulated the whole lane and only surfaced at the end
+          // (span 97-120). Every checkpoint checks the entire walked band.
           const key = getTargetKey(target)
           if (seen.has(key) || stallSkipped.has(key)) return false
           const pendingExpiry = pendingUntil.get(key)

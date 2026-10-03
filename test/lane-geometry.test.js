@@ -81,7 +81,7 @@ test('miss recovery counts exhausted retries and trailing one-send drops, not ec
   const workloadAt = source.indexOf('async function runNervTimeWorkloadPlacementBatch(')
   const batch = source.slice(workloadAt, source.indexOf('\nfunction probeStartupSupport(', workloadAt))
   const missAt = batch.indexOf('const missedInCols = batchTargets.filter')
-  const miss = batch.slice(missAt, missAt + 1000)
+  const miss = batch.slice(missAt, missAt + 1200)
 
   // Two-send cells are always misses; a one-send cell only once it is
   // BEHIND the bot (outside live reach) -- in-reach single-sends are lag.
