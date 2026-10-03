@@ -19244,6 +19244,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // Why the emission loop rejected due cells (per-second, logged in PLAN-DEBT):
   // when emission offers nothing, these counters name the filter responsible.
   const emitReject = { expired: 0, excluded: 0, reach: 0 }
+  // Per-reason placement skip census for LANE-PHASE (the skip log throttles).
+  const emitSkips = new Map()
   // Colours whose placement deferred because they are not staged: the staging
   // pass re-stages these from main inventory on demand (echo-confirmed), so a
   // mid-band stack drain heals instead of starving the whole lane into repair.
@@ -19899,7 +19901,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             const pendingSwapSlots = bot.__nervPendingSwapSlots || (bot.__nervPendingSwapSlots = [])
             while (pendingSwapSlots.length > 0 && pendingSwapSlots[0].until < stageNowMs) pendingSwapSlots.shift()
             for (const op of bandPlan.swaps) {
-              if (op.__done || !op.inColour || op.tick > stagePlanTick + 5) continue
+              // STICKY eligibility: an op becomes due at op.tick and stays
+              // due until done. The old +5-tick (0.25s) window was one-shot:
+              // an op that conflicted with a pending swap skipped and was
+              // never eligible again, so 16-colour bands full of late,
+              // unstaged colours walked past unprinted (neverSent=277).
+              if (op.__done || !op.inColour || op.tick > stagePlanTick) continue
               const resident = findHotbarIndexesForItem(bot, op.inColour)
               if (resident.some((entry) => entry.count > 0)) {
                 op.__done = true
@@ -20070,64 +20077,44 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               planEmittedThisTick = 0
               const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
               const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
+              // PRINT AHEAD, NEVER WALK PAST (user directive). The old
+              // scheduled pass offered each cell only inside a one-shot
+              // tick window (emitTick..exit+10); a colour that was not
+              // staged in that 0.5s was skipped every wake until the
+              // window expired and the bot walked past it -- 70% of the
+              // band deferred to the repair phase. Eligibility is now
+              // LIVE REACH ONLY: every in-reach cell that the world has
+              // not confirmed is offerable on every wake, closest first,
+              // colour-coherent with the held stack. A skipped cell is
+              // simply re-offered next wake until it prints or leaves
+              // reach -- nothing can die by timing.
+              const heldName = String(bot.heldItem?.name || '')
+              const eligible = []
               for (const cell of bandPlan.cells) {
-                if (burstTargets.length >= allowed) break
-                if (planEmittedThisTick >= perTickCap) break
-                if (cell.emitTick > planTick || planTick > cell.exit + 10) { emitReject.expired += 1; continue }
-                if (burstExcluded.has(cell.key)) { emitReject.excluded += 1; continue }
+                if (burstExcluded.has(cell.key) || seen.has(cell.key)) { emitReject.excluded += 1; continue }
                 const tp = cell.target.position
                 const dx = bot.entity.position.x - (tp.x + 0.5)
                 const dy = eyeY - (tp.y + 0.5)
                 const dz = bot.entity.position.z - (tp.z + 0.5)
-                if (dx * dx + dy * dy + dz * dz > liveReach2) { emitReject.reach += 1; continue }
+                const d2 = dx * dx + dy * dy + dz * dz
+                if (d2 > liveReach2) { emitReject.reach += 1; continue }
                 const Vec3Plan = bot.entity.position.constructor
                 const actual = bot.blockAt(new Vec3Plan(tp.x, tp.y, tp.z))
                 if (actual?.name === cell.target.blockName) {
                   markTargetPlacedInWorld(cell.target, cell.key)
                   continue
                 }
+                eligible.push({ cell, d2, colourMismatch: cell.target.blockName !== heldName ? 1 : 0 })
+              }
+              eligible.sort((l, r) => l.colourMismatch - r.colourMismatch || l.d2 - r.d2)
+              for (const { cell, colourMismatch } of eligible) {
+                if (burstTargets.length >= allowed || planEmittedThisTick >= perTickCap) break
                 burstTargets.push(cell.target)
                 burstExcluded.add(cell.key)
                 planEmittedThisTick += 1
                 emissionTokens -= 1
-                emitScheduled += 1
-              }
-              // Catch-up pass: schedule-tied emission is break-even by
-              // construction (slowing down slows emission equally), so spare
-              // per-tick capacity prints AHEAD of schedule -- any unsent
-              // in-reach cell, closest first. The buffer this builds absorbs
-              // sprint spikes instead of letting debt pile into repair.
-              if (burstTargets.length < allowed && planEmittedThisTick < perTickCap) {
-                const ahead = []
-                // Colour-coherent fill: prefer cells matching what the hand
-                // already holds, then distance -- mixing colours against the
-                // scheduled pass churns held_item_slot selects every wake and
-                // steals the server's interaction budget.
-                const heldName = String(bot.heldItem?.name || '')
-                for (const cell of bandPlan.cells) {
-                  if (burstExcluded.has(cell.key) || seen.has(cell.key)) continue
-                  const tp = cell.target.position
-                  const dx = bot.entity.position.x - (tp.x + 0.5)
-                  const dy = eyeY - (tp.y + 0.5)
-                  const dz = bot.entity.position.z - (tp.z + 0.5)
-                  const d2 = dx * dx + dy * dy + dz * dz
-                  if (d2 > liveReach2) continue
-                  ahead.push({ cell, d2, colourMismatch: cell.target.blockName !== heldName ? 1 : 0 })
-                }
-                ahead.sort((l, r) => l.colourMismatch - r.colourMismatch || l.d2 - r.d2)
-                for (const { cell } of ahead) {
-                  if (burstTargets.length >= allowed || planEmittedThisTick >= perTickCap) break
-                  const Vec3Plan = bot.entity.position.constructor
-                  const actual = bot.blockAt(new Vec3Plan(cell.target.position.x, cell.target.position.y, cell.target.position.z))
-                  if (actual?.name === cell.target.blockName) {
-                    markTargetPlacedInWorld(cell.target, cell.key)
-                    continue
-                  }
-                  burstTargets.push(cell.target)
-                  planEmittedThisTick += 1
-                  emissionTokens -= 1
-                  emitAhead += 1
-                }
+                if (colourMismatch) emitAhead += 1
+                else emitScheduled += 1
               }
               if (burstTargets.length === 0) emitEmptyWakes += 1
             }
@@ -20301,6 +20288,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               if (!isTransientPlacementReason(result.reason)) {
                 skipped += 1
               }
+              // Per-reason census: the [NERV-WORKLOAD-SKIP] log is throttled
+              // and hid a 280-skip plan-not-staged storm behind 8 visible
+              // lines. Counters land in LANE-PHASE, unthrottled.
+              const reasonClass = String(result.reason || 'none').replace(/_[a-z]+_carpet$/, '')
+              emitSkips.set(reasonClass, (emitSkips.get(reasonClass) || 0) + 1)
               if (config.errorHandling?.logErrors !== false && placementNoiseLogsEnabled(config)) {
                 console.log(`[NERV-WORKLOAD-SKIP] ${target.position.x} ${target.position.y} ${target.position.z} (${result.reason})`)
               }
@@ -20870,12 +20862,15 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
   {
     const totalMs = lineEndDrainMs + backtrackMs + lineEndRepairMs
+    const topSkips = [...emitSkips.entries()].sort((l, r) => r[1] - l[1]).slice(0, 3)
+      .map(([reason, count]) => `${reason}:${count}`).join(',') || 'none'
     console.log(
       `[LANE-PHASE] targets=${batchTargets.length} placed=${placed} retries=${retriesTotalCount} ` +
       `walkMs=${Math.max(0, laneWalkTotalMs - totalMs)} drainMs=${lineEndDrainMs} ` +
       `backtrackMs=${backtrackMs} repairMs=${lineEndRepairMs} ` +
       `unresolvedIn=${unresolvedInCount} unresolvedOut=${unresolvedOutCount} ` +
       `slowTicks=${traversalSlowTicks} ` +
+      `topSkips=${topSkips} ` +
       `acks=${ackTracker && ackStatsAtStart ? ackTracker.stats.acks - ackStatsAtStart.acks : 0} ` +
       `ackOk=${ackSettleConfirmed} ackReject=${ackSettleRejected}`
     )

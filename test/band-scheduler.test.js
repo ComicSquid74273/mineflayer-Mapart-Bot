@@ -238,10 +238,15 @@ test('schedule-driven emission replaces the scan only when a plan exists', () =>
   const scanBranch = batch.indexOf('burstTargets = collectNervScannerCandidates(')
   assert.ok(planBranch >= 0 && scanBranch > planBranch, 'planned branch first, heuristic in else')
 
-  // Due-filter semantics: emission honors the scheduled tick, the window with
-  // a grace, and the shared parking bookkeeping.
-  assert.match(batch, /cell\.emitTick > planTick \|\| planTick > cell\.exit \+ 10/, 'due = scheduled tick reached and window still open')
-  assert.match(batch, /burstExcluded\.has\(cell\.key\)/, 'parked cells are never re-offered by the plan')
+  // Due-filter semantics: PRINT AHEAD, NEVER WALK PAST. Eligibility is live
+  // reach only -- no one-shot tick window can let a cell die unprinted while
+  // the bot sprints past it (the 70%-miss band). Colour-coherent, closest
+  // first, parked cells never re-offered.
+  assert.doesNotMatch(batch, /emitTick > planTick \|\| planTick > cell\.exit \+ 10\).*?burstTargets\.push/s,
+    'no one-shot emission window may gate a cell into repair-phase death')
+  assert.match(batch, /const eligible = \[\]/)
+  assert.match(batch, /eligible\.sort\(\(l, r\) => l\.colourMismatch - r\.colourMismatch \|\| l\.d2 - r\.d2\)/)
+  assert.match(batch, /if \(burstExcluded\.has\(cell\.key\) \|\| seen\.has\(cell\.key\)\)/, 'parked cells are never re-offered by the plan')
 
   // Planned-vs-actual telemetry before any repair phase.
   assert.match(batch, /\[BAND-EXEC\] scheduled=/)
@@ -295,11 +300,11 @@ test('step 4: position-derived plan clock and live reach gate', () => {
   assert.match(batch, /bandPlan\.pacing\.find\(\(s\) => planTick >= s\.fromTick && planTick < s\.toTick\)/)
   assert.match(batch, /const slowNow = planPaceWalk \|\|/)
   // Every planned emission passes a live reach gate before the packet goes
-  // out (schedule says when, eye-range confirms now). Anchor on the
-  // due-filter's occurrence (the pacing block also reads emitTick).
-  const dueAt = batch.lastIndexOf('cell.emitTick > planTick')
-  assert.ok(dueAt >= 0)
-  assert.match(batch.slice(dueAt, dueAt + 1600), /liveReach2/, 'due cells must pass the live reach gate')
+  // out (eye-range confirms now; eligibility IS reach, so no cell is offered
+  // behind the bot or outside range).
+  const eligibleAt = batch.indexOf('const eligible = []')
+  assert.ok(eligibleAt >= 0)
+  assert.match(batch.slice(eligibleAt - 1200, eligibleAt), /liveReach2/, 'the reach sphere gates eligibility')
   // Schedule-debt pacing: the bot walks when due-but-unsent cells pile up.
   assert.match(batch, /bot\.__nervTraversalSlow === true \? liveDue > 0 : liveDue > 4/)
 })
