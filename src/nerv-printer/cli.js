@@ -17269,11 +17269,47 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
           counts.set(target.blockName, n)
           if (n >= 3) {
             counts.set(target.blockName, 0)
-            refreshInventoryAuthoritatively(bot, "attempt-check")
+            // Proper debug dump: where does the colour physically sit?
+            const where = []
+            const allSlots = bot.inventory?.slots || []
+            for (let s = 9; s < allSlots.length; s += 1) {
+              if (allSlots[s]?.name === target.blockName) where.push(`${s}x${allSlots[s].count}`)
+            }
+            console.log(`[EQUIP-DEBUG] ${target.blockName} slots=[${where.join(',') || 'NONE'}] items()=${bot.inventory.items().filter((e) => e.name === target.blockName).length} quickBarSlot=${bot.quickBarSlot}`)
+            // Escape hatch (user directive): normal confirmed equip, and an
+            // offhand->held hop when items() cannot see the only copy.
+            try {
+              const item = bot.inventory.items().find((entry) => entry.name === target.blockName)
+              if (item) {
+                await bot.equip(item, 'hand')
+                console.log(`[EQUIP-NORMAL-FALLBACK] site=pre-attempt ${target.blockName}: confirmed equip after ${n} desyncs`)
+              } else {
+                const offHandStack = bot.inventory?.slots?.[45]
+                const heldIdx = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0
+                if (offHandStack?.name === target.blockName && Number(offHandStack.count) > 0 && bot._client) {
+                  const cursorItem = serializeCursorItem(bot, bot.inventory)
+                  bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: heldIdx, mode: 2, changedSlots: [], cursorItem })
+                  console.log(`[EQUIP-OFFHAND-HOP] site=pre-attempt ${target.blockName}: offhand -> hotbar ${heldIdx}`)
+                  await delay(200)
+                } else {
+                  refreshInventoryAuthoritatively(bot, "attempt-check")
+                }
+              }
+            } catch (equipErr) {
+              console.log(`[EQUIP-NORMAL-FALLBACK-WARN] site=pre-attempt ${target.blockName}: ${equipErr?.message || equipErr}`)
+              refreshInventoryAuthoritatively(bot, "attempt-check")
+            }
+            if (selectedMaterialMatches(bot, target.blockName)) {
+              // fall through and place with the recovered hand
+            } else {
+              return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
+            }
+          } else {
+            return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
           }
-          return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
+        } else {
+          return { state: 'skip', reason: `missing-item-${target.blockName}` }
         }
-        return { state: 'skip', reason: `missing-item-${target.blockName}` }
       }
       if (shouldSneak) {
         bot.setControlState('sneak', true)
