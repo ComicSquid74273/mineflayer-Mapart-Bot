@@ -18576,46 +18576,97 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
 }
 
 function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0, options = {}) {
-  const orderedCols = [...new Set(batchTargets.map((target) => target.col))]
-  const walkColIndex = Math.floor((orderedCols.length - 1) / 2)
-  const walkCol = orderedCols[walkColIndex]
-  const walkTarget = batchTargets.find((target) => target.col === walkCol) || batchTargets[0]
-  const walkX = toNumber(walkTarget?.position?.x, Math.min(...batchTargets.map((target) => target.position.x)))
-  const walkY = toNumber(walkTarget?.position?.y, Math.min(...batchTargets.map((target) => target.position.y)))
-  const minZ = Math.min(...batchTargets.map((target) => target.position.z))
-  const maxZ = Math.max(...batchTargets.map((target) => target.position.z))
-  const activeCols = new Set(batchTargets.map((target) => target.col))
-  const turnEarlyBlocks = Math.max(0, toNumber(options.turnEarlyBlocks, 0))
-  // Directional standpoints. The entry is one block BEFORE the first row in
-  // travel direction, so no first-row carpet ever starts under the bot's feet
-  // (the old +0.5 stood ON the row and produced the below-the-leg attempts).
-  // The exit is one block PAST the last row, pulled back by the early-turn
-  // budget: with reach 5 the tail rows stay printable through the whole
-  // lateral leg, so the bot never walks the lane to its very end.
-  const northStandZ = minZ - 0.5
-  const southStandZ = maxZ + 0.5
-  const entryPos = { x: walkX + 0.5, y: walkY, z: startOnNorthSide ? northStandZ : southStandZ }
-  const exitPos = {
-    x: walkX + 0.5,
-    y: walkY,
-    z: startOnNorthSide ? southStandZ - turnEarlyBlocks : northStandZ + turnEarlyBlocks
+  // Column-group serpentine. The route used to walk ONE middle column's x
+  // for the whole batch -- correct for a 4-wide lane, but a wide batch
+  // (measured live 2026-10-03 08:31: targets spanning ~52 blocks in x,
+  // ~14 columns) left every column beyond one reach diameter walk-past:
+  // neverSent=280 of 511, 55% of the band deferred to repair. Split the
+  // batch's x extent into column groups no wider than one reach diameter and
+  // walk them boustrophedon-style; a narrow batch yields a single pass whose
+  // output is byte-identical to the old route.
+  const lateralCoverBlocks = Math.max(2, toNumber(options.lateralCoverBlocks, 6))
+  const uniqueXs = [...new Set(batchTargets.map((target) => Number(target.position.x)))].sort((a, b) => a - b)
+  const groups = []
+  let group = null
+  for (const x of uniqueXs) {
+    if (!group || x - group.minX > lateralCoverBlocks) {
+      group = { minX: x, maxX: x }
+      groups.push(group)
+    } else {
+      group.maxX = x
+    }
   }
 
-  if (segmentSize <= 0 || maxZ - minZ <= segmentSize) {
-    return [
-      { position: entryPos, action: '', activeCols },
-      { position: exitPos, action: 'lineEnd', activeCols }
-    ]
+  const buildSinglePass = (passTargets, northFirst) => {
+    // The walk line is the group's x MIDPOINT, not the middle column's x:
+    // the middle-by-COUNT column of an uneven group ({x=71, x=75}) sat the
+    // line 4 blocks off one edge -- beyond the reach sphere (3.4).
+    const passMinX = Math.min(...passTargets.map((target) => Number(target.position.x)))
+    const passMaxX = Math.max(...passTargets.map((target) => Number(target.position.x)))
+    const walkX = (passMinX + passMaxX) / 2
+    const walkY = toNumber(passTargets[0]?.position?.y, Math.min(...passTargets.map((target) => target.position.y)))
+    const minZ = Math.min(...passTargets.map((target) => target.position.z))
+    const maxZ = Math.max(...passTargets.map((target) => target.position.z))
+    const activeCols = new Set(passTargets.map((target) => target.col))
+    const turnEarlyBlocks = Math.max(0, toNumber(options.turnEarlyBlocks, 0))
+    // Directional standpoints. The entry is one block BEFORE the first row in
+    // travel direction, so no first-row carpet ever starts under the bot's feet
+    // (the old +0.5 stood ON the row and produced the below-the-leg attempts).
+    // The exit is one block PAST the last row, pulled back by the early-turn
+    // budget: with reach 5 the tail rows stay printable through the whole
+    // lateral leg, so the bot never walks the lane to its very end.
+    const northStandZ = minZ - 0.5
+    const southStandZ = maxZ + 0.5
+    const entryPos = { x: walkX + 0.5, y: walkY, z: northFirst ? northStandZ : southStandZ }
+    const exitPos = {
+      x: walkX + 0.5,
+      y: walkY,
+      z: northFirst ? southStandZ - turnEarlyBlocks : northStandZ + turnEarlyBlocks
+    }
+    if (segmentSize <= 0 || maxZ - minZ <= segmentSize) {
+      return [
+        { position: entryPos, action: '', activeCols },
+        { position: exitPos, action: 'lineEnd', activeCols }
+      ]
+    }
+    const startZ = northFirst ? minZ : maxZ
+    const endZ = northFirst ? maxZ : minZ
+    const dir = northFirst ? 1 : -1
+    const passCheckpoints = [{ position: entryPos, action: '', activeCols }]
+    for (let z = startZ + dir * segmentSize; dir > 0 ? z < endZ : z > endZ; z += dir * segmentSize) {
+      passCheckpoints.push({ position: { x: walkX + 0.5, y: walkY, z: z + 0.5 }, action: 'inline-repair', activeCols })
+    }
+    passCheckpoints.push({ position: exitPos, action: 'lineEnd', activeCols })
+    return passCheckpoints
   }
 
-  const startZ = startOnNorthSide ? minZ : maxZ
-  const endZ = startOnNorthSide ? maxZ : minZ
-  const dir = startOnNorthSide ? 1 : -1
-  const checkpoints = [{ position: entryPos, action: '', activeCols }]
-  for (let z = startZ + dir * segmentSize; dir > 0 ? z < endZ : z > endZ; z += dir * segmentSize) {
-    checkpoints.push({ position: { x: walkX + 0.5, y: walkY, z: z + 0.5 }, action: 'inline-repair', activeCols })
+  const checkpoints = []
+  groups.forEach((span, passIndex) => {
+    const passTargets = batchTargets.filter((target) => {
+      const x = Number(target.position.x)
+      return x >= span.minX && x <= span.maxX
+    })
+    if (passTargets.length === 0) return
+    // Serpentine: alternate z-direction per pass so each pass's exit stand is
+    // the next pass's entry stand -- the cross-over between column groups is
+    // a short lateral walk, and print-ahead emission sweeps it for free.
+    const northFirst = passIndex % 2 === 0 ? startOnNorthSide : !startOnNorthSide
+    const passCheckpoints = buildSinglePass(passTargets, northFirst)
+    if (passIndex === 0) {
+      checkpoints.push(...passCheckpoints)
+      return
+    }
+    // Intermediate passes: drop the new entry stand (the previous exit stand
+    // already walks the bot to this side) and demote their lineEnd -- only
+    // the FINAL pass may trigger the line-end drain/ban-expiry.
+    const isLast = passIndex === groups.length - 1
+    checkpoints[checkpoints.length - 1].action = ''
+    checkpoints.push(...passCheckpoints.slice(1, -1))
+    checkpoints.push({ ...passCheckpoints[passCheckpoints.length - 1], action: isLast ? 'lineEnd' : '' })
+  })
+  if (checkpoints.length === 0) {
+    return buildSinglePass(batchTargets, startOnNorthSide)
   }
-  checkpoints.push({ position: exitPos, action: 'lineEnd', activeCols })
   return checkpoints
 }
 

@@ -35,6 +35,34 @@ test('entry stands one block BEFORE the first row in travel direction', () => {
   assert.equal(northbound[0].position.z, 127.5, 'northbound entry is one past maxZ')
 })
 
+test('a wide batch walks a serpentine: every column group within one reach diameter', () => {
+  const build = loadCheckpointBuilder()
+  // 14 columns spanning ~52 blocks in x -- the live 08:31 band shape where
+  // the old single-line route left 280/511 cells beyond reach (neverSent
+  // walk-past). Coordinates here are synthetic, not the real map.
+  const cols = []
+  for (let x = 2000; x <= 2052; x += 4) cols.push(x)
+  const targets = []
+  for (const col of cols) {
+    for (let z = 0; z <= 31; z += 1) targets.push({ col, blockName: 'black_carpet', position: { x: col, y: 64, z } })
+  }
+  const route = build(targets, true, 12, { lateralCoverBlocks: 6 })
+
+  // Multi-pass: more than one walk line, each column within the reach sphere
+  // of its pass's line (reach ~3.4).
+  const walkXs = [...new Set(route.map((cp) => cp.position.x))]
+  assert.ok(walkXs.length >= 2, `expected a multi-pass route, got lines [${walkXs}]`)
+  for (const col of cols) {
+    const nearest = Math.min(...walkXs.map((wx) => Math.abs(wx - col)))
+    assert.ok(nearest <= 3.5, `column x=${col} has no route line within reach (nearest ${nearest})`)
+  }
+  // Only the FINAL checkpoint is a lineEnd (intermediate pass ends are plain
+  // walk-throughs -- lineEnd triggers the drain and the swap-ban expiry).
+  const lineEnds = route.filter((cp) => cp.action === 'lineEnd')
+  assert.equal(lineEnds.length, 1)
+  assert.equal(route[route.length - 1].action, 'lineEnd')
+})
+
 test('the early turn pulls the exit back from the lane end', () => {
   const build = loadCheckpointBuilder()
   const targets = band(0, 127, [0, 1, 2, 3])
