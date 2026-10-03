@@ -159,7 +159,7 @@ test('the workload batch registers and unregisters its settle handler', () => {
 
   // Config defaults so code and VM agree.
   assert.match(source, /ackSettleDelayMs: 75/)
-  assert.match(source, /ackRejectCooldownMs: 250/)
+  assert.match(source, /ackRejectCooldownMs: 120/)
 
   // The lane-phase line must prove whether the server answers at all.
   const lanePhaseAt = source.indexOf('[LANE-PHASE] targets=')

@@ -5870,7 +5870,9 @@ function createDefaultConfig() {
       // server's block updates ride with or just before the ack), and the
       // re-offer cooldown for cells the server judged rejected.
       ackSettleDelayMs: 75,
-      ackRejectCooldownMs: 250,
+      // An acked-but-absent cell was processed and rejected by the server:
+      // re-offer fast (the 250ms hold needlessly outlived reach windows).
+      ackRejectCooldownMs: 120,
       // Band scheduler (docs/BOT20-BAND-SCHEDULER-PLAN.md): schedule-driven
       // emission behind this flag while the executor is wired in.
       bandSchedulerEnabled: false,
@@ -7414,6 +7416,12 @@ function getSelectedHotbarStack(bot) {
 }
 
 function selectedMaterialMatches(bot, blockName) {
+  // §9.2 offhand: the offhand is a live printing hand — if it holds the
+  // colour, the material is ready. selectedMaterialMatches used to check only
+  // the hotbar slot + heldItem, so every offhand-ready target fell into the
+  // desync branch and never sent a packet.
+  const offHandStack = bot.inventory?.slots?.[45]
+  if (String(offHandStack?.name || '') === blockName && toNumber(offHandStack?.count, 0) > 0) return true
   const selectedStack = getSelectedHotbarStack(bot)
   const selectedMatches = selectedStack?.name === blockName && toNumber(selectedStack.count, 0) > 0
   const heldMatches = String(bot.heldItem?.name || '') === blockName && toNumber(bot.heldItem?.count, 0) > 0
@@ -19916,6 +19924,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                   continue
                 }
                 burstTargets.push(cell.target)
+                burstExcluded.add(cell.key)
                 planEmittedThisTick += 1
                 emitScheduled += 1
               }
