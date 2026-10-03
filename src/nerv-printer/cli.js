@@ -5862,6 +5862,9 @@ function createDefaultConfig() {
       scannerAdaptiveMaxPlaceDelayMs: 16,
       scannerAdaptiveMinPlaceDelayMs: 6,
       scannerRetryCooldownMs: 30,
+      // Miss-recovery dwell: ms held at the back point so the printer can
+      // re-place everything the walk re-reached.
+      scannerMissRecoveryDwellMs: 800,
       // Echo window: how long a sent placement waits for the server's world
       // echo before the scan may re-offer the cell. Roughly 1.5x RTT; a
       // shorter value re-sends packets the server is still processing.
@@ -20452,8 +20455,6 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         })
 
         if (missedInCols.length >= missRecoveryThreshold) {
-          console.log(`[NERV-WORKLOAD-MISS-RECOVERY] detected ${missedInCols.length} missed blocks; sneaking back ${missRecoveryBacktrackBlocks} blocks to re-place.`)
-
           bot.setControlState('sprint', false)
           bot.setControlState('sneak', true)
 
@@ -20461,8 +20462,20 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           const dx = prevCheckpointPos.x - botPos.x
           const dz = prevCheckpointPos.z - botPos.z
           const dist = Math.sqrt(dx * dx + dz * dz) || 1
-          const backX = botPos.x + (dx / dist) * missRecoveryBacktrackBlocks
-          const backZ = botPos.z + (dz / dist) * missRecoveryBacktrackBlocks
+          // Walk back far enough to re-reach the FARTHEST missed cell (a
+          // fixed 3 blocks never covered a multi-row miss span, so most
+          // cells were never back in reach and the backtrack re-placed
+          // nothing). Clamped so a huge span does not walk the whole lane.
+          const farthestMiss = missedInCols.reduce((max, target) => {
+            const tpx = target.position.x + 0.5 - botPos.x
+            const tpz = target.position.z + 0.5 - botPos.z
+            return Math.max(max, Math.sqrt(tpx * tpx + tpz * tpz))
+          }, 0)
+          const reach = toNumber(printer.placeRange, 5)
+          const backBlocks = Math.min(Math.max(missRecoveryBacktrackBlocks, Math.ceil(farthestMiss - reach + 1)), 12)
+          console.log(`[NERV-WORKLOAD-MISS-RECOVERY] detected ${missedInCols.length} missed blocks (span ${farthestMiss.toFixed(1)}); sneaking back ${backBlocks} blocks to re-place.`)
+          const backX = botPos.x + (dx / dist) * backBlocks
+          const backZ = botPos.z + (dz / dist) * backBlocks
 
           try {
             assertRuntimeContinue(bot, config, 'stopping-during-placement')
@@ -20480,6 +20493,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 shouldPauseTimeout: () => !isWorkloadPlatformReady()
               }
             )
+            assertRuntimeContinue(bot, config, 'stopping-during-placement')
+            // Dwell at the back point: the placement loop re-places the
+            // re-reached cells while we hold here. Without the dwell the
+            // return walk started before anything landed (62 detected ->
+            // 62 unresolved).
+            await drainActiveColumnTargets(Math.max(400, toNumber(advanced.scannerMissRecoveryDwellMs, 800)))
             assertRuntimeContinue(bot, config, 'stopping-during-placement')
             await walkStraightToPointWithHardTimeout(
               bot,
