@@ -7657,6 +7657,17 @@ function serializeCursorItem(bot, window) {
 }
 
 function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
+  // A lingering container window (restock chest whose bookkeeping our raw
+  // -1 clicks bypass) makes every swap transact against the dead chest:
+  // windowId, slots and cursor all belong to the wrong window and the
+  // server rejects the click forever -- the endless held-item-desync loop.
+  // Printing never wants a window open; close it and use the player one.
+  if (bot.currentWindow && typeof bot.closeWindow === 'function') {
+    try {
+      bot.closeWindow(bot.currentWindow)
+      console.log('[SWAP-WINDOW-GUARD] closed a lingering container window before swapping')
+    } catch { }
+  }
   const window = bot.currentWindow || bot.inventory
   if (!window || !bot._client) return false
   try { bot.lastDigTime = null } catch { }
