@@ -153,11 +153,10 @@ test('installing twice returns the same tracker instead of stacking listeners', 
 })
 
 test('the runtime wires the tracker in beside the sequence guard', () => {
+  // REMOVED (user directive): the ack oracle's settle raced the block echo.
   const hookAt = source.indexOf('installBlockInteractionGuard(bot)')
-  const trackerAt = source.indexOf('installPlacementAckTracking(bot, config)')
   assert.ok(hookAt >= 0)
-  assert.ok(trackerAt > hookAt)
-  assert.ok(trackerAt - hookAt < 200, 'both installs belong to the same inject_allowed hook')
+  assert.ok(!source.includes('    installPlacementAckTracking(bot, config)'), 'the ack tracker must not be installed')
 })
 
 test('the workload batch registers and unregisters its settle handler', () => {

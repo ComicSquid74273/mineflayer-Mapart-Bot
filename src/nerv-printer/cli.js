@@ -22404,7 +22404,10 @@ function createBot(config) {
   bot.once('inject_allowed', () => {
     installBlockInteractionGuard(bot)
     installAdaptiveLatencyGuard(bot, config)
-    installPlacementAckTracking(bot, config)
+    // Ack oracle removed (user directive): its settle logic raced the block
+    // echo and re-sent/over-parked healthy cells. THM-style instead:
+    // fire-and-forget sends, short echo park, the world scan re-offers only
+    // what the world still shows missing.
     installInFlightLedger(bot)
   })
   installServerInventoryTracker(bot)
