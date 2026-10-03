@@ -17199,14 +17199,27 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
         return { state: 'skip', reason: `plan-not-staged-${target.blockName}` }
       }
       if (countInventoryItems(bot, target.blockName) > 0) {
-        // Repeated desync = diverged inventory view: heal it with one
-        // authoritative snapshot instead of looping the skip forever.
+        // Repeated desync: stop the fast path entirely and do a NORMAL,
+        // confirmed equip (mineflayer's awaited move/verify). Slow (~an
+        // RTT) but authoritative; the fast path resumes on the next
+        // attempt with the hand actually holding the colour.
         const counts = bot.__nervEquipDesyncCounts || (bot.__nervEquipDesyncCounts = new Map())
         const n = (counts.get(target.blockName) || 0) + 1
         counts.set(target.blockName, n)
         if (n >= 3) {
           counts.set(target.blockName, 0)
-          refreshInventoryAuthoritatively(bot)
+          try {
+            const item = bot.inventory.items().find((entry) => entry.name === target.blockName)
+            if (item) {
+              await bot.equip(item, 'hand')
+              console.log(`[EQUIP-NORMAL-FALLBACK] ${target.blockName}: confirmed equip after ${n} desyncs`)
+            } else {
+              refreshInventoryAuthoritatively(bot)
+            }
+          } catch (err) {
+            console.log(`[EQUIP-NORMAL-FALLBACK-WARN] ${target.blockName}: ${err?.message || err}; requesting snapshot`)
+            refreshInventoryAuthoritatively(bot)
+          }
         }
         return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
       }
