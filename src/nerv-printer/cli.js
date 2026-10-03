@@ -6961,7 +6961,16 @@ function findHotbarIndexesForItem(bot, blockName) {
 }
 
 function findBestInventorySlotForItem(bot, blockName) {
-  return bot.inventory.items()
+  // items() covers slots 9-44 and is BLIND to the offhand (45) -- the
+  // offhand-pair logic stages the dominant colour there, so every source
+  // lookup must also consider slot 45 or restaging silently finds nothing
+  // (232+ plan-not-staged skips, zero restages, band 2 of 2026-10-03).
+  const candidates = [...bot.inventory.items()]
+  const offHand = bot.inventory?.slots?.[45]
+  if (offHand?.name === blockName && Number.isFinite(offHand.count)) {
+    candidates.push(offHand)
+  }
+  return candidates
     .filter((entry) => entry.name === blockName && Number.isFinite(entry.slot))
     .sort((a, b) => {
       const aHotbar = a.slot >= 36 && a.slot <= 44 ? 1 : 0
