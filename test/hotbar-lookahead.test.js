@@ -279,26 +279,30 @@ test('pending reservations are subtracted exactly once and never below zero', ()
   assert.equal(avail(2, 0, 5).available, 0, 'over-reserved clamps to zero rather than going negative')
 })
 
-test('replenishment prefers a whole-stack swap and returns merge leftovers to the cursor', () => {
-  // hotbar 3 / main 64 -> SWAP gives hotbar 64 and never touches the cursor.
-  // hotbar 3 / main 40 -> merge gives hotbar 43 and the cursor ends empty.
-  // hotbar 3 / main 64 -> merge gives hotbar 64 but the cursor would hold 3 unless a
-  // third click returns it; printing must never resume with an occupied cursor.
+test('replenishment is a whole-stack swap and never PICKUPs (cursor stays empty)', () => {
+  // hotbar 3 / main 64 -> SWAP: hotbar 64, main 3, cursor untouched.
+  // hotbar 3 / main 2  -> skip: the source cannot beat the resident stack;
+  //                     the caller retries on a later wake.
+  // The old merge shape lifted the source with a LIVE-stateId mode-0 click; a
+  // rejected lift left the cursor holding a carpet stack while printing kept
+  // going, so every later serializeCursorItem lied. Merge is gone entirely.
   const start = source.indexOf('function replenishHotbarSlot(')
   assert.ok(start >= 0, 'replenishHotbarSlot must exist')
   const body = source.slice(start, source.indexOf('\nasync function prepareHotbarForBatch(', start))
 
-  assert.match(body, /if \(sourceCount >= stackSize \|\| destCount === 0\) \{/)
+  assert.match(body, /if \(sourceCount >= destCount \|\| destCount === 0\) \{/)
   assert.match(body, /silentHotbarSwap\(bot, sourceSlot, destHotbarIndex\)/)
-  assert.match(body, /const leftover = destCount \+ sourceCount - merged/)
-  assert.match(body, /if \(leftover > 0\)/)
-  assert.match(body, /window\.selectedItem = null/)
-  assert.match(body, /slots\[sourceSlot\] = \{ name: blockName, count: leftover, slot: sourceSlot \}/)
-  assert.match(body, /operation: 'merge'/)
   assert.match(body, /operation: 'swap'/)
+  assert.match(body, /reason: 'source-weaker'/)
 
-  // Colour identity must be checked before any PICKUP: a mismatch swaps instead of
-  // merging, which would park the hotbar stack back in the main inventory.
+  // No PICKUP anywhere: no mode-0 clicks, no cursor leftover, no merge math.
+  assert.doesNotMatch(body, /mode: 0/)
+  assert.doesNotMatch(body, /leftover/)
+  assert.doesNotMatch(body, /selectedItem/)
+  assert.doesNotMatch(body, /operation: 'merge'/)
+
+  // Colour identity must be checked before the swap: a mismatch swaps instead of
+  // topping up, which would park the hotbar stack back in the main inventory.
   assert.match(body, /if \(destStack\?\.name !== blockName\) return \{ ok: false/)
   assert.match(body, /if \(sourceStack\?\.name !== blockName\) return \{ ok: false/)
 })

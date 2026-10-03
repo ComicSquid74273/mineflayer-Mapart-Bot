@@ -7113,7 +7113,12 @@ function runProactiveHotbarMaintenance(bot, config, batchTargets, seen) {
       if (stack?.name === blockName) hotbarCount += Math.max(0, toNumber(stack.count, 0))
     }
     if (hotbarCount > refillThreshold) continue
-    if (countInventoryItems(bot, blockName) <= 0) continue
+    // Offhand-aware: findBestInventorySlotForItem below sees slot 45, so the
+    // stock test must too or an offhand-held spare reads as "no source".
+    const offHandSpare = bot.inventory?.slots?.[45]
+    const spareCount = countInventoryItems(bot, blockName) +
+      (offHandSpare?.name === blockName ? Math.max(0, toNumber(offHandSpare.count, 0)) : 0)
+    if (spareCount <= 0) continue
 
     const residentIndex = findHotbarIndexForItem(bot, blockName)
     const source = findBestInventorySlotForItem(bot, blockName)
@@ -7504,9 +7509,10 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
         const st = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
         if (!st || Number(st.count) <= 0) { hop = index; break }
       }
-      if (hop >= 0 && hop !== bot.quickBarSlot) {
+      if (hop >= 0 && hop !== bot.quickBarSlot && echoGateOpen(bot)) {
         try {
           bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: hop, mode: 2, changedSlots: [], cursorItem: serializeCursorItem(bot, bot.inventory) })
+          noteAuthoritativeWrite(bot)
           console.log(`[EQUIP-OFFHAND-HOP] ${blockName} only in offhand; hopped to hotbar ${hop}`)
         } catch { }
       }
@@ -7632,6 +7638,56 @@ function installInFlightLedger (bot) {
   return ledger
 }
 
+// Echo-armed mutation gate (§8 quiet window). Every authoritative click
+// (stateId -1) is answered by exactly one window_items snapshot. The old
+// time-based backoffs (150/300ms) are SHORTER than the 6b6t echo RTT
+// (~170-350ms), so staging loops re-read a PRE-swap view, re-picked the
+// same stale source slot and re-swapped -- and a swap is bidirectional, so
+// the second click UNDID the first (stage/undo churn: handover machine-gun,
+// deferred-restage silently reverted, offhand-pair unpaired). The gate
+// counts pending echoes: mutation sites wait for the echo itself, with a
+// hard timeout so a dropped echo can never deadlock staging.
+function installEchoGate(bot) {
+  if (bot.__nervEchoGate) return bot.__nervEchoGate
+  const gate = { awaiting: 0, hardUntil: 0 }
+  if (typeof bot._client?.on === 'function') {
+    bot._client.on('window_items', (packet) => {
+      try {
+        if (Number(packet?.windowId) !== 0) return
+        if (gate.awaiting > 0) gate.awaiting -= 1
+      } catch { }
+    })
+  }
+  bot.__nervEchoGate = gate
+  return gate
+}
+
+function noteAuthoritativeWrite(bot) {
+  const gate = installEchoGate(bot)
+  gate.awaiting += 1
+  gate.hardUntil = Date.now() + Math.max(200, toNumber((bot.__nervConfig?.advanced || {}).echoGateHardTimeoutMs, 600))
+}
+
+function echoGateOpen(bot) {
+  const gate = bot?.__nervEchoGate
+  if (!gate || gate.awaiting <= 0) return true
+  return Date.now() > gate.hardUntil
+}
+
+// Async flavor for sites that are already awaiting (lane-entry staging):
+// poll the gate instead of skipping, so an early return can never leave a
+// colour unstaged for the band about to run.
+function waitForEchoGateOpen(bot, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    const poll = () => {
+      if (echoGateOpen(bot) || Date.now() - startedAt > Math.max(0, timeoutMs)) return resolve(true)
+      setTimeout(poll, 25)
+    }
+    poll()
+  })
+}
+
 // Effective count of the currently held stack, ledger-aware; null when no
 // in-flight correction applies.
 function effectiveHeldCount (bot) {
@@ -7651,6 +7707,7 @@ function refreshInventoryAuthoritatively(bot, site = '?') {
     const slot = Math.max(0, Math.min(8, Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0))
     const cursorItem = serializeCursorItem(bot, bot.currentWindow || bot.inventory)
     bot._client.write('window_click', { windowId: 0, stateId: -1, slot: getHotbarWindowSlot(slot), mouseButton: slot, mode: 2, changedSlots: [], cursorItem })
+    noteAuthoritativeWrite(bot)
     console.log(`[SWAP-RESYNC] site=${site} quickBarSlot=${bot.quickBarSlot} held=${bot.heldItem?.name || 'none'}x${bot.heldItem?.count ?? 0} slotStack=${bot.inventory?.slots?.[36 + (Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0)]?.name || 'none'}`)
   } catch (err) {
     console.log(`[SWAP-RESYNC-WARN] site=${site} ${err?.message || err}`)
@@ -7733,6 +7790,7 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
   } catch {
     return false
   }
+  noteAuthoritativeWrite(bot)
 
   const destWindowSlot = getHotbarWindowSlot(destHotbarIndex)
   const slots = bot.inventory?.slots
@@ -7755,18 +7813,13 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
 
 // Replenish a hotbar slot that already holds `blockName` but has run low.
 //
-// Two shapes, and picking the wrong one is a real bug rather than a waste of packets:
-//
-//   hotbar 3, main 64  ->  whole-stack SWAP:  hotbar 64, main 3
-//   hotbar 3, main 40  ->  PICKUP merge:       hotbar 43, cursor empty
-//   hotbar 3, main 64  ->  PICKUP merge:       hotbar 64, cursor STILL HOLDS 3
-//
-// The third case is the trap. A merge lifts the source stack and merges what fits; the
-// remainder stays on the cursor. Printing with a non-empty cursor is undefined, so the
-// leftover is returned to the source slot with a third click and reused -- never dropped.
-//
-// A SWAP is preferred whenever the source stack could replace the hotbar stack outright,
-// because it is one packet and never touches the cursor at all.
+// SWAP-only. The old PICKUP-merge shape (lift source, merge into the hotbar
+// stack, return the cursor leftover) sent mode-0 clicks with a LIVE stateId --
+// the exact reject case the stateId:-1 swap exists for -- and a rejected lift
+// left the cursor holding a carpet stack while printing continued, poisoning
+// every later serializeCursorItem. A swap is one packet, authoritative, and
+// never touches the cursor; when the source stack cannot beat the resident
+// stack the caller retries on a later wake instead of merging.
 function replenishHotbarSlot(bot, destHotbarIndex, sourceSlot, blockName) {
   const window = bot.currentWindow || bot.inventory
   if (!window || !bot._client) return { ok: false, reason: 'no-window' }
@@ -7784,72 +7837,18 @@ function replenishHotbarSlot(bot, destHotbarIndex, sourceSlot, blockName) {
 
   const destCount = Math.max(0, toNumber(destStack.count, 0))
   const sourceCount = Math.max(0, toNumber(sourceStack.count, 0))
-  const stackSize = Math.max(1, toNumber(bot.registry?.itemsByName?.[blockName]?.stackSize, 64))
 
-  // Whole-stack swap when the source can stand in for the hotbar stack by itself.
-  if (sourceCount >= stackSize || destCount === 0) {
+  // Whole-stack SWAP only. The old PICKUP-merge branch sent mode-0 clicks
+  // with a LIVE stateId -- the exact reject case the stateId:-1 trick exists
+  // for -- and a rejected lift left the cursor holding a carpet stack while
+  // printing continued (every later serializeCursorItem then lied). A swap
+  // never touches the cursor; when the source cannot beat the resident
+  // stack the caller retries on a later wake instead of merging.
+  if (sourceCount >= destCount || destCount === 0) {
     if (!silentHotbarSwap(bot, sourceSlot, destHotbarIndex)) return { ok: false, reason: 'swap-failed' }
     return { ok: true, operation: 'swap', hotbar: sourceCount, main: destCount }
   }
-
-  // Partial merge: lift the source, merge into the destination, return the remainder.
-  const stateId = getWindowStateId(bot)
-  const slotFor = (slot) => {
-    const cursorItem = serializeCursorItem(bot, window)
-    if (!cursorItem) return false
-    try {
-      bot._client.write('window_click', {
-        windowId: window.id,
-        stateId: getWindowStateId(bot),
-        slot,
-        mouseButton: 0,
-        mode: 0,
-        changedSlots: [],
-        cursorItem
-      })
-      return true
-    } catch {
-      return false
-    }
-  }
-  void stateId
-
-  // mode 0 is PICKUP: click the source to lift it, click the hotbar slot to merge.
-  if (!slotFor(sourceSlot)) return { ok: false, reason: 'lift-failed' }
-  if (!slotFor(destWindowSlot)) return { ok: false, reason: 'merge-failed' }
-
-  const merged = Math.min(stackSize, destCount + sourceCount)
-  const leftover = destCount + sourceCount - merged
-
-  // Predict the merge locally before deciding whether a third click is needed.
-  const predicted = { name: blockName, count: merged, slot: destWindowSlot }
-  slots[destWindowSlot] = predicted
-  if (sourceStack) sourceStack.slot = sourceSlot
-  if (window.selectedItem) window.selectedItem.count = leftover
-
-  // Leftover on the cursor: hand it back so printing never resumes with an occupied or
-  // unknown cursor, and so the partial stack is reused rather than discarded.
-  if (leftover > 0) {
-    const cursorItem = serializeCursorItem(bot, window)
-    if (!cursorItem) return { ok: false, reason: 'return-failed' }
-    try {
-      bot._client.write('window_click', {
-        windowId: window.id,
-        stateId: getWindowStateId(bot),
-        slot: sourceSlot,
-        mouseButton: 0,
-        mode: 0,
-        changedSlots: [],
-        cursorItem
-      })
-    } catch {
-      return { ok: false, reason: 'return-failed' }
-    }
-    slots[sourceSlot] = { name: blockName, count: leftover, slot: sourceSlot }
-    window.selectedItem = null
-  }
-
-  return { ok: true, operation: 'merge', hotbar: merged, main: leftover }
+  return { ok: false, reason: 'source-weaker' }
 }
 
 async function prepareHotbarForBatch(bot, config, batchTargets) {
@@ -7913,6 +7912,10 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
     }
     if (destIndex < 0) continue
 
+    // Lane-entry staging runs to completion: WAIT for each swap's echo
+    // instead of skipping, so the band never starts with a colour the
+    // undo-race silently reverted (see the echo gate).
+    await waitForEchoGateOpen(bot)
     silentHotbarSwap(bot, source.slot, destIndex)
   }
 
@@ -7937,6 +7940,7 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
       const source = findBestInventorySlotForItem(bot, mat)
       if (!source || source.slot < 9 || source.slot > 35) continue
 
+      await waitForEchoGateOpen(bot)
       if (silentHotbarSwap(bot, source.slot, emptyIndex)) filling = true
     }
   }
@@ -7944,7 +7948,10 @@ async function prepareHotbarForBatch(bot, config, batchTargets) {
 
 async function equipMaterial(bot, config, blockName, options = {}) {
   const allowRestock = options.allowRestock !== false
-  const inventoryItem = bot.inventory.items().find((entry) => entry.name === blockName)
+  // Offhand-aware presence: items() is blind to slot 45, and an offhand-only
+  // colour used to fall through to restock-wait instead of the select/hop
+  // path that can actually reach it.
+  const inventoryItem = findBestInventorySlotForItem(bot, blockName)
   const stackSize = Math.max(1, toNumber(bot.registry.itemsByName[blockName]?.stackSize, 64))
 
   if (inventoryItem) {
@@ -7968,7 +7975,12 @@ async function equipMaterial(bot, config, blockName, options = {}) {
 
 async function recoverMissingItemInventoryDesync(bot, config, blockName, label = 'inventory-desync') {
   const advanced = config.advanced || {}
-  const have = countInventoryItems(bot, blockName)
+  // Offhand counts: countInventoryItems scans 9-44 and an offhand-only
+  // colour used to bail here as "missing" before selectHotbarMaterial's
+  // offhand hop could stage it.
+  const offHandDesync = bot.inventory?.slots?.[45]
+  const have = countInventoryItems(bot, blockName) +
+    (offHandDesync?.name === blockName ? Math.max(0, toNumber(offHandDesync.count, 0)) : 0)
   if (have <= 0) return false
   if (selectedMaterialMatches(bot, blockName)) return true
 
@@ -17319,9 +17331,10 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
               } else {
                 const offHandStack = bot.inventory?.slots?.[45]
                 const heldIdx = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0
-                if (offHandStack?.name === target.blockName && Number(offHandStack.count) > 0 && bot._client) {
+                if (offHandStack?.name === target.blockName && Number(offHandStack.count) > 0 && bot._client && echoGateOpen(bot)) {
                   const cursorItem = serializeCursorItem(bot, bot.inventory)
                   bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: heldIdx, mode: 2, changedSlots: [], cursorItem })
+                  noteAuthoritativeWrite(bot)
                   console.log(`[EQUIP-OFFHAND-HOP] site=pre-attempt ${target.blockName}: offhand -> hotbar ${heldIdx}`)
                   await delay(200)
                 } else {
@@ -17922,7 +17935,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
             }
             dest = weakest
           }
-          if (source && dest >= 0 && dest !== bot.quickBarSlot && silentHotbarSwap(bot, source.slot, dest)) {
+          if (source && dest >= 0 && dest !== bot.quickBarSlot && echoGateOpen(bot) && silentHotbarSwap(bot, source.slot, dest)) {
             console.log(`[${label}-RESTAGE] ${colour} staged into hotbar ${dest} during repair`)
           }
         } catch { }
@@ -19860,7 +19873,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 op.__done = true
                 continue
               }
-              if ((bot.__nervSwapWaitUntil || 0) > stageNowMs) break
+              if ((bot.__nervSwapWaitUntil || 0) > stageNowMs || !echoGateOpen(bot)) break
               const source = findBestInventorySlotForItem(bot, op.inColour)
               if (!source) {
                 op.__done = 'no-source'
@@ -19889,7 +19902,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const ledgerCount = bot.__nervInFlight.effectiveCount(index)
               const effective = ledgerCount == null ? Number(stack.count) : ledgerCount
               if (effective > 8) continue
-              if ((bot.__nervSwapWaitUntil || 0) > stageNowMs) break
+              if ((bot.__nervSwapWaitUntil || 0) > stageNowMs || !echoGateOpen(bot)) break
               if (planDeferredColors.has(stack.name)) continue // restage path owns it
               const source = findBestInventorySlotForItem(bot, stack.name)
               if (!source) continue
@@ -19913,7 +19926,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           // main inventory, a free offhand can hold one more needed colour
           // and print it select-free (hand=1). Two authoritative swaps:
           // main -> free hotbar slot, hotbar slot -> offhand.
-          if (!bot.inventory?.slots?.[45] && (bot.__nervSwapWaitUntil || 0) <= stageNowMs) {
+          if (!bot.inventory?.slots?.[45] && (bot.__nervSwapWaitUntil || 0) <= stageNowMs && echoGateOpen(bot)) {
             const offhandCandidate = (() => {
               for (const cell of bandPlan.cells) {
                 if (cell.emitTick < stagePlanTick || cell.emitTick > stagePlanTick + 120) continue
@@ -19934,6 +19947,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 const cursorItem = serializeCursorItem(bot, bot.inventory)
                 bot._client.write('window_click', { windowId: 0, stateId: -1, slot: source.slot, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
                 bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: hop, mode: 2, changedSlots: [], cursorItem })
+                noteAuthoritativeWrite(bot)
+                noteAuthoritativeWrite(bot)
                 bot.__nervSwapWaitUntil = stageNowMs + 300
                 noteInventoryMutation(350)
                 console.log(`[BAND-STAGE] colour=${offhandCandidate} slot=offhand reason=offhand-pair`)
@@ -19954,7 +19969,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               planDeferredColors.delete(deferredColor)
               continue
             }
-            if ((bot.__nervSwapWaitUntil || 0) > stageNowMs) break
+            if ((bot.__nervSwapWaitUntil || 0) > stageNowMs || !echoGateOpen(bot)) break
             const source = findBestInventorySlotForItem(bot, deferredColor)
             if (!source) continue
             // Forecast-driven: refill the drained slot, else reuse the slot
@@ -20145,6 +20160,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
               if (stack?.name === blockName) hotbar += getHotbarStackCount(bot, index)
             }
+            // The offhand prints select-free (§9.2): its stack is hotbar-equivalent
+            // availability. Without this, a colour paired into the offhand read
+            // available=0 and the replenish loop SWAPPED IT OUT of the offhand,
+            // unpairing it (pair/unpair churn) instead of printing it.
+            const offHandAvail = bot.inventory?.slots?.[45]
+            if (offHandAvail?.name === blockName) hotbar += Math.max(0, toNumber(offHandAvail.count, 0))
             const reserved = pendingReservation.get(blockName) || 0
             availability.set(blockName, buildMaterialAvailability(hotbar, countInventoryItems(bot, blockName), reserved))
             requiredByBlock.set(blockName, countUpcomingDemand(burstTargets, blockName))
@@ -20172,7 +20193,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           // cannot show the swap until the echo lands) -- inventory churn
           // livelock, emission starved, whole bands printed nothing.
           for (const entry of readiness.missing) {
-            if ((bot.__nervSwapWaitUntil || 0) > Date.now()) break
+            if ((bot.__nervSwapWaitUntil || 0) > Date.now() || !echoGateOpen(bot)) break
             const blockName = entry.blockName
             const residentIndex = findHotbarIndexForItem(bot, blockName)
             const source = findBestInventorySlotForItem(bot, blockName)
