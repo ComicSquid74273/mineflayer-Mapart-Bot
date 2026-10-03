@@ -80,16 +80,17 @@ test('the uTurn leg prints: gate, bonus cells, and no mid-turn emergency stop', 
 test('miss recovery counts exhausted retries and trailing one-send drops, not echo lag', () => {
   const workloadAt = source.indexOf('async function runNervTimeWorkloadPlacementBatch(')
   const batch = source.slice(workloadAt, source.indexOf('\nfunction probeStartupSupport(', workloadAt))
-  const missAt = batch.indexOf('const missedInCols = batchTargets.filter')
-  const miss = batch.slice(missAt, missAt + 1200)
+  const missAt = batch.indexOf('const repairRadius')
+  const miss = batch.slice(missAt, missAt + 1800)
 
-  // Two-send cells are always misses; a one-send cell only once it is
-  // BEHIND the bot (outside live reach) -- in-reach single-sends are lag.
-  assert.match(miss, /const sends = sendCounts\.get\(key\) \|\| 0/)
-  assert.match(miss, /if \(sends < 2\) \{/)
-  assert.match(miss, /if \(sends < 1\) return false/)
-  assert.match(miss, /outside live reach/, 'the behind-the-bot comment must survive')
-  assert.match(miss, /pendingExpiry !== undefined && pendingExpiry > Date\.now\(\)\) return false/)
+  // A checkpoint repairs only misses within the repair radius; beyond it,
+  // misses are recorded for the line-end repair (never walked back for).
+  assert.match(miss, /checkpointRepairRadiusBlocks/, 'the repair radius knob must drive the gate')
+  assert.match(miss, /if \(dxy <= repairRadius\)/)
+  assert.match(miss, /recordedBeyondRadius/)
+  assert.match(miss, /MISS-RECORDED/)
+  // Parked cells (echo window live) are lag, not misses.
+  assert.match(miss, /pendingExpiry !== undefined && pendingExpiry > Date\.now\(\)\) continue/)
 })
 
 test('adaptive slow-down is wired: backlog engages walk, clear resumes sprint', () => {

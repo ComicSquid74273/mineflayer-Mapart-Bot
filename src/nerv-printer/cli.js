@@ -5862,6 +5862,10 @@ function createDefaultConfig() {
       scannerAdaptiveMaxPlaceDelayMs: 16,
       scannerAdaptiveMinPlaceDelayMs: 6,
       scannerRetryCooldownMs: 30,
+      // Checkpoint repair radius: a checkpoint only repairs misses within
+      // this many blocks of the bot; farther misses are recorded for the
+      // line-end repair instead of walked back for.
+      checkpointRepairRadiusBlocks: 5,
       // Miss-recovery dwell: ms held at the back point so the printer can
       // re-place everything the walk re-reached.
       scannerMissRecoveryDwellMs: 800,
@@ -20474,32 +20478,34 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       if (missRecoveryEnabled && !emergencyRestockBlock && prevCheckpointPos) {
         const backtrackStartAt = Date.now()
         const Vec3Miss = bot.entity.position.constructor
-        const missedInCols = batchTargets.filter((target) => {
-          // Deliberately NOT gated on currentActiveCols: a miss behind the
-          // bot belongs to whichever segment it died in, and column-gating
-          // made intermediate checkpoints blind to earlier segments' misses
-          // -- they accumulated the whole lane and only surfaced at the end
-          // (span 97-120). Every checkpoint checks the entire walked band.
+        // Constant observation + checkpoint repair (user model): the
+        // traversal observes everything behind it; a checkpoint only REPAIRS
+        // misses within 5 blocks of the bot. Farther misses are recorded
+        // (counted here, logged) and left for the line-end/final repair --
+        // never walked back for mid-lane.
+        const repairRadius = Math.max(1, toNumber(advanced.checkpointRepairRadiusBlocks, 5))
+        let recordedBeyondRadius = 0
+        const missedInCols = []
+        for (const target of batchTargets) {
           const key = getTargetKey(target)
-          if (seen.has(key) || stallSkipped.has(key)) return false
+          if (seen.has(key) || stallSkipped.has(key)) continue
           const pendingExpiry = pendingUntil.get(key)
-          if (pendingExpiry !== undefined && pendingExpiry > Date.now()) return false
-          // Only EXHAUSTED cells count as misses: either sent twice without
-          // landing, or sent once and now BEHIND the bot (outside live reach)
-          // -- the trailing one-send drops (sentNoEcho) the forward retry
-          // could not recover. A single-send cell still in reach is just
-          // echo lag, not a miss.
+          if (pendingExpiry !== undefined && pendingExpiry > Date.now()) continue
           const sends = sendCounts.get(key) || 0
-          if (sends < 2) {
-            if (sends < 1) return false
-            const tp = target.position
-            const reach = toNumber(printer.placeRange, 5)
-            const behind = Math.hypot(bot.entity.position.x - (tp.x + 0.5), bot.entity.position.z - (tp.z + 0.5)) > reach
-            if (!behind) return false
+          if (sends < 1) continue
+          const tp = target.position
+          const dxy = Math.hypot(bot.entity.position.x - (tp.x + 0.5), bot.entity.position.z - (tp.z + 0.5))
+          const actual = bot.blockAt(new Vec3Miss(tp.x, tp.y, tp.z))
+          if (actual?.name === target.blockName) continue
+          if (dxy <= repairRadius) {
+            missedInCols.push(target)
+          } else {
+            recordedBeyondRadius += 1
           }
-          const actual = bot.blockAt(new Vec3Miss(target.position.x, target.position.y, target.position.z))
-          return actual?.name !== target.blockName
-        })
+        }
+        if (recordedBeyondRadius > 0 && placementNoiseLogsEnabled(config)) {
+          console.log(`[NERV-WORKLOAD-MISS-RECORDED] ${recordedBeyondRadius} miss(es) beyond ${repairRadius} blocks; left for line-end repair`)
+        }
 
         if (missedInCols.length >= missRecoveryThreshold) {
           // Walk pace, not sneak: the sneak-back cost ~3s per hop at 1.3 bps
