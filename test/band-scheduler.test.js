@@ -50,8 +50,14 @@ function assertInvariants (plan, targets) {
   for (const [tick, count] of perTick) assert.ok(count <= OPTIONS.blocksPerTick, `tick ${tick} emits ${count}`)
   // 3. Nothing silently dropped: scheduled + infeasible == targets.
   assert.equal(plan.cells.length + plan.infeasible.length, targets.length)
-  // 4. Swaps only at stop ticks.
-  for (const swap of plan.swaps) assert.ok(plan.stopTicks.includes(swap.tick), `swap at non-stop tick ${swap.tick}`)
+  // 4. Swap timing: evictions fire at stop ticks; stage ops are PIPELINED --
+  // they fire by the colour's first use minus the echo lead and a queue
+  // stagger, deliberately BETWEEN stops (a stop-burst of 7 stages ramps
+  // ~18 ticks while cells stream past). Every op stays inside the plan.
+  for (const swap of plan.swaps) {
+    assert.ok(swap.tick >= 0 && swap.tick <= plan.totalTicks, `swap tick ${swap.tick} outside plan`)
+    if (!swap.inColour) assert.ok(plan.stopTicks.includes(swap.tick), `eviction at non-stop tick ${swap.tick}`)
+  }
 }
 
 test('friendly band: full coverage, zero infeasible, slack present', () => {
@@ -152,7 +158,7 @@ test('belady eviction removes the never-used-again colour first', () => {
   const plan = compileBandPlan({ targets, route: serpentineRoute(30, 3), options: OPTIONS })
   const evictions = plan.swaps.filter((s) => s.outColour === 'purple_carpet' && s.reason === 'never-used-again')
   assert.ok(evictions.length >= 1, 'purple must be evicted as never-used-again')
-  for (const swap of plan.swaps) assert.ok(plan.stopTicks.includes(swap.tick))
+  for (const swap of plan.swaps) assert.ok(swap.tick >= 0 && swap.tick <= plan.totalTicks)
 })
 
 test('duplicate staging fires when one interval needs more than a stack', () => {

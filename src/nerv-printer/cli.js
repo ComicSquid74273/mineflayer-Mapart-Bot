@@ -18584,7 +18584,11 @@ function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0, 
   // batch's x extent into column groups no wider than one reach diameter and
   // walk them boustrophedon-style; a narrow batch yields a single pass whose
   // output is byte-identical to the old route.
-  const lateralCoverBlocks = Math.max(2, toNumber(options.lateralCoverBlocks, 6))
+  // Cover width 5, not 6: reach is a SPHERE. With placeRange 4.5, lag 1.1
+  // and eye-to-cell dy 1.12, the horizontal reach radius is sqrt(3.4^2 -
+  // 1.12^2) = 3.21; a midpoint line therefore covers a cell-x span of at
+  // most ~5.4. A 6-wide group leaves its edge columns out of reach.
+  const lateralCoverBlocks = Math.max(2, toNumber(options.lateralCoverBlocks, 5))
   const uniqueXs = [...new Set(batchTargets.map((target) => Number(target.position.x)))].sort((a, b) => a - b)
   const groups = []
   let group = null
@@ -18660,9 +18664,14 @@ function buildNervUCheckpoints(batchTargets, startOnNorthSide, segmentSize = 0, 
     // already walks the bot to this side) and demote their lineEnd -- only
     // the FINAL pass may trigger the line-end drain/ban-expiry.
     const isLast = passIndex === groups.length - 1
+    // Demote the PREVIOUS pass's lineEnd; keep this pass's ENTRY stand --
+    // it is the lateral step between column groups. Dropping it (an earlier
+    // slice optimization) made the bot cut a diagonal from the previous exit
+    // to the first segment, leaving the pass's first rows 4+ blocks out of
+    // reach (dry-run: never-in-reach cells at every pass head).
     checkpoints[checkpoints.length - 1].action = ''
-    checkpoints.push(...passCheckpoints.slice(1, -1))
-    checkpoints.push({ ...passCheckpoints[passCheckpoints.length - 1], action: isLast ? 'lineEnd' : '' })
+    checkpoints.push(...passCheckpoints)
+    if (!isLast) checkpoints[checkpoints.length - 1].action = ''
   })
   if (checkpoints.length === 0) {
     return buildSinglePass(batchTargets, startOnNorthSide)
@@ -19410,7 +19419,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         options: {
           placeRange,
           blocksPerTick: Math.max(1, Math.trunc(toNumber(advanced.bandSchedulerBlocksPerTick, toNumber(config.printer?.maxPlacementsPerTick, 4)))),
-          serverLagBlocks: toNumber(advanced.bandSchedulerLagBlocks, 1.4)
+          serverLagBlocks: toNumber(advanced.bandSchedulerLagBlocks, 1.4),
+          // The token bucket's sustained rate drives walk pacing, not the
+          // per-tick burst ceiling (5/tick = 100/s is 3x the real budget).
+          emissionBlocksPerSecond: toNumber(advanced.bandSchedulerBlocksPerSecond, 30)
         }
       })
       planStartedAt = Date.now()

@@ -68,13 +68,26 @@ function compileBandPlan (input) {
   const hotbarCapacity = Math.max(1, Math.trunc(num(options.hotbarCapacity, 9)))
   const stackSize = Math.max(1, Math.trunc(num(options.stackSize, 64)))
   const attempt2DelayTicks = Math.max(1, Math.trunc(num(options.attempt2DelayTicks, 5)))
-  const capacityPerSec = blocksPerTick * 1000 / tickMs
+  // Staging lead: an authoritative swap lands its echo ~300ms (6 ticks)
+  // after the click. A stage op scheduled AT the interval's first cell means
+  // the first cells of every colour starve for those 6 ticks -- the dry run
+  // measured 148/512 unsent on a 16-colour lane from exactly this. Ops fire
+  // the lead before they are needed.
+  const stagingLeadTicks = Math.max(0, Math.trunc(num(options.stagingLeadTicks, 6)))
+  // Emission budget: the executor's token bucket (bandSchedulerBlocksPerSecond,
+  // default 30) is the real sustained rate. blocksPerTick is only the per-
+  // tick burst ceiling; using it as sustained capacity (5*20 = 100/s) made
+  // the pacing rule think every band had 3x slack, so tight 16-colour lanes
+  // never engaged walk pacing and the sprint outran the printer.
+  const emissionBlocksPerSecond = Math.max(1, num(options.emissionBlocksPerSecond, 30))
+  const capacityPerSec = Math.min(blocksPerTick * 1000 / tickMs, emissionBlocksPerSecond)
   const reachLimit = Math.max(1, placeRange - serverLagBlocks)
   const reachLimit2 = reachLimit * reachLimit
 
-  const compileAt = (forcedWalk) => {
+  const compileAt = (forcedWalk, routeArg) => {
+    const routeForSim = routeArg || route
     const simOptions = forcedWalk ? { ...options, sprintBps: num(options.walkBps, 4.3) } : options
-    const { positions, arrivalTicks } = simulateRoute(route, simOptions)
+    const { positions, arrivalTicks } = simulateRoute(routeForSim, simOptions)
     const totalTicks = positions.length
 
     // 1. Reach windows (from the eye to the placed cell's centre).
@@ -144,7 +157,7 @@ function compileBandPlan (input) {
     // 5. Stops (route stop waypoints) plus synthetic stops whenever an
     // interval needs more distinct colours than the hotbar can hold.
     const stopTicks = []
-    route.forEach((waypoint, w) => {
+    routeForSim.forEach((waypoint, w) => {
       if (STOP_ACTIONS.has(String(waypoint.action || '')) && arrivalTicks.has(w)) stopTicks.push(arrivalTicks.get(w))
     })
     stopTicks.sort((a, b) => a - b)
@@ -210,9 +223,11 @@ function compileBandPlan (input) {
           residents.delete(colour)
         }
       }
+      let stageQueueIndex = 0
       for (const colour of needed) {
         if (residents.has(colour)) continue
         let free = freeSlots()
+        let evictionFloor = -1
         if (free.length === 0) {
           // Bélády victim: resident with the farthest next use from here.
           let victim = null
@@ -229,9 +244,31 @@ function compileBandPlan (input) {
           swaps.push({ tick: stopTick, outColour: victim, inColour: colour, reason: 'belady' })
           residents.delete(victim)
           free = freeSlots()
+          // An early-firing stage op evicts the victim's slot; it must not
+          // fire before the victim's LAST cell in this interval has emitted,
+          // or those cells lose their stack mid-flight (dry run: boundary
+          // colours starved exactly one row per interval).
+          evictionFloor = list
+            .filter((cell) => cell.blockName === victim)
+            .reduce((acc, cell) => Math.max(acc, cell.emitTick), -1)
         }
         residents.set(colour, free[0])
-        swaps.push({ tick: stopTick, inColour: colour, intoSlot: free[0], reason: 'stage' })
+        // PIPELINED op timing: fire each stage by its colour's FIRST USE in
+        // the interval, minus the echo latency, minus its queue position --
+        // a stop needing 7 new colours ramps 7 swaps over ~18 ticks if they
+        // all fire at the stop, and the sprint carries the early cells out
+        // of reach before the late stacks land (dry run: 1 row per interval
+        // starved). Spreading ops by first use turns the burst into a
+        // pipeline that lands each stack just before its cells emit.
+        const firstUse = nextUseTick(colour, stopTick)
+        const opTick = Math.max(
+          stopTick - stagingLeadTicks,
+          firstUse - stagingLeadTicks - stageQueueIndex * 2,
+          evictionFloor + 1,
+          0
+        )
+        stageQueueIndex += 1
+        swaps.push({ tick: opTick, inColour: colour, intoSlot: free[0], reason: 'stage' })
       }
       // Duplicate staging + refills from per-colour interval demand.
       for (const colour of needed) {
@@ -239,7 +276,7 @@ function compileBandPlan (input) {
         if (demand > stackSize) {
           const dupSlots = freeSlots()
           if (dupSlots.length > 0) {
-            swaps.push({ tick: stopTick, inColour: colour, intoSlot: dupSlots[0], reason: 'duplicate-stack' })
+            swaps.push({ tick: Math.max(0, stopTick - stagingLeadTicks), inColour: colour, intoSlot: dupSlots[0], reason: 'duplicate-stack' })
           } else {
             // No free slot: evict by forecast (farthest/never next use), the
             // same rule the residency pass uses -- staging never displaces a
@@ -257,7 +294,7 @@ function compileBandPlan (input) {
               residents.delete(victim)
               const freed = freeSlots()
               residents.set(colour, freed[0])
-              swaps.push({ tick: stopTick, inColour: colour, intoSlot: freed[0], reason: 'duplicate-stack' })
+              swaps.push({ tick: Math.max(0, stopTick - stagingLeadTicks), inColour: colour, intoSlot: freed[0], reason: 'duplicate-stack' })
             }
           }
         }
@@ -289,7 +326,29 @@ function compileBandPlan (input) {
 
   // ponytail: whole-route walk fallback for infeasible cells; per-segment
   // pacing stretch is the upgrade if real canvases ever need finer control.
-  const plan = compileAt(false)
+  let plan = compileAt(false)
+  // SECOND PASS ON THE PACED CLOCK. Pacing stretches the walk, but windows,
+  // stops and swap-op ticks were all computed on the sprint clock: a cell
+  // whose cells pass at paced-tick ~200 had its slot staged and RECYCLED
+  // around sprint-tick ~120 -- the dry run measured exactly this as stable
+  // per-colour starvation (brown/yellow/green, one row per interval). When
+  // any interval paces 'walk', recompile the whole plan with those paces
+  // applied so op ticks and position-derived reality share one clock.
+  if (plan.pacing.some((segment) => segment.pace === 'walk')) {
+    const sprintClock = simulateRoute(route, { ...options })
+    const pacedRoute = route.map((waypoint, i) => {
+      const t = sprintClock.arrivalTicks.get(i) || 0
+      const segment = plan.pacing.find((s) => t >= s.fromTick && t < s.toTick)
+      return { ...waypoint, pace: segment?.pace === 'walk' ? 'walk' : (waypoint.pace || 'sprint') }
+    })
+    const paced = compileAt(false, pacedRoute)
+    // Keep the paced plan only if coverage survived; walk windows are
+    // strictly wider, so this is near-always true.
+    if (paced.cells.length >= plan.cells.length) {
+      paced.stats.pacedClock = true
+      plan = paced
+    }
+  }
   if (plan.infeasible.length > 0) {
     const walked = compileAt(true)
     if (walked.infeasible.length < plan.infeasible.length) {
