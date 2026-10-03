@@ -22307,28 +22307,32 @@ function installPlacementAckTracking(bot, config, options = {}) {
   bot._client.on('acknowledge_player_digging', (packet) => {
     const sequence = Number(packet?.sequenceId)
     if (!Number.isFinite(sequence)) return
-    const key = guard.placementLedger.take(sequence)
-    if (!key) {
+    // CUMULATIVE: one ack covers every sequence <= its value (one packet
+    // per server tick). Settle them all.
+    const keys = guard.placementLedger.takeUpTo(sequence)
+    if (!keys.length) {
       stats.unmatched += 1
       return
     }
-    stats.acks += 1
+    stats.acks += keys.length
     // The block updates ride with (or just before) the ack; give the packet
-    // parser a beat before judging the cell.
+    // parser a beat before judging the cells.
     schedule(() => {
-      let worldName = 'unknown'
-      try {
-        const [x, y, z] = key.split(':').map(Number)
-        worldName = bot.blockAt(new Vec3(x, y, z))?.name || 'unknown'
-      } catch {
-        worldName = 'unknown'
-      }
-      if (worldName === 'air' || worldName === 'unknown') stats.blockAbsent += 1
-      else stats.blockPresent += 1
-      for (const settle of settlers) {
+      for (const key of keys) {
+        let worldName = 'unknown'
         try {
-          settle(key, worldName)
-        } catch { }
+          const [x, y, z] = key.split(':').map(Number)
+          worldName = bot.blockAt(new Vec3(x, y, z))?.name || 'unknown'
+        } catch {
+          worldName = 'unknown'
+        }
+        if (worldName === 'air' || worldName === 'unknown') stats.blockAbsent += 1
+        else stats.blockPresent += 1
+        for (const settle of settlers) {
+          try {
+            settle(key, worldName)
+          } catch { }
+        }
       }
     }, settleDelayMs)
   })

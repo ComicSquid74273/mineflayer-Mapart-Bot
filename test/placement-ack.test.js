@@ -70,7 +70,22 @@ function loadTracker() {
 
 function makeAckBot(worldByName) {
   const ledger = new Map([['42', '7:64:7']])
-  const guard = { placementLedger: { take: (seq) => { const k = ledger.get(String(seq)); ledger.delete(String(seq)); return k } } }
+  const guard = {
+    placementLedger: {
+      // Cumulative semantics, matching the real ledger.
+      takeUpTo: (seq) => {
+        const keys = []
+        for (const [s, k] of ledger) {
+          if (Number(s) <= seq) {
+            keys.push(k)
+            ledger.delete(s)
+          }
+        }
+        return keys
+      },
+      take: (seq) => { const k = ledger.get(String(seq)); ledger.delete(String(seq)); return k }
+    }
+  }
   const bot = {
     _client: new EventEmitter(),
     __nervBlockInteractionGuard: guard,
@@ -114,7 +129,9 @@ test('an ack whose sequence the ledger does not know is ignored', () => {
   const tracker = install(bot, { advanced: {} }, { scheduler: (fn) => fn() })
   tracker.settlers.add((key, worldName) => settled.push([key, worldName]))
 
-  bot._client.emit('acknowledge_player_digging', { sequenceId: 999 })
+  // Cumulative semantics: only a sequence BELOW the ledgered one is truly
+  // unknown; a higher one would acknowledge it.
+  bot._client.emit('acknowledge_player_digging', { sequenceId: 41 })
   bot._client.emit('acknowledge_player_digging', {})
 
   assert.equal(settled.length, 0)

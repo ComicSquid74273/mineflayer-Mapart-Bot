@@ -260,6 +260,21 @@ function installBlockInteractionGuard(bot) {
       placementTargets.delete(sequence)
       return key
     },
+    // The server's block_changed_ack is CUMULATIVE: one packet per tick
+    // carrying the highest acknowledged sequence (Paper flushes
+    // ackBlockChangesUpTo once per tick; the vanilla client reconciles every
+    // prediction with sequence <= ack). An exact-match take misses nearly
+    // every send -- they all looked unconfirmed and re-sent endlessly.
+    takeUpTo(sequence) {
+      const keys = []
+      for (const [seq, key] of placementTargets) {
+        if (seq <= sequence) {
+          keys.push(key)
+          placementTargets.delete(seq)
+        }
+      }
+      return keys
+    },
     size() {
       return placementTargets.size
     }
