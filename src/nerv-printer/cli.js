@@ -17886,6 +17886,34 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
     } else {
       skipped += 1
       const reason = String(result.reason || '')
+      // A plan-not-staged deferral in the REPAIR loop has no band staging
+      // pass to fulfill it -- the repair is its own loop. Stage the colour
+      // right here (authoritative swap into a free/victim slot) so the
+      // next attempt places instead of skipping until the passes run out.
+      if (reason.startsWith('plan-not-staged-')) {
+        try {
+          const colour = target.blockName
+          const source = findBestInventorySlotForItem(bot, colour)
+          let dest = -1
+          for (let index = 0; index <= 8; index += 1) {
+            const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+            if (!stack || Number(stack.count) <= 0) { dest = index; break }
+          }
+          if (dest < 0) {
+            let weakest = -1
+            let weakestCount = Number.POSITIVE_INFINITY
+            for (let index = 0; index <= 8; index += 1) {
+              const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+              const count = stack ? Number(stack.count) || 0 : 0
+              if (count < weakestCount) { weakestCount = count; weakest = index }
+            }
+            dest = weakest
+          }
+          if (source && dest >= 0 && dest !== bot.quickBarSlot && silentHotbarSwap(bot, source.slot, dest)) {
+            console.log(`[${label}-RESTAGE] ${colour} staged into hotbar ${dest} during repair`)
+          }
+        } catch { }
+      }
       if (reason === 'unconfirmed-place') {
         unconfirmedTargets.set(targetKey(target), target)
       }
