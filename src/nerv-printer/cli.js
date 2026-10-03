@@ -7467,7 +7467,28 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
   }
 
   const source = findBestInventorySlotForItem(bot, blockName)
-  if (!source) return false
+  if (!source) {
+    // The only copy may live in the OFFHAND (staged for pairing): the
+    // items() scan covers 9-44 and never sees slot 45, while
+    // countInventoryItems does -- the exact held-item-desync loop that
+    // stranded repairs. Hop it into a free hotbar slot authoritatively;
+    // the next attempt finds it resident.
+    const offHandOnly = bot.inventory?.slots?.[45]
+    if (offHandOnly?.name === blockName && Number(offHandOnly.count) > 0 && bot._client) {
+      let hop = -1
+      for (let index = 0; index <= 8; index += 1) {
+        const st = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+        if (!st || Number(st.count) <= 0) { hop = index; break }
+      }
+      if (hop >= 0 && hop !== bot.quickBarSlot) {
+        try {
+          bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: hop, mode: 2, changedSlots: [], cursorItem: serializeCursorItem(bot, bot.inventory) })
+          console.log(`[EQUIP-OFFHAND-HOP] ${blockName} only in offhand; hopped to hotbar ${hop}`)
+        } catch { }
+      }
+    }
+    return false
+  }
 
   if (source.slot >= 36 && source.slot <= 44) {
     setSelectedHotbar(source.slot - 36)
