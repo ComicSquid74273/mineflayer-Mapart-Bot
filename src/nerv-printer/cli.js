@@ -7621,15 +7621,15 @@ function effectiveHeldCount (bot) {
 // window_items snapshot. One round trip heals any inventory view divergence
 // -- stuck desyncs that otherwise loop skips forever (the one-cell repair
 // hang).
-function refreshInventoryAuthoritatively(bot) {
+function refreshInventoryAuthoritatively(bot, site = '?') {
   if (!bot._client) return
   try {
     const slot = Math.max(0, Math.min(8, Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0))
     const cursorItem = serializeCursorItem(bot, bot.currentWindow || bot.inventory)
     bot._client.write('window_click', { windowId: 0, stateId: -1, slot: getHotbarWindowSlot(slot), mouseButton: slot, mode: 2, changedSlots: [], cursorItem })
-    console.log(`[SWAP-RESYNC] authoritative inventory snapshot requested (slot ${slot})`)
+    console.log(`[SWAP-RESYNC] site=${site} quickBarSlot=${bot.quickBarSlot} held=${bot.heldItem?.name || 'none'}x${bot.heldItem?.count ?? 0} slotStack=${bot.inventory?.slots?.[36 + (Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0)]?.name || 'none'}`)
   } catch (err) {
-    console.log(`[SWAP-RESYNC-WARN] ${err?.message || err}`)
+    console.log(`[SWAP-RESYNC-WARN] site=${site} ${err?.message || err}`)
   }
 }
 
@@ -17214,11 +17214,11 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
               await bot.equip(item, 'hand')
               console.log(`[EQUIP-NORMAL-FALLBACK] ${target.blockName}: confirmed equip after ${n} desyncs`)
             } else {
-              refreshInventoryAuthoritatively(bot)
+              refreshInventoryAuthoritatively(bot, "equip-fail")
             }
           } catch (err) {
             console.log(`[EQUIP-NORMAL-FALLBACK-WARN] ${target.blockName}: ${err?.message || err}; requesting snapshot`)
-            refreshInventoryAuthoritatively(bot)
+            refreshInventoryAuthoritatively(bot, "attempt-check")
           }
         }
         return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
@@ -17269,7 +17269,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
           counts.set(target.blockName, n)
           if (n >= 3) {
             counts.set(target.blockName, 0)
-            refreshInventoryAuthoritatively(bot)
+            refreshInventoryAuthoritatively(bot, "attempt-check")
           }
           return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
         }
@@ -17337,7 +17337,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
           counts.set(target.blockName, n)
           if (n >= 3) {
             counts.set(target.blockName, 0)
-            refreshInventoryAuthoritatively(bot)
+            refreshInventoryAuthoritatively(bot, "attempt-check")
           }
           return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
         }
