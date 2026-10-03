@@ -19168,6 +19168,22 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
   if (ackTracker) ackTracker.settlers.add(handleAckSettle)
 
+  // Async echo confirmation: the instant the server's block_update for a
+  // parked cell arrives, confirm and unpark it -- no scan-wake latency, and
+  // the 250ms park remains only as the no-echo retry timeout.
+  const parkedByPosition = new Map()
+  const onEchoBlockUpdate = (oldBlock, newBlock) => {
+    if (!newBlock || pendingUntil.size === 0) return
+    const key = `${newBlock.position.x}:${newBlock.position.y}:${newBlock.position.z}`
+    const parked = parkedByPosition.get(key)
+    if (parked === undefined || !pendingUntil.has(key)) return
+    if (newBlock.name === parked.blockName) {
+      markTargetPlacedInWorld(parked, key)
+      parkedByPosition.delete(key)
+    }
+  }
+  bot.on('blockUpdate', onEchoBlockUpdate)
+
   // Band scheduler (docs/BOT20-BAND-SCHEDULER-PLAN.md step 2): compile the
   // deterministic U-traversal into an emission schedule and drive the burst
   // from it. Behind advanced.bandSchedulerEnabled; the heuristic scan path
@@ -20168,6 +20184,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const echoRetryMs = Math.max(50, toNumber(advanced.scannerEchoRetryMs, 250))
               const existingUntil = pendingUntil.get(key) || 0
               pendingUntil.set(key, Math.max(existingUntil, Date.now() + echoRetryMs))
+              parkedByPosition.set(key, target)
               const priorSends = sendCounts.get(key) || 0
               if (priorSends >= 1) retriesTotalCount += 1
               sendCounts.set(key, priorSends + 1)
@@ -20655,6 +20672,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   } finally {
     active = false
     bot.__nervBandPlanActive = false
+    bot.removeListener('blockUpdate', onEchoBlockUpdate)
+    parkedByPosition.clear()
     if (ackTracker) ackTracker.settlers.delete(handleAckSettle)
     delete bot.__nervActiveBatchTargets
     delete bot.__nervTraversalDirection
