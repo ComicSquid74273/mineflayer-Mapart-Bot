@@ -17346,7 +17346,20 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
                 await bot.equip(item, 'hand')
                 console.log(`[EQUIP-NORMAL-FALLBACK] site=attempt ${target.blockName}: confirmed equip after ${n} desyncs`)
               } else {
-                refreshInventoryAuthoritatively(bot, "attempt-check")
+                // The only copy can be the OFFHAND (items() never sees slot
+                // 45): swap it straight into the held slot -- one
+                // authoritative click, whatever sits there moves to the
+                // offhand -- then retry the attempt in place.
+                const offHandStack = bot.inventory?.slots?.[45]
+                const heldIdx = Number.isFinite(bot.quickBarSlot) ? bot.quickBarSlot : 0
+                if (offHandStack?.name === target.blockName && Number(offHandStack.count) > 0 && bot._client) {
+                  const cursorItem = serializeCursorItem(bot, bot.inventory)
+                  bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: heldIdx, mode: 2, changedSlots: [], cursorItem })
+                  console.log(`[EQUIP-OFFHAND-HOP] site=attempt ${target.blockName}: offhand -> hotbar ${heldIdx}`)
+                  await delay(200) // let the authoritative snapshot land before re-checking
+                } else {
+                  refreshInventoryAuthoritatively(bot, "attempt-check")
+                }
               }
             } catch (equipErr) {
               console.log(`[EQUIP-NORMAL-FALLBACK-WARN] ${target.blockName}: ${equipErr?.message || equipErr}`)
