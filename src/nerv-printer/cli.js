@@ -19144,14 +19144,16 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     if (!pendingUntil.has(key)) return
     const target = targetByKey.get(key)
     if (!target) return
+    // CONFIRM-ONLY: the ack proves the server processed the send. Reading
+    // the world 75ms later to judge accept/reject raced the block echo and
+    // "rejected" healthy cells, re-offering them every 75ms -- 8 sends per
+    // cell. A world-mismatch on ack is now left alone: the normal park +
+    // world-scan cycle re-offers genuinely rejected cells after the echo
+    // window, and accepted cells confirm here as soon as the echo lands.
     if (worldName === target.blockName) {
       ackSettleConfirmed += 1
       markTargetPlacedInWorld(target, key)
-      return
     }
-    ackSettleRejected += 1
-    pendingUntil.set(key, Date.now() + ackRejectCooldownMs)
-    retryPriority.add(key)
   }
   if (ackTracker) ackTracker.settlers.add(handleAckSettle)
 
