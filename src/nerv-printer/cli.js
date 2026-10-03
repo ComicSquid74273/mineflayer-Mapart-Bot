@@ -5870,9 +5870,9 @@ function createDefaultConfig() {
       // server's block updates ride with or just before the ack), and the
       // re-offer cooldown for cells the server judged rejected.
       ackSettleDelayMs: 75,
-      // An acked-but-absent cell was processed and rejected by the server:
-      // re-offer fast (the 250ms hold needlessly outlived reach windows).
-      ackRejectCooldownMs: 120,
+      // Zero self-imposed cooldown: an acked-but-absent cell was already
+      // ruled on by the server; it can be re-offered immediately.
+      ackRejectCooldownMs: 0,
       // Band scheduler (docs/BOT20-BAND-SCHEDULER-PLAN.md): schedule-driven
       // emission behind this flag while the executor is wired in.
       bandSchedulerEnabled: false,
@@ -7568,7 +7568,7 @@ function installInFlightLedger (bot) {
   if (bot.__nervInFlight) return bot.__nervInFlight
   const ledger = {
     slots: new Map(), // hotbar index -> { sent, lastAt }
-    echoWindowMs: 800,
+    echoWindowMs: 300,
     noteSend (hotbarIndex) {
       const entry = this.slots.get(hotbarIndex) || { sent: 0, lastAt: 0 }
       entry.sent += 1
@@ -17181,10 +17181,13 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     && String(offHandStack?.name || '') === target.blockName
     && Number(offHandStack?.count) > 0
   if (isHeldReady) {
-    // §8.A boundary guard: the local count includes sends whose echoes have
-    // not landed; offering more would place with an empty server-side hand.
+    // §8.A boundary guard, narrowed: ledger lag is harmless mid-stack (there
+    // is real stock) — the sticky-ledger case throttled the dominant colour
+    // to ~1 send/s (3330 stack-in-flight skips in one band). Only guard at
+    // the true end of a stack, where an over-send would go out empty-handed.
     const effective = effectiveHeldCount(bot)
-    if (effective != null && effective <= 0) {
+    const heldCount = Number(bot.heldItem?.count) || 0
+    if (effective != null && effective <= 0 && heldCount <= 2) {
       return { state: 'skip', reason: `stack-in-flight-${target.blockName}` }
     }
   }
