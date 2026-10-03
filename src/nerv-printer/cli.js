@@ -20455,8 +20455,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         })
 
         if (missedInCols.length >= missRecoveryThreshold) {
+          // Walk pace, not sneak: the sneak-back cost ~3s per hop at 1.3 bps
+          // and the straight-walk controller is precise enough for a
+          // few-block re-reach.
           bot.setControlState('sprint', false)
-          bot.setControlState('sneak', true)
 
           const botPos = bot.entity.position
           const dx = prevCheckpointPos.x - botPos.x
@@ -20519,7 +20521,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
             )
           } finally {
-            bot.setControlState('sneak', false)
+            bot.setControlState('sprint', bot.__nervTraversalWantSprint === true)
           }
 
           const stillMissed = missedInCols.filter((target) => {
