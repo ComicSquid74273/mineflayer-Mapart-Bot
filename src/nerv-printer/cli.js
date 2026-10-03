@@ -20472,7 +20472,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             return Math.max(max, Math.sqrt(tpx * tpx + tpz * tpz))
           }, 0)
           const reach = toNumber(printer.placeRange, 5)
-          const backBlocks = Math.min(Math.max(missRecoveryBacktrackBlocks, Math.ceil(farthestMiss - reach + 1)), 12)
+          // Full-span first-go repair (user directive): the backtrack walks
+          // far enough to re-reach EVERY missed cell -- the printer places
+          // at full rate during the walk. Clamped only against pathological
+          // geometry, not against normal lane-length miss spans.
+          const backBlocks = Math.min(Math.max(missRecoveryBacktrackBlocks, Math.ceil(farthestMiss - reach + 1)), 64)
           console.log(`[NERV-WORKLOAD-MISS-RECOVERY] detected ${missedInCols.length} missed blocks (span ${farthestMiss.toFixed(1)}); sneaking back ${backBlocks} blocks to re-place.`)
           const backX = botPos.x + (dx / dist) * backBlocks
           const backZ = botPos.z + (dz / dist) * backBlocks
