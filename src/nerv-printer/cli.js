@@ -19224,7 +19224,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // emission for the settle window (the quiet half of the quiet-window rule).
   let swapHoldUntil = 0
   const noteInventoryMutation = (ms = 250) => {
-    swapHoldUntil = Date.now() + ms
+    // Never extend an active hold: staging that fires while held must not
+    // push the pause forward forever (permanent emission livelock).
+    const until = Date.now() + ms
+    if (until <= swapHoldUntil) return
+    swapHoldUntil = until
   }
   // The plan's clock is the bot's POSITION, not the wall clock: reality has
   // checkpoint pauses, drains and turns the simulation does not, so a
@@ -20163,7 +20167,12 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           }
 
           // Replenish whatever the burst cannot cover from what is already hotbar-resident.
+          // PACED: one mutation per echo window. Unpaced, this loop re-swapped
+          // every wake (the plan runs without local prediction, so the view
+          // cannot show the swap until the echo lands) -- inventory churn
+          // livelock, emission starved, whole bands printed nothing.
           for (const entry of readiness.missing) {
+            if ((bot.__nervSwapWaitUntil || 0) > Date.now()) break
             const blockName = entry.blockName
             const residentIndex = findHotbarIndexForItem(bot, blockName)
             const source = findBestInventorySlotForItem(bot, blockName)
@@ -20173,6 +20182,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               // different stack in: SWAP when the source can stand in wholesale, else
               // merge, with the merge leftover returned to the source slot.
               replenishHotbarSlot(bot, residentIndex, source.slot, blockName)
+              bot.__nervSwapWaitUntil = Date.now() + 150
+              noteInventoryMutation()
               continue
             }
             if (!source) continue
@@ -20182,7 +20193,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             // one needed hundreds of targets later.
             const destIndex = chooseMaterialHotbarIndex(bot, blockName, burstTargets)
             if (destIndex >= 0 && destIndex <= 8 && source.slot !== getHotbarWindowSlot(destIndex)) {
-              silentHotbarSwap(bot, source.slot, destIndex)
+              if (silentHotbarSwap(bot, source.slot, destIndex)) {
+                bot.__nervSwapWaitUntil = Date.now() + 150
+                noteInventoryMutation()
+              }
             }
           }
         }
