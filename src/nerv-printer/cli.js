@@ -17180,18 +17180,24 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   const offHandReady = !isHeldReady
     && String(offHandStack?.name || '') === target.blockName
     && Number(offHandStack?.count) > 0
+  // §8.A boundary guard, narrowed: only at the true end of a stack (held
+  // <= 2). When it trips, do NOT idle -- fall through to the equip block so
+  // the fullest-stack rule flips the hand onto the freshly staged stack; the
+  // drain gap used to idle the dominant colour until cells died (17s
+  // backtracks).
+  let heldUsable = isHeldReady
   if (isHeldReady) {
-    // §8.A boundary guard, narrowed: ledger lag is harmless mid-stack (there
-    // is real stock) — the sticky-ledger case throttled the dominant colour
-    // to ~1 send/s (3330 stack-in-flight skips in one band). Only guard at
-    // the true end of a stack, where an over-send would go out empty-handed.
     const effective = effectiveHeldCount(bot)
     const heldCount = Number(bot.heldItem?.count) || 0
     if (effective != null && effective <= 0 && heldCount <= 2) {
-      return { state: 'skip', reason: `stack-in-flight-${target.blockName}` }
+      if (findHotbarIndexForItem(bot, target.blockName) >= 0 || String(offHandStack?.name || '') === target.blockName) {
+        heldUsable = false // another stack exists: flip onto it
+      } else {
+        return { state: 'skip', reason: `stack-in-flight-${target.blockName}` }
+      }
     }
   }
-  if (!isHeldReady && !offHandReady) {
+  if (!heldUsable && !offHandReady) {
     const equipped = await equipMaterial(bot, config, target.blockName, {
       fastSwap: isFastNoWaitPlacement,
       allowRestock: !isFastNoWaitPlacement
