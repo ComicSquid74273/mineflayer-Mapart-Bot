@@ -254,14 +254,14 @@ test('schedule-driven emission replaces the scan only when a plan exists', () =>
 test('step 3: no inventory mutation inside the emission window', () => {
   // The mid-burst cross-inventory swap is banned under a plan.
   const equipAt = cliSource.indexOf('bot.__nervInventorySwapActive = true')
-  const equip = cliSource.slice(equipAt, equipAt + 1400)
-  assert.match(equip, /if \(isBandPlanLive\(bot\)\) return false/, 'equipMaterial must decline cross-inventory swaps under a live plan')
+  const equip = cliSource.slice(equipAt, equipAt + 2400)
+  assert.match(equip, /if \(isBandPlanLive\(bot\)\) \{/, 'equipMaterial must decline cross-inventory swaps under a live plan')
 
   // The swap's local slot prediction is a lie whenever the server can reject
   // the click: under a plan, slots are server-truth (set_slot echo) only.
   const swapAt = cliSource.indexOf('function silentHotbarSwap(')
   const swap = cliSource.slice(swapAt, cliSource.indexOf('\nfunction ', swapAt))
-  assert.match(swap, /bot\.__nervBandPlanActive !== true && Array\.isArray\(slots\)/, 'slot prediction must be skipped under a plan')
+  assert.match(swap, /!isBandPlanLive\(bot\) && Array\.isArray\(slots\)/, 'slot prediction must be skipped under a live plan')
   // Authoritative swaps (Staircase revision -1): the click always executes
   // and always answers with a full window snapshot -- no stateId race with
   // the placement set_slot stream, no echo-less applied clicks.

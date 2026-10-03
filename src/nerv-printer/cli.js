@@ -7716,7 +7716,7 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
   // only. The local slot prediction below is exactly the lie that put a
   // phantom colour in the hotbar whenever the server rejected the click --
   // placements wait for the set_slot echo instead of trusting the forecast.
-  if (bot.__nervBandPlanActive !== true && Array.isArray(slots)) {
+  if (!isBandPlanLive(bot) && Array.isArray(slots)) {
     const srcItem = slots[sourceSlot]
     const destItem = slots[destWindowSlot]
     slots[destWindowSlot] = srcItem
@@ -17185,7 +17185,13 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       fastSwap: isFastNoWaitPlacement,
       allowRestock: !isFastNoWaitPlacement
     })
-    const selectedMaterialReady = selectedMaterialMatches(bot, target.blockName)
+    let selectedMaterialReady = selectedMaterialMatches(bot, target.blockName)
+    if (!selectedMaterialReady && equipped && isFastNoWaitPlacement) {
+      // fastSwap returns before the server echo applies (prediction is off
+      // outside live bands) -- give the authoritative snapshot a moment
+      // before declaring a desync.
+      selectedMaterialReady = await waitForSelectedMaterialReady(bot, target.blockName, 400, 25)
+    }
     if (!equipped || !selectedMaterialReady) {
       if (isBandPlanLive(bot) && countInventoryItems(bot, target.blockName) > 0) {
         // In stock but not staged into the hotbar: the plan stages it at the
