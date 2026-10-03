@@ -17337,7 +17337,24 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
           counts.set(target.blockName, n)
           if (n >= 3) {
             counts.set(target.blockName, 0)
-            refreshInventoryAuthoritatively(bot, "attempt-check")
+            // Normal, confirmed equip (user directive): stop the fast path,
+            // let mineflayer move/verify the colour into the hand. If the
+            // hand then holds it, continue this attempt instead of skipping.
+            try {
+              const item = bot.inventory.items().find((entry) => entry.name === target.blockName)
+              if (item) {
+                await bot.equip(item, 'hand')
+                console.log(`[EQUIP-NORMAL-FALLBACK] site=attempt ${target.blockName}: confirmed equip after ${n} desyncs`)
+              } else {
+                refreshInventoryAuthoritatively(bot, "attempt-check")
+              }
+            } catch (equipErr) {
+              console.log(`[EQUIP-NORMAL-FALLBACK-WARN] ${target.blockName}: ${equipErr?.message || equipErr}`)
+              refreshInventoryAuthoritatively(bot, "attempt-check")
+            }
+            if (selectedMaterialMatches(bot, target.blockName)) {
+              continue
+            }
           }
           return { state: 'skip', reason: `held-item-desync-${target.blockName}` }
         }
