@@ -7494,7 +7494,7 @@ async function selectHotbarMaterial(bot, config, blockName, options = {}) {
     // Band scheduler: no inventory mutation inside the emission window.
     // Staging happens at scheduled stops; a colour that is not already
     // resident is deferred, never mid-burst swapped.
-    if (bot.__nervBandPlanActive === true) return false
+    if (isBandPlanLive(bot)) return false
     if (!silentHotbarSwap(bot, source.slot, hotbarIndex)) return false
     if (fastSwap) return true
     const swapped = await waitForHotbarItem(bot, hotbarIndex, blockName, timeoutMs, pollMs)
@@ -7600,6 +7600,13 @@ function refreshInventoryAuthoritatively(bot) {
   } catch (err) {
     console.log(`[SWAP-RESYNC-WARN] ${err?.message || err}`)
   }
+}
+
+// A band plan is "live" only while its emission window is genuinely running;
+// the flag carries a timestamp and expires so an interrupted batch can never
+// freeze equips or maintenance for the rest of the process.
+function isBandPlanLive (bot) {
+  return bot.__nervBandPlanActive === true && Date.now() - (bot.__nervBandPlanActiveAt || 0) < 120000
 }
 
 function getWindowStateId(bot) {
@@ -17138,7 +17145,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
     })
     const selectedMaterialReady = selectedMaterialMatches(bot, target.blockName)
     if (!equipped || !selectedMaterialReady) {
-      if (bot.__nervBandPlanActive === true && countInventoryItems(bot, target.blockName) > 0) {
+      if (isBandPlanLive(bot) && countInventoryItems(bot, target.blockName) > 0) {
         // In stock but not staged into the hotbar: the plan stages it at the
         // next stop. Defer the cell without touching the inventory.
         return { state: 'skip', reason: `plan-not-staged-${target.blockName}` }
@@ -19100,6 +19107,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       })
       planStartedAt = Date.now()
       bot.__nervBandPlanActive = true
+      bot.__nervBandPlanActiveAt = Date.now()
       // §9.1: food does not live in the offhand anymore -- if a previous era
       // (or an interrupted eat cycle) left it there, return it to main now so
       // the offhand is free for pairing/printing this band.
@@ -19498,7 +19506,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       // Under an active band plan this is suppressed: it is an inventory
       // mutation inside the emission window (the exact race the plan bans),
       // and the plan's staging pass owns refills.
-      const proactiveResult = bot.__nervBandPlanActive === true
+      const proactiveResult = isBandPlanLive(bot)
         ? { action: 'none' }
         : runProactiveHotbarMaintenance(bot, config, batchTargets, seen)
       if (proactiveResult.action !== 'none' && placementNoiseLogsEnabled(config)) {

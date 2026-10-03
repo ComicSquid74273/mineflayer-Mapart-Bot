@@ -255,7 +255,7 @@ test('step 3: no inventory mutation inside the emission window', () => {
   // The mid-burst cross-inventory swap is banned under a plan.
   const equipAt = cliSource.indexOf('bot.__nervInventorySwapActive = true')
   const equip = cliSource.slice(equipAt, equipAt + 1400)
-  assert.match(equip, /if \(bot\.__nervBandPlanActive === true\) return false/, 'equipMaterial must decline cross-inventory swaps under a plan')
+  assert.match(equip, /if \(isBandPlanLive\(bot\)\) return false/, 'equipMaterial must decline cross-inventory swaps under a live plan')
 
   // The swap's local slot prediction is a lie whenever the server can reject
   // the click: under a plan, slots are server-truth (set_slot echo) only.
@@ -326,5 +326,5 @@ test('regression: pacing latch, window guard, restage eviction, maintenance gate
 
   // 4. Proactive maintenance is an inventory mutation: suppressed under a
   //    plan (the staging pass owns refills; the burst stays select-only).
-  assert.match(batch, /bot\.__nervBandPlanActive === true\s*\?\s*\{ action: 'none' \}/)
+  assert.match(batch, /const proactiveResult = isBandPlanLive\(bot\)/)
 })
