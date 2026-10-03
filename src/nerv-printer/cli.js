@@ -19172,6 +19172,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let planStartedAt = 0
   let planEmitTickSeen = -1
   let planEmittedThisTick = 0
+  // Token-bucket emission budget (user: printing budget is 30 blocks/s).
+  // Refills continuously at blocksPerSecond; small burst allowance so a
+  // wake can spend briefly accumulated credit without exceeding the rate.
+  let emissionTokens = 5
+  let emissionLastRefillAt = 0
   // Throughput instrument: where the emission budget actually goes each second.
   let emitWakes = 0
   let emitScheduled = 0
@@ -19941,19 +19946,18 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (emissionHeld) emitEmptyWakes += 1
           if (!emissionHeld) try {
             if (planTick >= 0) {
-              // Hard per-tick cap: the server silently drops burst catch-up
-              // (measured intake ~1-2 per 50ms tick regardless of send rate).
-              // The cap refills per REAL 50ms window -- tying it to the
-              // position-derived planTick throttled emission to ~2x walking
-              // speed (planTick advances 9-12/s while walking), which is why
-              // the printer could never catch up and pacing compensated by
-              // slowing the bot. The 40/s budget must not move with the bot.
-              const emitWindow = Math.floor(Date.now() / 50)
-              if (emitWindow !== planEmitTickSeen) {
-                planEmitTickSeen = emitWindow
-                planEmittedThisTick = 0
+              // Emission budget: 30 blocks/s (the printing budget). A token
+              // bucket refilled continuously -- bursts may spend a little
+              // accumulated credit, but the sustained rate never exceeds the
+              // budget. Flooding past it drowned the echo/settle pipeline
+              // (7+ sends/cell at ~100/s attempted).
+              const nowEmitMs = Date.now()
+              const blocksPerSecond = Math.max(1, toNumber(advanced.bandSchedulerBlocksPerSecond, 30))
+              if (emissionLastRefillAt > 0) {
+                emissionTokens = Math.min(5, emissionTokens + ((nowEmitMs - emissionLastRefillAt) / 1000) * blocksPerSecond)
               }
-              const perTickCap = Math.max(1, Math.trunc(toNumber(advanced.bandSchedulerBlocksPerTick, 4)))
+              emissionLastRefillAt = nowEmitMs
+              const perTickCap = Math.floor(emissionTokens)
               const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
               const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
               for (const cell of bandPlan.cells) {
@@ -19975,6 +19979,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 burstTargets.push(cell.target)
                 burstExcluded.add(cell.key)
                 planEmittedThisTick += 1
+                emissionTokens -= 1
                 emitScheduled += 1
               }
               // Catch-up pass: schedule-tied emission is break-even by
@@ -20010,6 +20015,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                   }
                   burstTargets.push(cell.target)
                   planEmittedThisTick += 1
+                  emissionTokens -= 1
                   emitAhead += 1
                 }
               }
