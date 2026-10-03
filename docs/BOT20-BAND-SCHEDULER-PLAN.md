@@ -278,3 +278,70 @@ A bounded by budget, and zero full-stop restocks on clean runs.
 
 Ledger-state rule from §6 still holds: deferred cells end `placed` (window used) or
 `repaired`/`flagged` — never silently dropped.
+
+---
+
+## 8. Quiet-Window Inventory Protocol — the miss-killer
+
+Two protocol facts drive the design:
+
+- **Fact 1 — mid-band `window_click`s race the stateId stream.** Every placement
+  makes the server send a `set_slot` (stack decrement, new stateId). A click sent
+  while placements stream attaches a stale stateId → the server silently rejects it
+  and sends a corrective snapshot → the restage never happened. This is the
+  "misses when inventory action happens" class.
+- **Fact 2 — stack boundaries over-send.** Local counts overstate the real stack by
+  in-flight placements until their echoes land; at the end of a stack we request
+  placements with an empty server-side hand → silent no-op misses.
+
+| Rule | Mechanism | Kills |
+|---|---|---|
+| A. In-flight ledger | per-slot `sent − echoed`; effective stack = echoed − in-flight; stop offering a colour at effective ≤ 0 | boundary empty-hand sends |
+| B. Quiet-window mutations | `window_click` only when in-flight = 0 AND no `set_slot` in the last tick; mid-band, emission pauses the 2–3 ticks needed | stale-stateId rejected clicks |
+| C. Gapless handover | at effective ≤ ~8, pre-stage the next stack into a different free slot in a quiet window; old slot prints through; select switches after the echo | echo-gap cells per drain |
+| D. Verified entry staging | stage full band demand at entry; require the echo before the plan anchors | start-of-band desyncs |
+| E. Select discipline | one select per colour run; wake emission grouped by held colour | select churn |
+| F. Authoritative resync | post-echo divergence → one revision-−1 snapshot, `[SWAP-RESYNC]`, ledger rebuild | residual divergence |
+| G. Instrumentation | `[HOTBAR-STATE]` per second per resident colour (echoed/inFlight/effective); `[SWAP-QUIET]` waits; boundary-defer + rejected-click census | invisible regressions |
+
+---
+
+## 9. Food-resident inventory + dual-hand printing
+
+Anti-hunger's spoof already made food rare — the offhand sitting permanently on food
+is now pure waste. New model:
+
+### 9.1 Food residency and the eat cycle
+- Food stack lives in a **main inventory slot** (planner reserves it; restock sizing
+  counts it; the never-dump guard already covers it). Offhand stays EMPTY during
+  printing.
+- **Eat cycle** (triggered only by hunger/health thresholds, existing checks):
+  1. wait for a quiet window (§8.B — same rule as every mutation),
+  2. swap food → offhand (`equipFoodItem` today; mode-4 SWAP_OFFHAND from a staged
+     hotbar slot is the one-packet upgrade),
+  3. consume + server-verify (existing `eatConfiguredFoodUntilReady`),
+  4. swap the remainder back to its main slot → offhand empty again,
+  5. `[EAT-CYCLE] reason= ms=` logged; emission degraded to main-hand-only meanwhile.
+- Cost: ~2–4 s per cycle, at anti-hunger's drip rate ≈ a few per job.
+
+### 9.2 Offhand as a second printing hand
+- `placeTarget` gains an offhand attempt: `target.blockName === offhand item` →
+  `_genericPlace(..., { offhand: true, forceLook: 'ignore' })` → packet `hand: 1`.
+  Protocol-legal, vanilla-clients-do-it, mineflayer supports it natively.
+- **The win:** the offhand colour prints with ZERO selects. Colour-coherent emission
+  extends to a (main, offhand) pair — two colours live simultaneously.
+
+### 9.3 Planner-driven run pairing (the payoff)
+- The compiler models the offhand as a **10th slot with no select cost** and pairs
+  adjacent colour runs: run *i* → main hand, run *i+1* → offhand. Selects halve;
+  the pair swap at run boundaries happens at stops via one mode-4 packet.
+- Hand alternation stays per-run (not per-cell) — human-shaped, and NCP has no
+  hand-frequency check.
+- During eat cycles or an empty offhand, everything degrades to today's main-hand
+  path; the planner treats the offhand as best-effort, never load-bearing for
+  coverage (the 9-slot pool still guarantees the schedule).
+
+### 9.4 Staging order
+1. Stage 1: food out of offhand + eat cycle (frees the hand).
+2. Stage 2: opportunistic offhand printing (no selects when colours happen to match).
+3. Stage 3: compiler run-pairing (selects halve by design).

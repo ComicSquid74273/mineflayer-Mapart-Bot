@@ -105,18 +105,24 @@ test('every in-band mutation site waits for the echo, not a timer', () => {
   const batchStart = source.indexOf('async function runNervTimeWorkloadPlacementBatch')
   const batch = source.slice(batchStart, source.indexOf('\nasync function ', batchStart + 10))
 
-  // Scheduled staging, handover, deferred-restage and the readiness
-  // replenish loop: four wake loops that used to re-swap off a stale view
-  // once their 150ms timer expired mid-echo.
+  // Handover, deferred-restage and the readiness replenish loop still gate
+  // on the echo (they re-derive slots from the live view). The PLAN ops loop
+  // pipelines instead: disjoint-slot swaps may overlap (16-colour bands need
+  // ~127 switches in one walk; serial echo-gated swaps cannot fit).
   const gated = batch.match(/\|\| !echoGateOpen\(bot\)\) break/g) || []
-  assert.ok(gated.length >= 4, `expected >=4 gated wake loops, found ${gated.length}`)
+  assert.ok(gated.length >= 3, `expected >=3 gated wake loops, found ${gated.length}`)
+  const opsLoop = batch.slice(batch.indexOf('for (const op of bandPlan.swaps)'), batch.indexOf('// §8.C gapless handover'))
+  assert.match(opsLoop, /pendingSwapSlots/)
+  assert.match(opsLoop, /pendingSwapSlots\.length >= 3\) break/)
+  assert.match(opsLoop, /p\.slots\.includes\(source\.slot\)/)
+  assert.match(opsLoop, /silentHotbarSwap\(bot, source\.slot, dest, true\)/, 'plan swaps keep the selection so emission prints through them')
 
   // The offhand pair must not fire while an echo is pending.
   assert.match(batch, /&& echoGateOpen\(bot\)\) \{\s*\n\s*const offhandCandidate/)
 
   // The repair loop's inline restage too.
   const restage = source.slice(source.indexOf('A plan-not-staged deferral in the REPAIR loop'))
-  assert.match(restage.slice(0, 1400), /echoGateOpen\(bot\) && silentHotbarSwap/)
+  assert.match(restage.slice(0, 2000), /echoGateOpen\(bot\) && silentHotbarSwap/)
 
   // Lane-entry staging runs to completion rather than skipping mid-echo.
   const prep = source.slice(
@@ -125,6 +131,20 @@ test('every in-band mutation site waits for the echo, not a timer', () => {
   )
   const awaits = prep.match(/await waitForEchoGateOpen\(bot\)/g) || []
   assert.equal(awaits.length, 2, 'both staging loops wait for the echo')
+})
+
+test('the per-wake emission cap resets every wake (the 90%-miss band bug)', () => {
+  // planEmittedThisTick lives at closure scope; without a per-wake reset the
+  // first wake spent the bucket's 5 starting tokens and every later wake
+  // broke on its first cell -- emission offered nothing for the whole band
+  // (sched=5 then 0 forever, 467/512 neverSent).
+  const batchStart = source.indexOf('async function runNervTimeWorkloadPlacementBatch')
+  const batch = source.slice(batchStart, source.indexOf('\nasync function ', batchStart + 10))
+  const capAt = batch.indexOf('const perTickCap = Math.floor(emissionTokens)')
+  const resetAt = batch.indexOf('planEmittedThisTick = 0', capAt)
+  assert.ok(capAt >= 0, 'the per-tick cap computation must exist')
+  assert.ok(resetAt > capAt, 'the per-wake reset follows the cap computation')
+  assert.match(batch, /rej=exp:/, 'PLAN-DEBT logs emission reject reasons')
 })
 
 test('offhand stock is availability, not a reason to unpair it', () => {

@@ -7747,7 +7747,7 @@ function serializeCursorItem(bot, window) {
   }
 }
 
-function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
+function silentHotbarSwap(bot, sourceSlot, destHotbarIndex, keepSelection = false) {
   // A lingering container window (restock chest whose bookkeeping our raw
   // -1 clicks bypass) makes every swap transact against the dead chest:
   // windowId, slots and cursor all belong to the wrong window and the
@@ -7806,8 +7806,14 @@ function silentHotbarSwap(bot, sourceSlot, destHotbarIndex) {
     if (srcItem) srcItem.slot = destWindowSlot
     if (destItem) destItem.slot = sourceSlot
   }
-  if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(destHotbarIndex)
-  else bot.quickBarSlot = destHotbarIndex
+  // keepSelection: plan staging ops swap into a slot the emitter never
+  // holds (pickStagingSlot excludes quickBarSlot + in-flight slots), so the
+  // hand can keep printing through the swap -- forcing the selection to the
+  // staged slot mid-emission is what made swaps need an emission hold.
+  if (!keepSelection) {
+    if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(destHotbarIndex)
+    else bot.quickBarSlot = destHotbarIndex
+  }
   return true
 }
 
@@ -17922,8 +17928,16 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
           const source = findBestInventorySlotForItem(bot, colour)
           let dest = -1
           for (let index = 0; index <= 8; index += 1) {
+            // The drained HELD slot is usually the first empty one; taking it
+            // made the dest!==quickBarSlot guard below silently cancel the
+            // restage 1596 times in one band (plan-not-staged-black storm).
+            if (index === bot.quickBarSlot) continue
             const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
             if (!stack || Number(stack.count) <= 0) { dest = index; break }
+          }
+          if (!source && Date.now() - (bot.__nervRestageSkipLoggedAt || 0) > 5000) {
+            bot.__nervRestageSkipLoggedAt = Date.now()
+            console.log(`[${label}-RESTAGE-SKIP] ${colour}: no main/offhand source; count=${countInventoryItems(bot, colour)} offhand=${bot.inventory?.slots?.[45]?.name || 'none'}`)
           }
           if (dest < 0) {
             let weakest = -1
@@ -19227,6 +19241,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let emitScheduled = 0
   let emitAhead = 0
   let emitEmptyWakes = 0
+  // Why the emission loop rejected due cells (per-second, logged in PLAN-DEBT):
+  // when emission offers nothing, these counters name the filter responsible.
+  const emitReject = { expired: 0, excluded: 0, reach: 0 }
   // Colours whose placement deferred because they are not staged: the staging
   // pass re-stages these from main inventory on demand (echo-confirmed), so a
   // mid-band stack drain heals instead of starving the whole lane into repair.
@@ -19817,11 +19834,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           }
           if (Date.now() - (bot.__nervPlanDebtLoggedAt || 0) >= 1000) {
             bot.__nervPlanDebtLoggedAt = Date.now()
-            console.log(`[PLAN-DEBT] tick=${planTick} live=${liveDue} dead=${deadDue} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true} wakes=${emitWakes} sched=${emitScheduled} ahead=${emitAhead} empty=${emitEmptyWakes}`)
+            console.log(`[PLAN-DEBT] tick=${planTick} live=${liveDue} dead=${deadDue} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true} wakes=${emitWakes} sched=${emitScheduled} ahead=${emitAhead} empty=${emitEmptyWakes} rej=exp:${emitReject.expired}/excl:${emitReject.excluded}/reach:${emitReject.reach}`)
             emitWakes = 0
             emitScheduled = 0
             emitAhead = 0
             emitEmptyWakes = 0
+            emitReject.expired = 0
+            emitReject.excluded = 0
+            emitReject.reach = 0
           }
           return bot.__nervTraversalSlow === true ? liveDue > 0 : liveDue > 4
         })()
@@ -19866,6 +19886,18 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           // Never transact while a container window is open: silentHotbarSwap
           // would click into the CHEST's window id and corrupt its inventory.
           if (stagePlanTick >= 0 && !bot.currentWindow) {
+            // 16-colour worst case: ~127 colour switches inside one 18s
+            // traversal. Serial echo-gated swaps (~3/s at 6b6t RTT) cannot
+            // fit that, so PLAN swaps pipeline: an op fires while a previous
+            // swap's echo is still in flight whenever it touches DISJOINT
+            // slots -- the stale-view undo race only exists between swaps
+            // that share a slot. Conflicting ops skip (never latch done)
+            // until the echo lands; 600ms expiry mirrors the echo gate so a
+            // dropped echo cannot wedge the pipeline. The dest is never the
+            // held slot (pickStagingSlot excludes it) and the selection is
+            // kept, so emission keeps printing through these swaps.
+            const pendingSwapSlots = bot.__nervPendingSwapSlots || (bot.__nervPendingSwapSlots = [])
+            while (pendingSwapSlots.length > 0 && pendingSwapSlots[0].until < stageNowMs) pendingSwapSlots.shift()
             for (const op of bandPlan.swaps) {
               if (op.__done || !op.inColour || op.tick > stagePlanTick + 5) continue
               const resident = findHotbarIndexesForItem(bot, op.inColour)
@@ -19873,7 +19905,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 op.__done = true
                 continue
               }
-              if ((bot.__nervSwapWaitUntil || 0) > stageNowMs || !echoGateOpen(bot)) break
+              if (pendingSwapSlots.length >= 3) break
               const source = findBestInventorySlotForItem(bot, op.inColour)
               if (!source) {
                 op.__done = 'no-source'
@@ -19881,11 +19913,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
               let dest = pickStagingSlot(op.intoSlot, op.inColour)
               if (!(dest >= 0 && dest <= 8)) { op.__done = 'no-slot'; continue }
-              if (silentHotbarSwap(bot, source.slot, dest)) {
+              const destWindowSlot = getHotbarWindowSlot(dest)
+              if (source.slot === destWindowSlot) continue
+              if (pendingSwapSlots.some((p) => p.slots.includes(source.slot) || p.slots.includes(destWindowSlot))) continue
+              if (silentHotbarSwap(bot, source.slot, dest, true)) {
                 op.__done = true
-                bot.__nervSwapWaitUntil = stageNowMs + 150
-                noteInventoryMutation()
-                console.log(`[BAND-STAGE] tick=${op.tick} colour=${op.inColour} slot=${dest} reason=${op.reason}${op.outColour ? ` evicts=${op.outColour}` : ''}`)
+                pendingSwapSlots.push({ slots: [source.slot, destWindowSlot], until: stageNowMs + 600 })
+                console.log(`[BAND-STAGE] tick=${op.tick} colour=${op.inColour} slot=${dest} reason=${op.reason}${op.outColour ? ` evicts=${op.outColour}` : ''}${pendingSwapSlots.length > 1 ? ' pipelined' : ''}`)
               }
             }
           }
@@ -20027,18 +20061,25 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
               emissionLastRefillAt = nowEmitMs
               const perTickCap = Math.floor(emissionTokens)
+              // PER-WAKE reset. planEmittedThisTick lives at closure scope
+              // and was never reset: the first wake spent the bucket's 5
+              // starting tokens, the counter latched >= cap, and every later
+              // wake broke on its first cell -- emission offered nothing for
+              // the rest of the band (sched=5 then 0 forever, ~90% of the
+              // lane left to repair).
+              planEmittedThisTick = 0
               const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
               const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
               for (const cell of bandPlan.cells) {
                 if (burstTargets.length >= allowed) break
                 if (planEmittedThisTick >= perTickCap) break
-                if (cell.emitTick > planTick || planTick > cell.exit + 10) continue
-                if (burstExcluded.has(cell.key)) continue
+                if (cell.emitTick > planTick || planTick > cell.exit + 10) { emitReject.expired += 1; continue }
+                if (burstExcluded.has(cell.key)) { emitReject.excluded += 1; continue }
                 const tp = cell.target.position
                 const dx = bot.entity.position.x - (tp.x + 0.5)
                 const dy = eyeY - (tp.y + 0.5)
                 const dz = bot.entity.position.z - (tp.z + 0.5)
-                if (dx * dx + dy * dy + dz * dz > liveReach2) continue
+                if (dx * dx + dy * dy + dz * dz > liveReach2) { emitReject.reach += 1; continue }
                 const Vec3Plan = bot.entity.position.constructor
                 const actual = bot.blockAt(new Vec3Plan(tp.x, tp.y, tp.z))
                 if (actual?.name === cell.target.blockName) {
