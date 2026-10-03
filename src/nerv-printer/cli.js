@@ -18968,6 +18968,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   const sendCounts = new Map()
   const retryPriority = new Set()
   const repairAlerts = new Map()
+  // Continuously observed world disagreements (1Hz observer): the freshest
+  // error record for the whole lane, consulted by checkpoint repair.
+  const missRecord = new Set()
   const inventoryDesyncHits = new Map()
   let lastAlertScanAt = 0
   let checkpointMoveInProgress = false
@@ -19750,6 +19753,24 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         // bot outruns the printer (2/tick cap vs sprint), debt piles up and
         // the bot walks until the printer catches up. Hysteresis: engage
         // above 4 due cells, release only at zero.
+        // Continuous observation (1Hz): the whole lane is in view distance
+        // long before the bot reaches it -- record every world disagreement
+        // now, not just at checkpoint arrivals. Checkpoints repair from this
+        // record (radius-gated); the line-end repair gets the rest.
+        if (Date.now() - (bot.__nervMissScanAt || 0) >= 1000) {
+          bot.__nervMissScanAt = Date.now()
+          const Vec3Obs = bot.entity.position.constructor
+          for (const target of batchTargets) {
+            const key = getTargetKey(target)
+            if (seen.has(key) || stallSkipped.has(key)) continue
+            const pendingExpiry = pendingUntil.get(key)
+            if (pendingExpiry !== undefined && pendingExpiry > Date.now()) continue
+            const actual = bot.blockAt(new Vec3Obs(target.position.x, target.position.y, target.position.z))
+            if (!actual) continue // not in view distance yet
+            if (actual.name !== target.blockName) missRecord.add(key)
+            else missRecord.delete(key)
+          }
+        }
         const planPaceWalk = (() => {
           if (!bandPlan) return false
           const planTick = currentPlanTick()
@@ -20484,6 +20505,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       }
 
       if (checkpoint.action === 'lineEnd' && !emergencyRestockBlock) {
+        // Emission is over: expire the plan's mid-burst swap ban so the
+        // line-end repair may stage colours freely (it was looping
+        // plan-not-staged skips with the ban still live).
+        bot.__nervBandPlanActiveAt = 0
         // Actively place any remaining exit boundary row targets while stationary before settle
         const exitDrainStartAt = Date.now()
         await placeReachableActiveTargets(40)
