@@ -24,12 +24,12 @@ function runLeash(cells, sentKeys, botZ, opts = {}) {
   const leash = loadLeash()
   const seen = new Set(opts.seen || [])
   const stallSkipped = new Set(opts.stallSkipped || [])
-  const sentCounts = new Map()
-  for (const key of sentKeys || []) sentCounts.set(key, 1)
+  const sendCounts = new Map()
+  for (const key of sentKeys || []) sendCounts.set(key, 1)
   return leash({
     targets: cells,
     seen,
-    sentCounts,
+    sendCounts,
     stallSkipped,
     botTravelCoord: botZ,
     travelCoordOf: (target) => target.position.z,
@@ -94,7 +94,7 @@ test('mini dry-run: leash pins the walk to the print rate and never passes', () 
   for (let z = 0; z < 128; z += 1) {
     for (const col of cols) targets.push({ position: { x: col, y: 64, z } })
   }
-  const sentCounts = new Map()
+  const sendCounts = new Map()
   const seen = new Set()
   const stallSkipped = new Set()
   const tickMs = 50
@@ -104,12 +104,12 @@ test('mini dry-run: leash pins the walk to the print rate and never passes', () 
   let worstViolation = 0
   let doneAtTick = -1
   for (let t = 0; t < 2000; t += 1) {
-    if (doneAtTick < 0 && targets.every((target) => sentCounts.get(`${target.position.x}:${target.position.y}:${target.position.z}`) > 0)) {
+    if (doneAtTick < 0 && targets.every((target) => sendCounts.get(`${target.position.x}:${target.position.y}:${target.position.z}`) > 0)) {
       doneAtTick = t
       break
     }
     const state = leash({
-      targets, seen, sentCounts, stallSkipped,
+      targets, seen, sendCounts, stallSkipped,
       botTravelCoord: botZ,
       travelCoordOf: (target) => target.position.z,
       leashBlocks: 2,
@@ -121,13 +121,13 @@ test('mini dry-run: leash pins the walk to the print rate and never passes', () 
     const reachable = targets
       .filter((target) => {
         const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-        return !seen.has(key) && !(sentCounts.get(key) > 0) && Math.abs(target.position.z - botZ) <= 4.5
+        return !seen.has(key) && !(sendCounts.get(key) > 0) && Math.abs(target.position.z - botZ) <= 4.5
       })
       .sort((a, b) => Math.abs(a.position.z - botZ) - Math.abs(b.position.z - botZ))
     for (const target of reachable) {
       if (tokens < 1) break
       tokens -= 1
-      sentCounts.set(`${target.position.x}:${target.position.y}:${target.position.z}`, 1)
+      sendCounts.set(`${target.position.x}:${target.position.y}:${target.position.z}`, 1)
     }
     // Movement: sprint while open, dead stop while held.
     if (!state.hold) botZ = Math.min(127.5, botZ + 7.192 * tickMs / 1000)

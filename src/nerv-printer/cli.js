@@ -1173,7 +1173,16 @@ function installVanillaSpeed(bot, config) {
     }
 
     const maxSafeBps = 7.192
-    const targetBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, 7.123) : 7.123
+    // Printing traversal speed (user spec): while a band prints, walk at
+    // printingWalkBps (default 5) -- at linesPerRun 4 that is 20 cells/s
+    // arriving against the 30 bps print budget, so the printer ALWAYS stays
+    // ahead and the first pass cannot miss; a 4x128 band lands ~26-30s.
+    // Outside printing the normal boost target applies. The movement leash
+    // remains the hard guarantee on top (never >2 blocks past unsent cells).
+    const printingBps = Math.min(maxSafeBps, Math.max(1.0, toNumber(advanced.printingWalkBps, 5)))
+    const printing = bot.__nervBandPlanActive === true
+    const baseBps = advanced.vanillaSpeedBps != null ? toNumber(advanced.vanillaSpeedBps, 7.123) : 7.123
+    const targetBps = printing ? printingBps : baseBps
     const serverTps = bot.__nervServerTps || 20.0
     // Dynamic TPS speed throttling with hysteresis: full boost at TPS >= 19,
     // fallback 5.6 bps below 17, and the band between retains the previous mode
@@ -18814,7 +18823,7 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
 // reads -- cheap enough for every placement wake.
 function computeTraversalLeashState(options) {
   const {
-    targets, seen, sentCounts, stallSkipped,
+    targets, seen, sendCounts, stallSkipped,
     botTravelCoord, travelCoordOf,
     leashBlocks = 2, maxEnforceBehind = 8
   } = options
@@ -18824,7 +18833,7 @@ function computeTraversalLeashState(options) {
     const travel = travelCoordOf(target)
     if (travel > botTravelCoord) continue // ahead of the bot: not passed yet
     const key = `${target.position.x}:${target.position.y}:${target.position.z}`
-    if (seen.has(key) || (sentCounts.get(key) || 0) > 0 || stallSkipped.has(key)) continue
+    if (seen.has(key) || (sendCounts.get(key) || 0) > 0 || stallSkipped.has(key)) continue
     const gap = botTravelCoord - travel
     // Deadlock guard: cells far behind (resumed-job damage, mid-band entry)
     // belong to the entry drain and repair passes, not the leash. Enforcing
