@@ -300,11 +300,15 @@ test('step 4: position-derived plan clock and live reach gate', () => {
   assert.match(batch, /bandPlan\.pacing\.find\(\(s\) => planTick >= s\.fromTick && planTick < s\.toTick\)/)
   assert.match(batch, /const slowNow = planPaceWalk \|\|/)
   // Every planned emission passes a live reach gate before the packet goes
-  // out -- eligibility IS reach (the emission loop's eligible scan is
-  // bounded by the liveReach2 sphere).
+  // out -- eligibility IS reach, position-aware: ahead cells use the
+  // lag-reduced sphere; trailing or leash-held cells use the full placeRange
+  // sphere (a flat reduced reach starved trailing cells out of eligibility
+  // forever and deadlocked the band -- observed live as placeCalls=0 for
+  // 15+ min with leashHold=39/39).
   const eligibleAt = batch.indexOf('const eligible = []')
   assert.ok(eligibleAt >= 0)
-  assert.match(batch.slice(eligibleAt - 1200, eligibleAt), /liveReach2/, 'the reach sphere gates eligibility')
+  assert.match(batch.slice(eligibleAt - 1400, eligibleAt + 1200), /const fullReach2 = placeRange \* placeRange/, 'full reach sphere must exist')
+  assert.match(batch.slice(eligibleAt - 1400, eligibleAt + 1200), /const reach2 = \(trailing \|\| leash\.hold\) \? fullReach2 : aheadReach2/, 'the position-aware reach sphere gates eligibility')
   // Schedule-debt pacing: the bot walks when due-but-unsent cells pile up.
   assert.match(batch, /bot\.__nervTraversalSlow === true \? liveDue > 0 : liveDue > 4/)
 })

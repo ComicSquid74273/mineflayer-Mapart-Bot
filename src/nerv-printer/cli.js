@@ -19692,7 +19692,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         leashBlocks: Math.max(0, toNumber(advanced.traversalLeashBlocks, 2)),
         maxEnforceBehind: Math.max(2, toNumber(advanced.traversalLeashMaxBehind, 2 + placeRange + 2))
       })
-      bot.__nervTraversalHold = leash.hold === true
+      // The leash never gates repair movement: inline-repair segments walk
+      // BACK to passed cells by design, so holding them on "you passed an
+      // unsent cell" deadlocks the exact fallback that exists to fix such
+      // cells. Repair keeps its full navigation authority; the leash enforces
+      // only forward print traversal.
+      const leashHolding = leash.hold === true && currentAction !== 'inline-repair'
+      bot.__nervTraversalHold = leashHolding
       if (leash.hold) prof.leashHold += 1
       if (Date.now() - prof.at >= 1000) {
         const avgPlaceMs = prof.placeCalls > 0 ? (prof.placeMs / prof.placeCalls).toFixed(1) : '0'
@@ -19991,7 +19997,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
               const perTickCap = Math.max(1, Math.trunc(toNumber(advanced.bandSchedulerBlocksPerTick, 4)))
               const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
-              const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
+              const planLagBlocks = Math.max(0, toNumber(advanced.bandSchedulerLagBlocks, 1.4))
               // PRINT AHEAD, NEVER WALK PAST. The old one-shot tick windows
               // (emitTick..exit+10) starved the printer whenever staging or
               // planTick drifted: cells died unprinted while the bot walked
@@ -20002,6 +20008,19 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               // first. A skipped cell is re-offered next wake until it
               // prints or leaves reach; nothing can die by timing. The
               // movement leash guarantees the bot never leaves it behind.
+              //
+              // POSITION-AWARE REACH: the lag margin shrinks reach only for
+              // cells AHEAD of travel -- by the time the server processes the
+              // packet the bot has advanced toward them. A cell at or behind
+              // the travel line is being left BEHIND: the current eye
+              // position is the best it will ever get, and a leash-held bot
+              // is stationary so there is no lag at all. One flat reduced
+              // reach starved trailing/lateral cells out of eligibility
+              // forever; the leash then held the walk for a cell emission
+              // could never offer, and the band froze solid (observed live:
+              // placeCalls=0, leashHold=39/39, tick frozen 15+ min).
+              const fullReach2 = placeRange * placeRange
+              const aheadReach2 = Math.max(1, placeRange - planLagBlocks) ** 2
               const heldName = String(bot.heldItem?.name || '')
               const eligible = []
               for (const cell of bandPlan.cells) {
@@ -20011,7 +20030,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 const dy = eyeY - (tp.y + 0.5)
                 const dz = bot.entity.position.z - (tp.z + 0.5)
                 const d2 = dx * dx + dy * dy + dz * dz
-                if (d2 > liveReach2) continue
+                const trailing = (tp.z - bot.entity.position.z) * leashDir <= 0.5
+                const reach2 = (trailing || leash.hold) ? fullReach2 : aheadReach2
+                if (d2 > reach2) continue
                 const Vec3Plan = bot.entity.position.constructor
                 const actual = bot.blockAt(new Vec3Plan(tp.x, tp.y, tp.z))
                 if (actual?.name === cell.target.blockName) {
