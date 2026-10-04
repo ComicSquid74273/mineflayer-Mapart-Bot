@@ -17222,8 +17222,12 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   let heldUsable = isHeldReady
   if (isHeldReady) {
     const effective = effectiveHeldCount(bot)
-    const heldCount = Number(bot.heldItem?.count) || 0
-    if (effective != null && effective <= 0 && heldCount <= 2) {
+    if (effective != null && effective <= 0) {
+      // effective = view count minus sends-not-yet-echoed. The old
+      // `&& heldCount <= 2` required the VIEW to show the drain too, but the
+      // view lags the server by an RTT -- at full budget the ledger hit -16
+      // (16 empty-hand sends the server silently dropped) while the view
+      // still showed a healthy stack. effective <= 0 alone is the truth.
       if (findHotbarIndexForItem(bot, target.blockName) >= 0 || String(offHandStack?.name || '') === target.blockName) {
         heldUsable = false // another stack exists: flip onto it
       } else {
@@ -19991,7 +19995,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               if (pendingSwapSlots.length >= 3) break
               const source = findBestInventorySlotForItem(bot, op.inColour)
               if (!source) {
-                op.__done = 'no-source'
+                // NOT terminal: band 2 of the 00:24 run latched every op
+                // 'no-source' at band start (stock still arriving from the
+                // entry pull) and never staged a single colour after it --
+                // one colour printed all band, everything else first-run
+                // missed. Retry every wake while the plan still needs the
+                // colour; latch only when it will never be needed again.
+                if (planNextUseTick(op.inColour, stagePlanTick) < 0) op.__done = 'no-source-final'
                 continue
               }
               let dest = pickStagingSlot(op.intoSlot, op.inColour)
