@@ -19983,61 +19983,41 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const perTickCap = Math.max(1, Math.trunc(toNumber(advanced.bandSchedulerBlocksPerTick, 4)))
               const eyeY = bot.entity.position.y + (Number.isFinite(bot.entity.eyeHeight) ? bot.entity.eyeHeight : 1.62)
               const liveReach2 = Math.max(1, placeRange - toNumber(advanced.bandSchedulerLagBlocks, 1.4)) ** 2
+              // PRINT AHEAD, NEVER WALK PAST. The old one-shot tick windows
+              // (emitTick..exit+10) starved the printer whenever staging or
+              // planTick drifted: cells died unprinted while the bot walked
+              // past (placeCalls=0 with the loop awake at 38 wakes/s,
+              // measured live). Eligibility is LIVE REACH ONLY -- every
+              // in-reach cell the world has not confirmed is offerable on
+              // every wake, colour-coherent with the held stack, closest
+              // first. A skipped cell is re-offered next wake until it
+              // prints or leaves reach; nothing can die by timing. The
+              // movement leash guarantees the bot never leaves it behind.
+              const heldName = String(bot.heldItem?.name || '')
+              const eligible = []
               for (const cell of bandPlan.cells) {
-                if (burstTargets.length >= allowed) break
-                if (planEmittedThisTick >= perTickCap) break
-                if (cell.emitTick > planTick || planTick > cell.exit + 10) continue
-                if (burstExcluded.has(cell.key)) continue
+                if (burstExcluded.has(cell.key) || seen.has(cell.key)) continue
                 const tp = cell.target.position
                 const dx = bot.entity.position.x - (tp.x + 0.5)
                 const dy = eyeY - (tp.y + 0.5)
                 const dz = bot.entity.position.z - (tp.z + 0.5)
-                if (dx * dx + dy * dy + dz * dz > liveReach2) continue
+                const d2 = dx * dx + dy * dy + dz * dz
+                if (d2 > liveReach2) continue
                 const Vec3Plan = bot.entity.position.constructor
                 const actual = bot.blockAt(new Vec3Plan(tp.x, tp.y, tp.z))
                 if (actual?.name === cell.target.blockName) {
                   markTargetPlacedInWorld(cell.target, cell.key)
                   continue
                 }
+                eligible.push({ cell, d2, colourMismatch: cell.target.blockName !== heldName ? 1 : 0 })
+              }
+              eligible.sort((l, r) => l.colourMismatch - r.colourMismatch || l.d2 - r.d2)
+              for (const { cell, colourMismatch } of eligible) {
+                if (burstTargets.length >= allowed || planEmittedThisTick >= perTickCap) break
                 burstTargets.push(cell.target)
                 planEmittedThisTick += 1
-                emitScheduled += 1
-              }
-              // Catch-up pass: schedule-tied emission is break-even by
-              // construction (slowing down slows emission equally), so spare
-              // per-tick capacity prints AHEAD of schedule -- any unsent
-              // in-reach cell, closest first. The buffer this builds absorbs
-              // sprint spikes instead of letting debt pile into repair.
-              if (burstTargets.length < allowed && planEmittedThisTick < perTickCap) {
-                const ahead = []
-                // Colour-coherent fill: prefer cells matching what the hand
-                // already holds, then distance -- mixing colours against the
-                // scheduled pass churns held_item_slot selects every wake and
-                // steals the server's interaction budget.
-                const heldName = String(bot.heldItem?.name || '')
-                for (const cell of bandPlan.cells) {
-                  if (burstExcluded.has(cell.key) || seen.has(cell.key)) continue
-                  const tp = cell.target.position
-                  const dx = bot.entity.position.x - (tp.x + 0.5)
-                  const dy = eyeY - (tp.y + 0.5)
-                  const dz = bot.entity.position.z - (tp.z + 0.5)
-                  const d2 = dx * dx + dy * dy + dz * dz
-                  if (d2 > liveReach2) continue
-                  ahead.push({ cell, d2, colourMismatch: cell.target.blockName !== heldName ? 1 : 0 })
-                }
-                ahead.sort((l, r) => l.colourMismatch - r.colourMismatch || l.d2 - r.d2)
-                for (const { cell } of ahead) {
-                  if (burstTargets.length >= allowed || planEmittedThisTick >= perTickCap) break
-                  const Vec3Plan = bot.entity.position.constructor
-                  const actual = bot.blockAt(new Vec3Plan(cell.target.position.x, cell.target.position.y, cell.target.position.z))
-                  if (actual?.name === cell.target.blockName) {
-                    markTargetPlacedInWorld(cell.target, cell.key)
-                    continue
-                  }
-                  burstTargets.push(cell.target)
-                  planEmittedThisTick += 1
-                  emitAhead += 1
-                }
+                if (colourMismatch) emitAhead += 1
+                else emitScheduled += 1
               }
               if (burstTargets.length === 0) emitEmptyWakes += 1
             }
