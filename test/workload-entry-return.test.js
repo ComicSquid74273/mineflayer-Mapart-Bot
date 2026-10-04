@@ -238,7 +238,7 @@ test('the burst gate re-reads stock rather than trusting a one-shot check', () =
   // The availability map must be rebuilt from live slot contents each tick. Caching it
   // across ticks is how a burst ends up committing against stock a previous tick spent.
   const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
-  const loop = source.slice(loopStart, loopStart + 26000)
+  const loop = source.slice(loopStart, loopStart + 32000)
 
   assert.match(loop, /const availability = new Map\(\)/)
   assert.match(loop, /for \(let index = 0; index < 9; index \+= 1\) \{/)

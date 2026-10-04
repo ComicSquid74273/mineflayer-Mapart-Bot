@@ -9819,7 +9819,11 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
         paused = false
       }
 
-      if (paused || bot.__nervInventorySwapActive === true) {
+      // Movement leash: the traversal hold stops forward movement while the
+      // printer is >leashBlocks behind -- same pause semantics as an
+      // inventory swap settle (forward off, velocity zeroed), released the
+      // moment the lagging cell is sent.
+      if (paused || bot.__nervInventorySwapActive === true || bot.__nervTraversalHold === true) {
         bot.setControlState('forward', false)
         bot.setControlState('sprint', false)
         if (bot.entity?.velocity) {
@@ -18792,6 +18796,35 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   return { placed, already, skipped, seen: seen.size + latencySafeSeen, missing }
 }
 
+// Movement leash (user directive): while printing a lane the bot stays
+// ~leashBlocks behind the printing -- it may never walk past a lane cell it
+// has not at least SENT. THM semantics: the echo never gates movement; the
+// send ledger (sendCounts) is local and instant, so the leash can never be
+// slowed by server round trips. Pure function over batch state, no world
+// reads -- cheap enough for every placement wake.
+function computeTraversalLeashState(options) {
+  const {
+    targets, seen, sentCounts, stallSkipped,
+    botTravelCoord, travelCoordOf,
+    leashBlocks = 2, maxEnforceBehind = 8
+  } = options
+  let behind = 0
+  for (const target of targets) {
+    if (!target?.position) continue
+    const travel = travelCoordOf(target)
+    if (travel > botTravelCoord) continue // ahead of the bot: not passed yet
+    const key = `${target.position.x}:${target.position.y}:${target.position.z}`
+    if (seen.has(key) || (sentCounts.get(key) || 0) > 0 || stallSkipped.has(key)) continue
+    const gap = botTravelCoord - travel
+    // Deadlock guard: cells far behind (resumed-job damage, mid-band entry)
+    // belong to the entry drain and repair passes, not the leash. Enforcing
+    // them would freeze the walk at band start forever.
+    if (gap > maxEnforceBehind) continue
+    if (gap > behind) behind = gap
+  }
+  return { hold: behind > leashBlocks, behind }
+}
+
 async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true, options = {}) {
   if (!batchTargets.length) {
     return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
@@ -19612,6 +19645,27 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       }
 
       const now = Date.now()
+      // Movement leash: never walk past unprinted cells. The bot may be at
+      // most leashBlocks (default 2) past the first lane cell it has passed
+      // but not yet SENT. Pure local state -- no echo, no confirmation, no
+      // world reads. The straight-walk controller's pause branch honors the
+      // flag; release is instant because it is arithmetic, not a latch.
+      const leashDir = bot.__nervTraversalDirection === 'south' ? 1 : -1
+      const leash = computeTraversalLeashState({
+        targets: batchTargets,
+        seen,
+        sentCounts,
+        stallSkipped,
+        botTravelCoord: leashDir * bot.entity.position.z,
+        travelCoordOf: (target) => leashDir * target.position.z,
+        leashBlocks: Math.max(0, toNumber(advanced.traversalLeashBlocks, 2)),
+        maxEnforceBehind: Math.max(2, toNumber(advanced.traversalLeashMaxBehind, 2 + placeRange + 2))
+      })
+      bot.__nervTraversalHold = leash.hold === true
+      if (leash.hold && Date.now() - (bot.__nervLeashLoggedAt || 0) >= 1000) {
+        bot.__nervLeashLoggedAt = Date.now()
+        console.log(`[TRAVERSAL-LEASH] engaged behind=${leash.behind.toFixed(1)} action=${currentAction || 'place'}`)
+      }
       logPingDiagnostic(bot, config, 'placement-loop', {
         action: currentAction || 'place',
         goal: currentGoal ? `${currentGoal.x},${currentGoal.y},${currentGoal.z}` : 'none'
@@ -19688,7 +19742,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           }
           if (Date.now() - (bot.__nervPlanDebtLoggedAt || 0) >= 1000) {
             bot.__nervPlanDebtLoggedAt = Date.now()
-            console.log(`[PLAN-DEBT] tick=${planTick} live=${liveDue} dead=${deadDue} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true} wakes=${emitWakes} sched=${emitScheduled} ahead=${emitAhead} empty=${emitEmptyWakes}`)
+            console.log(`[PLAN-DEBT] tick=${planTick} live=${liveDue} dead=${deadDue} deferred=${planDeferredColors.size} walk=${bot.__nervTraversalSlow === true} leash=${leash.hold ? 'hold' : 'open'}(${leash.behind.toFixed(1)}) wakes=${emitWakes} sched=${emitScheduled} ahead=${emitAhead} empty=${emitEmptyWakes}`)
             emitWakes = 0
             emitScheduled = 0
             emitAhead = 0
@@ -20554,6 +20608,8 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     if (ackTracker) ackTracker.settlers.delete(handleAckSettle)
     delete bot.__nervActiveBatchTargets
     delete bot.__nervTraversalDirection
+    delete bot.__nervTraversalHold
+    delete bot.__nervLeashLoggedAt
     delete bot.__nervTraversalSlow
     delete bot.__nervTraversalWantSprint
     await placementLoop
