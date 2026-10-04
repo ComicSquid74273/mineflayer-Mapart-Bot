@@ -19606,9 +19606,17 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     }
   }
 
+  // PRINT-PROF: one line per second naming where the placement loop's time
+  // goes -- wakes, gate waits, candidate scans, and the placement calls
+  // themselves. The user-visible symptom (3-5 carpets/s against a 30 bps
+  // budget) has survived four rounds of log archaeology; this makes the
+  // hot path self-report instead.
+  const prof = { at: Date.now(), wakes: 0, gateMs: 0, alertMs: 0, collectMs: 0, placeCalls: 0, placeMs: 0, sends: 0, leashHold: 0, lastAllowed: 0 }
+
   const placementLoop = observeBackgroundTask((async () => {
     while (active) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
+      prof.wakes += 1
       if (shouldUseLatencySafeMode(bot, config, 'placement').active) {
         latencySafeInterrupted = true
         active = false
@@ -19618,7 +19626,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       }
       if (!isWorkloadPlatformReady()) {
         if (!checkpointMoveInProgress) {
+          const gateStart = Date.now()
           await waitForWorkloadPlatformReady('workload-placement-loop')
+          prof.gateMs += Date.now() - gateStart
         } else {
           // This branch previously parked SILENTLY for as long as readiness
           // stayed false -- the only code path that could stop walk+placement
@@ -19641,7 +19651,9 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         continue
       }
       if (inlineRepairEnabled) {
+        const alertStart = Date.now()
         scanNearbyRepairAlerts()
+        prof.alertMs += Date.now() - alertStart
       }
 
       const now = Date.now()
@@ -19662,6 +19674,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         maxEnforceBehind: Math.max(2, toNumber(advanced.traversalLeashMaxBehind, 2 + placeRange + 2))
       })
       bot.__nervTraversalHold = leash.hold === true
+      if (leash.hold) prof.leashHold += 1
+      if (Date.now() - prof.at >= 1000) {
+        const avgPlaceMs = prof.placeCalls > 0 ? (prof.placeMs / prof.placeCalls).toFixed(1) : '0'
+        console.log(`[PRINT-PROF] wakes=${prof.wakes} gateMs=${prof.gateMs} alertMs=${prof.alertMs} collectMs=${prof.collectMs} placeCalls=${prof.placeCalls} placeMs=${prof.placeMs} avgPlaceMs=${avgPlaceMs} sends=${prof.sends} leashHold=${prof.leashHold}/${prof.wakes} action=${currentAction || 'place'}`)
+        prof.at = Date.now()
+        prof.wakes = 0; prof.gateMs = 0; prof.alertMs = 0; prof.collectMs = 0
+        prof.placeCalls = 0; prof.placeMs = 0; prof.sends = 0; prof.leashHold = 0
+      }
       if (leash.hold && Date.now() - (bot.__nervLeashLoggedAt || 0) >= 1000) {
         bot.__nervLeashLoggedAt = Date.now()
         console.log(`[TRAVERSAL-LEASH] engaged behind=${leash.behind.toFixed(1)} action=${currentAction || 'place'}`)
@@ -20017,6 +20037,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             burstTargets = []
           }
           if (!bandPlan) {
+            const collectStart = Date.now()
             burstTargets = collectNervScannerCandidates(
               bot,
               config,
@@ -20027,8 +20048,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               retryPriority,
               allowed
             )
+            prof.collectMs += Date.now() - collectStart
           }
         } else {
+          const collectStart = Date.now()
           burstTargets = collectNervScannerCandidates(
             bot,
             config,
@@ -20039,6 +20062,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             retryPriority,
             allowed
           )
+          prof.collectMs += Date.now() - collectStart
         }
 
         // Readiness gate: the burst never starts with insufficient material.
@@ -20134,12 +20158,16 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           const key = `${target.position.x}:${target.position.y}:${target.position.z}`
           burstExcluded.add(key)
           notePlacementAttempt(target)
+          prof.placeCalls += 1
 
           try {
+            const placeStart = Date.now()
             const result = await placeNervScannerTarget(bot, config, target)
+            prof.placeMs += Date.now() - placeStart
 
             if (result.state === 'placed') {
               placed += 1
+              prof.sends += 1
               if (!result.offhand && Number.isFinite(bot.quickBarSlot)) bot.__nervInFlight?.noteSend(bot.quickBarSlot)
               // Meteor-printer semantics: a sent packet is not a printed carpet.
               // The server echoes accepted placements into the client world; a
