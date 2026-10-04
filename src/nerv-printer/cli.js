@@ -19676,7 +19676,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       const leash = computeTraversalLeashState({
         targets: batchTargets,
         seen,
-        sentCounts,
+        sendCounts,
         stallSkipped,
         botTravelCoord: leashDir * bot.entity.position.z,
         travelCoordOf: (target) => leashDir * target.position.z,

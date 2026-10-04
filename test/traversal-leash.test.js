@@ -78,7 +78,7 @@ test('source wiring: hold flag, pause branch, finally cleanup, telemetry', () =>
   const loop = source.slice(loopStart, source.indexOf('\nasync function ', loopStart + 10))
   assert.match(loop, /computeTraversalLeashState\(\{/)
   assert.match(loop, /bot\.__nervTraversalHold = leash\.hold === true/)
-  assert.match(loop, /sentCounts,/, 'the send ledger (not the echo) drives the leash')
+  assert.match(loop, /sendCounts,/, 'the send ledger (not the echo) drives the leash -- and the real variable name is sendCounts; a typo here killed the placement loop on wake 1 (ReferenceError swallowed by observeBackgroundTask)')
   assert.match(loop, /\[TRAVERSAL-LEASH\] engaged/)
   assert.match(loop, /leash=\$\{leash\.hold \? 'hold' : 'open'\}/, 'PLAN-DEBT carries the leash state')
   assert.match(loop, /delete bot\.__nervTraversalHold/, 'the finally block clears the flag')
