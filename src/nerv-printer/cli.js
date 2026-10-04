@@ -18942,6 +18942,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   let emergencyRestockReason = 'unavailable during placement'
   let emergencyRestockAnchor = null
   let prevCheckpointPos = null
+  // Anchor for the per-lane direction flip only; prevCheckpointPos itself is
+  // owned by the miss-recovery backtrack direction and must not be rewritten
+  // mid-iteration.
+  let prevCheckpointForDirection = null
   let latencySafeInterrupted = false
   let latencySafeSeen = 0
   let lastPlatformPauseLogAt = 0
@@ -19690,7 +19694,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         botTravelCoord: leashDir * bot.entity.position.z,
         travelCoordOf: (target) => leashDir * target.position.z,
         leashBlocks: Math.max(0, toNumber(advanced.traversalLeashBlocks, 2)),
-        maxEnforceBehind: Math.max(2, toNumber(advanced.traversalLeashMaxBehind, 2 + placeRange + 2))
+        // Salvageable horizon: a never-sent cell farther behind than the
+        // full eye reach can never be emitted from here -- holding for it
+        // deadlocks the band (observed behind=5.6 pinned for minutes). Such
+        // cells belong to the lane-end repair sweep, not the leash.
+        maxEnforceBehind: Math.max(2, toNumber(advanced.traversalLeashMaxBehind, placeRange))
       })
       // The leash never gates repair movement: inline-repair segments walk
       // BACK to passed cells by design, so holding them on "you passed an
@@ -20369,6 +20377,17 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
     for (const checkpoint of checkpoints) {
       assertRuntimeContinue(bot, config, 'stopping-during-placement')
       if (emergencyRestockBlock) break
+      // Per-lane travel direction: lanes alternate (south leg, U-turn, north
+      // leg). The leash and the emission reach both classify cells as
+      // "ahead/trailing" against bot.__nervTraversalDirection -- a stale
+      // band-level direction reads every UPCOMING cell of the return lane as
+      // "passed but unsent", holding the walk behind cells the bot is walking
+      // TOWARD (observed live: leash pinned at behind=5.6 for minutes at a
+      // lineEnd). Direction flips exactly when a checkpoint moves it.
+      if (prevCheckpointForDirection && Math.abs(checkpoint.position.z - prevCheckpointForDirection.z) > 1) {
+        bot.__nervTraversalDirection = checkpoint.position.z > prevCheckpointForDirection.z ? 'south' : 'north'
+      }
+      prevCheckpointForDirection = checkpoint.position
       while (true) {
         assertRuntimeContinue(bot, config, 'stopping-during-placement')
         await waitForWorkloadPlatformReady('workload-checkpoint-pre')

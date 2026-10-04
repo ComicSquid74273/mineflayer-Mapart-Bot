@@ -79,6 +79,15 @@ test('source wiring: hold flag, pause branch, finally cleanup, telemetry', () =>
   assert.match(loop, /computeTraversalLeashState\(\{/)
   assert.match(loop, /const leashHolding = leash\.hold === true && currentAction !== 'inline-repair'/, 'the leash never gates inline-repair movement -- repair walks back to passed cells by design; gating it deadlocks the fallback')
   assert.match(loop, /bot\.__nervTraversalHold = leashHolding/)
+  // Per-lane direction: lanes alternate, so the travel direction must flip at
+  // the checkpoint that moves it. A stale band-level direction reads every
+  // UPCOMING cell of the return lane as "passed but unsent" and pins the
+  // leash behind cells the bot is walking TOWARD (observed live at a lineEnd).
+  assert.match(loop, /prevCheckpointForDirection && Math\.abs\(checkpoint\.position\.z - prevCheckpointForDirection\.z\) > 1/)
+  assert.match(loop, /bot\.__nervTraversalDirection = checkpoint\.position\.z > prevCheckpointForDirection\.z \? 'south' : 'north'/)
+  // Salvageable horizon: a never-sent cell farther behind than the full eye
+  // reach can never be emitted from here; holding for it deadlocks the band.
+  assert.match(loop, /maxEnforceBehind: Math\.max\(2, toNumber\(advanced\.traversalLeashMaxBehind, placeRange\)\)/)
   assert.match(loop, /sendCounts,/, 'the send ledger (not the echo) drives the leash -- and the real variable name is sendCounts; a typo here killed the placement loop on wake 1 (ReferenceError swallowed by observeBackgroundTask)')
   assert.match(loop, /\[TRAVERSAL-LEASH\] engaged/)
   assert.match(loop, /leash=\$\{leash\.hold \? 'hold' : 'open'\}/, 'PLAN-DEBT carries the leash state')
