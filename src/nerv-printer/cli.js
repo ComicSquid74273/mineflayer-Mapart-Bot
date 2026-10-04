@@ -654,7 +654,17 @@ function resolveUniqueFilePath(targetPath) {
 
 function observeBackgroundTask(promise) {
   if (promise && typeof promise.catch === 'function') {
-    promise.catch(() => {})
+    // A background task that dies must SAY SO. The old silent catch hid a
+    // dead placement loop for an entire session: the loop crashed on its
+    // first wake, nothing logged, and the only printing left was the
+    // checkpoint drain path at 3-5 carpets/s while everyone hunted rate
+    // limits. Intentional stop errors stay quiet; everything else logs
+    // with its stack.
+    promise.catch((err) => {
+      const code = String(err?.code || '')
+      if (code === 'RUNTIME_STOP_REQUESTED' || code === 'RUNTIME_SESSION_ENDED') return
+      console.log(`[BACKGROUND-TASK-DIED] ${err?.stack || err?.message || err}`)
+    })
   }
   return promise
 }
