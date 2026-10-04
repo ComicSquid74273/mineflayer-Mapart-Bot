@@ -7087,6 +7087,11 @@ function countUpcomingDemand(targets, blockName, limit = Number.MAX_SAFE_INTEGER
 function runProactiveHotbarMaintenance(bot, config, batchTargets, seen) {
   if (!Array.isArray(batchTargets) || batchTargets.length === 0) return { action: 'none' }
   if (!Array.isArray(bot.inventory?.slots)) return { action: 'none' }
+  // Echo-gated: on the heuristic path this ran one mutation PER WAKE with no
+  // pacing -- "refill green_carpet" five times in 114ms, each swap racing
+  // the previous one's echo (the undo pattern). One mutation per echo
+  // window, like every other staging site.
+  if ((bot.__nervSwapWaitUntil || 0) > Date.now() || !echoGateOpen(bot)) return { action: 'none' }
   const advanced = config?.advanced || {}
   const horizonCount = Math.max(1, toNumber(advanced.hotbarLookaheadHorizon, 50))
   const refillThreshold = Math.max(0, toNumber(advanced.hotbarRefillThreshold, 15))
@@ -15998,7 +16003,13 @@ function selectInventoryPlanningTargetsFromPrintBatch(byColRow, colBatch, rowOrd
 
 function getInventoryManagedLinesPerRun(config, linesPerRun) {
   const advanced = config.advanced || {}
-  const configuredRefillRows = Math.max(1, toNumber(advanced.inventoryRefillRows, 4))
+  // Default 2 window-rows (6 columns at linesPerRun 3), not 4: the entry
+  // pull walks targets in order and RETURNS EARLY once required stacks
+  // exceed capacity (getNervRequiredItems), so a 12-column window with 16
+  // colours needed 32+ stacks and silently stocked only the first band --
+  // every later band ran unstocked (first-run misses, <5 carpets/s, repair
+  // crawls). 6 columns worst-case needs ~28 stacks and always fits.
+  const configuredRefillRows = Math.max(1, toNumber(advanced.inventoryRefillRows, 2))
   const rowWidth = Math.max(1, toNumber(linesPerRun, 1))
   const itemsPerLane = rowWidth * 128
   const maxLanes = Math.floor(2176 / itemsPerLane)
@@ -19838,8 +19849,11 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       const proactiveResult = isBandPlanLive(bot)
         ? { action: 'none' }
         : runProactiveHotbarMaintenance(bot, config, batchTargets, seen)
-      if (proactiveResult.action !== 'none' && placementNoiseLogsEnabled(config)) {
-        console.log(`[HOTBAR-PROACTIVE] ${proactiveResult.action} ${proactiveResult.blockName}`)
+      if (proactiveResult.action !== 'none') {
+        bot.__nervSwapWaitUntil = Date.now() + 150 // one mutation per echo window
+        if (placementNoiseLogsEnabled(config)) {
+          console.log(`[HOTBAR-PROACTIVE] ${proactiveResult.action} ${proactiveResult.blockName}`)
+        }
       }
 
       // Adaptive slow-down (wires the previously dead scannerAdaptive* config):

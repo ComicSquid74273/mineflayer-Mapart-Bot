@@ -21,6 +21,7 @@ function loadProactive() {
   const factory = new Function(`
     const calls = []
     function toNumber(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d }
+    function echoGateOpen() { return true } // idle gate: no pending echoes in tests
     function getHotbarWindowSlot(index) { return 36 + Math.max(0, Math.min(8, Math.floor(Number(index) || 0))) }
     function countUpcomingTargetsByBlock(targets) {
       const demand = new Map()
