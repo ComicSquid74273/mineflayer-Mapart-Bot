@@ -17840,7 +17840,12 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
   const moveTimeoutMs = Math.max(1000, toNumber(advanced.repairMoveTimeoutMs, 8000))
   const progressLogMs = Math.max(1000, toNumber(advanced.repairProgressLogMs, 5000))
   const fallbackToStopPlace = advanced.repairFallbackToStopPlace !== false
-  const confirmFastPlacements = advanced.repairConfirmFastPlacements !== false
+  // Fire-and-forget by default (THM semantics, user directive): the inline
+  // per-carpet confirm (ping*1.5+120 ~= 400ms at 6b6t) made every repair and
+  // drain phase print one-carpet-then-pause -- confirmation belongs to the
+  // scheduler (world re-scan + unconfirmedTargets retry), not the placement
+  // call. Opt back in with repairConfirmFastPlacements: true.
+  const confirmFastPlacements = advanced.repairConfirmFastPlacements === true
   const Vec3 = bot.entity.position.constructor
   const processed = new Set()
   const unconfirmedTargets = new Map()
