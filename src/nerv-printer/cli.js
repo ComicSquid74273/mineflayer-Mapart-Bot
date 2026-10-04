@@ -7580,6 +7580,16 @@ function installInFlightLedger (bot) {
   const ledger = {
     slots: new Map(), // hotbar index -> { sent, lastAt }
     echoWindowMs: 800,
+    // The reservation exists to protect the stack BOUNDARY: never spend the
+    // last few items twice while their echoes are unresolved. It is not a
+    // total-unconfirmed-count check: 6b6t/Paper never sends a per-placement
+    // set_slot for the player's own held stack, so unconfirmed sends only
+    // drain via the echo-window decay -- subtracting them all pinned
+    // effectiveCount at <=0 for whole stacks mid-print and the emitter
+    // refused an entire colour for minutes (observed: 3608
+    // stack-in-flight-black skips, black 4x4 patches missing). One burst
+    // worth of reservation keeps the boundary guard and prints the stack.
+    reserveCap: 4,
     noteSend (hotbarIndex) {
       const entry = this.slots.get(hotbarIndex) || { sent: 0, lastAt: 0 }
       entry.sent += 1
@@ -7600,7 +7610,8 @@ function installInFlightLedger (bot) {
         return null
       }
       const stack = bot.inventory?.slots?.[getHotbarWindowSlot(hotbarIndex)]
-      return (Number(stack?.count) || 0) - entry.sent
+      const reserve = Math.min(entry.sent, this.reserveCap)
+      return (Number(stack?.count) || 0) - reserve
     },
     reset () {
       this.slots.clear()
