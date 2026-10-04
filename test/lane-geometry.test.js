@@ -129,6 +129,9 @@ test('adaptive slow-down is wired: backlog engages walk, clear resumes sprint', 
   assert.match(batch, /__nervTraversalSlow/)
   assert.match(batch, /__nervTraversalWantSprint/)
   assert.match(batch, /TRAVERSAL-SLOW/)
+  // Under a live plan the backlog heuristic is echo lag (park 250ms < RTT),
+  // not exhaustion -- it flickered walk on/off every ~200ms for whole bands.
+  assert.match(batch, /if \(bandPlan\) retryBacklog = 0/, 'plan pacing outranks the backlog heuristic')
   // The checkpoint sprint assertion honours the slow flag and stores the intent.
   assert.match(batch, /bot\.__nervTraversalWantSprint = shouldSprint/)
   assert.match(batch, /shouldSprint && bot\.__nervTraversalSlow !== true/)

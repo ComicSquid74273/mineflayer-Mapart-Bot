@@ -19844,6 +19844,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
           if (until > now) continue
           if ((sendCounts.get(pendingKey) || 0) >= 2) retryBacklog += 1
         }
+        // Under a live band plan the backlog heuristic is ECHO LAG, not
+        // exhaustion: the 250ms park is shorter than the 6b6t echo RTT, so at
+        // full budget there are always cells park-expired-but-not-yet-echoed
+        // -- the walk latch flickered engage/release every ~200ms for whole
+        // bands (00:24 band: TRVERSAL-SLOW engaged/released 20+ times, band
+        // crawled). The plan's own pacing (capacity intervals + schedule
+        // debt) is the authority here.
+        if (bandPlan) retryBacklog = 0
         // Hysteresis: a single expired window is normal churn (engage flickered
         // 371 times in one observed band). Engage after the backlog persists a
         // few consecutive ticks; release only after it stays clear.
