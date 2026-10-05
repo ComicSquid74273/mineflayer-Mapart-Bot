@@ -2,6 +2,11 @@
 
 > This was a test project, Skynet-vibecoded.
 
+## Videos
+
+- **Showcase:** [40,000 Map Empire on Minecraft's Biggest Anarchy Server](https://www.youtube.com/watch?v=dY-M5a_-trs)
+- **Tutorial:** [Mineflayer Mapart Bot](https://youtu.be/aHGdIeNDk5c)
+
 ## Mapart Showcase
 
 ### Michael Jackson – Greatest Hits
