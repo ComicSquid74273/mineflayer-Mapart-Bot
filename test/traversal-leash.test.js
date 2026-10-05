@@ -77,8 +77,15 @@ test('source wiring: hold flag, pause branch, finally cleanup, telemetry', () =>
   const loopStart = source.indexOf('async function runNervTimeWorkloadPlacementBatch')
   const loop = source.slice(loopStart, source.indexOf('\nasync function ', loopStart + 10))
   assert.match(loop, /computeTraversalLeashState\(\{/)
-  assert.match(loop, /const leashHolding = leash\.hold === true && currentAction !== 'inline-repair'/, 'the leash never gates inline-repair movement -- repair walks back to passed cells by design; gating it deadlocks the fallback')
+  assert.match(loop, /const leashHolding = leash\.hold === true && !String\(currentAction \|\| ''\)\.includes\('repair'\) && !leashNoEmission/, 'the leash never gates ANY repair movement (inline-repair, lineEnd-repair, ...) and self-releases when emission cannot offer the blocking cell')
   assert.match(loop, /bot\.__nervTraversalHold = leashHolding/)
+  // No-emission release: a hold with zero sends for a few seconds releases
+  // (the cell is beyond emission reach by construction); a send within the
+  // last second keeps the leash authoritative.
+  assert.match(loop, /let lastEmissionSendAt = Date\.now\(\)/)
+  assert.match(loop, /let leashNoEmissionSince = 0/)
+  assert.match(loop, /lastEmissionSendAt = Date\.now\(\)/, 'every emitted placement refreshes the send clock')
+  assert.match(loop, /Date\.now\(\) - lastEmissionSendAt <= 1000/, 'a recent send resets the no-emission timer')
   // Per-lane direction: lanes alternate, so the travel direction must flip at
   // the checkpoint that moves it. A stale band-level direction reads every
   // UPCOMING cell of the return lane as "passed but unsent" and pins the

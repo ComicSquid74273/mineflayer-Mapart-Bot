@@ -203,7 +203,7 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   assert.ok(collect.indexOf('scored.push') < collect.indexOf('scored.sort'))
 
   const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
-  const loop = source.slice(loopStart, loopStart + 31000)
+  const loop = source.slice(loopStart, loopStart + 34000)
   assert.match(loop, /burstTargets = collectNervScannerCandidates\(/)
   assert.match(loop, /for \(let i = 0; i < burstTargets\.length; i \+= 1\)/)
   // One call per tick, not one per placement slot: the heuristic branch and

@@ -18957,6 +18957,10 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   // owned by the miss-recovery backtrack direction and must not be rewritten
   // mid-iteration.
   let prevCheckpointForDirection = null
+  // Leash self-resolution clock: a hold that produces zero emission for a
+  // few seconds is holding for a cell emission can never reach.
+  let lastEmissionSendAt = Date.now()
+  let leashNoEmissionSince = 0
   let latencySafeInterrupted = false
   let latencySafeSeen = 0
   let lastPlatformPauseLogAt = 0
@@ -19711,12 +19715,37 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         // cells belong to the lane-end repair sweep, not the leash.
         maxEnforceBehind: Math.max(2, toNumber(advanced.traversalLeashMaxBehind, placeRange))
       })
-      // The leash never gates repair movement: inline-repair segments walk
-      // BACK to passed cells by design, so holding them on "you passed an
-      // unsent cell" deadlocks the exact fallback that exists to fix such
-      // cells. Repair keeps its full navigation authority; the leash enforces
+      // The leash never gates repair movement: inline-repair and lineEnd-repair
+      // segments walk BACK to passed cells by design, so holding them on "you
+      // passed an unsent cell" deadlocks the exact fallback that exists to fix
+      // such cells (observed live: frozen at bps=0.00 under
+      // action=lineEnd-repair for minutes). Any checkpoint action whose name
+      // contains 'repair' keeps full navigation authority; the leash enforces
       // only forward print traversal.
-      const leashHolding = leash.hold === true && currentAction !== 'inline-repair'
+      // Self-resolution: a hold with ZERO emission for a few seconds means the
+      // blocking cell cannot be offered from here at all (out of even the
+      // full eye reach) -- geometry the leash cannot see (lateral offset, dy).
+      // Holding longer can never help, so the hold releases and the cell stays
+      // with the lane-end repair sweep, which owns everything the printer
+      // could not place in-pass.
+      if (leash.hold) {
+        if (Date.now() - lastEmissionSendAt <= 1000) {
+          leashNoEmissionSince = 0
+        } else if (!leashNoEmissionSince) {
+          leashNoEmissionSince = Date.now()
+        }
+      } else {
+        leashNoEmissionSince = 0
+      }
+      const leashNoEmissionReleaseMs = Math.max(0, toNumber(advanced.traversalLeashNoEmissionReleaseMs, 3000))
+      const leashNoEmission = leash.hold === true
+        && leashNoEmissionSince > 0
+        && Date.now() - leashNoEmissionSince >= leashNoEmissionReleaseMs
+      if (leashNoEmission) {
+        bot.__nervLeashNoEmissionReleasedAt = Date.now()
+        logThrottled('traversal-leash-no-emission', `[TRAVERSAL-LEASH] hold released: no emission for ${Math.round((Date.now() - leashNoEmissionSince) / 1000)}s; cell is out of reach and stays with lane repair. behind=${leash.behind.toFixed(1)} action=${currentAction || 'place'}`, { intervalMs: 5000 })
+      }
+      const leashHolding = leash.hold === true && !String(currentAction || '').includes('repair') && !leashNoEmission
       bot.__nervTraversalHold = leashHolding
       if (leash.hold) prof.leashHold += 1
       if (Date.now() - prof.at >= 1000) {
@@ -20207,6 +20236,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
             if (result.state === 'placed') {
               placed += 1
               prof.sends += 1
+              lastEmissionSendAt = Date.now()
               if (!result.offhand && Number.isFinite(bot.quickBarSlot)) bot.__nervInFlight?.noteSend(bot.quickBarSlot)
               // Meteor-printer semantics: a sent packet is not a printed carpet.
               // The server echoes accepted placements into the client world; a

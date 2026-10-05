@@ -38,9 +38,11 @@ test('the deadlock geometry is reachable only with full reach on trailing cells'
   assert.ok(d2 > aheadReach2, 'deadlock cell must be outside the lag-reduced reach')
 })
 
-test('the movement leash never gates inline-repair movement', () => {
-  const start = source.indexOf('const leashHolding = leash.hold === true && currentAction !== \'inline-repair\'')
-  assert.ok(start >= 0, 'inline-repair leash exemption must exist')
-  const slice = source.slice(start, start + 400)
-  assert.match(slice, /bot\.__nervTraversalHold = leashHolding/)
+test('the movement leash never gates repair movement and self-releases when emission cannot offer the cell', () => {
+  assert.match(source, /const leashHolding = leash\.hold === true && !String\(currentAction \|\| ''\)\.includes\('repair'\) && !leashNoEmission/, 'any repair action (inline-repair, lineEnd-repair) keeps navigation authority; a no-emission hold releases')
+  const start = source.indexOf('bot.__nervTraversalHold = leashHolding')
+  assert.ok(start >= 0, 'hold flag must be wired to the exempted computation')
+  // The release is driven by a send clock refreshed on every placed emission.
+  assert.match(source, /leashNoEmissionSince > 0/)
+  assert.match(source, /Date\.now\(\) - leashNoEmissionSince >= leashNoEmissionReleaseMs/)
 })
