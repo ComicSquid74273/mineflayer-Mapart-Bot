@@ -38,6 +38,15 @@ test('the deadlock geometry is reachable only with full reach on trailing cells'
   assert.ok(d2 > aheadReach2, 'deadlock cell must be outside the lag-reduced reach')
 })
 
+test('dual-hand printing: emission coherence and readiness count the offhand', () => {
+  // A colour resident in the offhand places select-free via hand=1. Ranking
+  // its cells as colour mismatches starved them behind every main-hand
+  // colour and forced swap cycles between transitions (user-observed: the
+  // offhand never printed).
+  assert.match(source, /colourMismatch: \(cell\.target\.blockName !== heldName && cell\.target\.blockName !== offhandCarpetName\) \? 1 : 0/)
+  assert.match(source, /if \(blockName === offhandBurstName\) hotbar \+= Number\(offhandBurstStack\.count\) \|\| 0/, 'offhand stock counts toward burst availability -- it must not be replenished into the hotbar')
+})
+
 test('the movement leash never gates repair movement and self-releases when emission cannot offer the cell', () => {
   assert.match(source, /const leashHolding = leash\.hold === true && !String\(currentAction \|\| ''\)\.includes\('repair'\) && !leashNoEmission/, 'any repair action (inline-repair, lineEnd-repair) keeps navigation authority; a no-emission hold releases')
   const start = source.indexOf('bot.__nervTraversalHold = leashHolding')

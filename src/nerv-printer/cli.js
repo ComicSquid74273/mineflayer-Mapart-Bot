@@ -20070,6 +20070,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               const fullReach2 = placeRange * placeRange
               const aheadReach2 = Math.max(1, placeRange - planLagBlocks) ** 2
               const heldName = String(bot.heldItem?.name || '')
+              // Dual-hand coherence: the offhand is a second print hand. A
+              // cell whose colour lives in the offhand places select-free via
+              // hand=1 (placeTarget's offHandReady path) -- ranking it as a
+              // colour mismatch starved exactly those cells behind every
+              // main-hand colour and forced an A->B->A swap cycle that
+              // skipped printing between transitions.
+              const offhandStack = bot.inventory?.slots?.[45]
+              const offhandCarpetName = Number(offhandStack?.count) > 0 ? String(offhandStack?.name || '') : ''
               const eligible = []
               for (const cell of bandPlan.cells) {
                 if (burstExcluded.has(cell.key) || seen.has(cell.key)) continue
@@ -20087,7 +20095,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                   markTargetPlacedInWorld(cell.target, cell.key)
                   continue
                 }
-                eligible.push({ cell, d2, colourMismatch: cell.target.blockName !== heldName ? 1 : 0 })
+                eligible.push({ cell, d2, colourMismatch: (cell.target.blockName !== heldName && cell.target.blockName !== offhandCarpetName) ? 1 : 0 })
               }
               eligible.sort((l, r) => l.colourMismatch - r.colourMismatch || l.d2 - r.d2)
               for (const { cell, colourMismatch } of eligible) {
@@ -20167,12 +20175,20 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
 
           const availability = new Map()
           const requiredByBlock = new Map()
+          const offhandBurstStack = bot.inventory?.slots?.[45]
+          const offhandBurstName = Number(offhandBurstStack?.count) > 0 ? String(offhandBurstStack?.name || '') : ''
           for (const blockName of burstColors) {
             let hotbar = 0
             for (let index = 0; index < 9; index += 1) {
               const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
               if (stack?.name === blockName) hotbar += getHotbarStackCount(bot, index)
             }
+            // Dual-hand: the offhand is a print hand, not a staging gap. A
+            // colour resident in the offhand places select-free (hand=1), so
+            // its stack counts toward availability -- without this, readiness
+            // kept "replenishing" the offhand colour into the hotbar, moving
+            // the stack away from the hand that can use it without a select.
+            if (blockName === offhandBurstName) hotbar += Number(offhandBurstStack.count) || 0
             const reserved = pendingReservation.get(blockName) || 0
             availability.set(blockName, buildMaterialAvailability(hotbar, countInventoryItems(bot, blockName), reserved))
             requiredByBlock.set(blockName, countUpcomingDemand(burstTargets, blockName))
