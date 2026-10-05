@@ -50,6 +50,17 @@ test('entity intersection: a cell the bot stands in is never sent (fast path + p
   assert.equal(transientCount, 2, 'both transient-reason lambdas must treat entity-blocks as transient')
 })
 
+test('offhand refresh: a stale offhand colour is swapped for a needed-soon colour', () => {
+  // User-observed: the offhand held the same old carpet for whole bands --
+  // never updated to the lane's colours, never used. The pairing rule only
+  // fires on an EMPTY offhand; the refresh rule swaps stale -> needed.
+  assert.match(source, /const offhandNeededSoon = offhandNextUse >= 0 && offhandNextUse <= stagePlanTick \+ 120/)
+  assert.match(source, /if \(!offhandNeededSoon\) \{/, 'a not-needed-soon offhand colour must be refreshed')
+  assert.match(source, /slot: 45, mouseButton: targetSlot, mode: 2/, 'the refresh is one mode-2 swap against the offhand')
+  assert.match(source, /reason=offhand-refresh/)
+  assert.match(source, /if \(index === bot\.quickBarSlot\) continue/, 'the held slot is never the swap partner')
+})
+
 test('dual-hand printing: emission coherence and readiness count the offhand', () => {
   // A colour resident in the offhand places select-free via hand=1. Ranking
   // its cells as colour mismatches starved them behind every main-hand

@@ -19989,6 +19989,45 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
               }
             }
           }
+          // §9.4 offhand refresh: the offhand colour must track the plan.
+          // The offhand only gets a carpet by luck (the eat-cycle food-return
+          // hop drops whatever stack was handy) and §9.3 above pairs only an
+          // EMPTY offhand -- so a colour the lane no longer needs sat there
+          // for whole bands, never updated and never printable (user-observed:
+          // the same old carpet in the offhand). When the offhand colour is
+          // not needed soon, swap it with a needed-soon hotbar colour in ONE
+          // packet: the stale colour lands in the hotbar (selectable), the
+          // needed colour lands in the offhand (select-free, hand=1). The
+          // held slot is never touched.
+          if (stagePlanTick >= 0 && !bot.currentWindow && (bot.__nervSwapWaitUntil || 0) <= stageNowMs) {
+            const offhandNow = bot.inventory?.slots?.[45]
+            if (offhandNow && Number(offhandNow.count) > 0 && String(offhandNow.name || '').endsWith('_carpet')) {
+              const offhandNextUse = planNextUseTick(offhandNow.name, stagePlanTick)
+              const offhandNeededSoon = offhandNextUse >= 0 && offhandNextUse <= stagePlanTick + 120
+              if (!offhandNeededSoon) {
+                let targetSlot = -1
+                let targetColour = ''
+                let bestNextUse = Infinity
+                for (let index = 0; index <= 8; index += 1) {
+                  if (index === bot.quickBarSlot) continue
+                  const stack = bot.inventory?.slots?.[getHotbarWindowSlot(index)]
+                  if (!stack || Number(stack.count) <= 0) continue
+                  const nextUse = planNextUseTick(stack.name, stagePlanTick)
+                  if (nextUse < 0 || nextUse > stagePlanTick + 120 || nextUse >= bestNextUse) continue
+                  bestNextUse = nextUse
+                  targetSlot = index
+                  targetColour = stack.name
+                }
+                if (targetSlot >= 0 && targetColour !== offhandNow.name) {
+                  const cursorItem = serializeCursorItem(bot, bot.inventory)
+                  bot._client.write('window_click', { windowId: 0, stateId: -1, slot: 45, mouseButton: targetSlot, mode: 2, changedSlots: [], cursorItem })
+                  bot.__nervSwapWaitUntil = stageNowMs + 200
+                  noteInventoryMutation(250)
+                  console.log(`[BAND-STAGE] offhand colour=${targetColour} from=slot${targetSlot} evicted=${offhandNow.name} reason=offhand-refresh`)
+                }
+              }
+            }
+          }
           // Demand-driven restage: a colour whose placement deferred (stack
           // drained mid-band, never staged, swap rejected) restages from main
           // the moment it is not resident-with-stock. Echo-truth inventory

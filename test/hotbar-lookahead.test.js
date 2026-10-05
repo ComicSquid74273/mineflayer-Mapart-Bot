@@ -329,7 +329,7 @@ test('hotbar selection prefers the fullest stack, so a drained slot is covered b
 
   // The burst pre-selects its first colour the same way, before any swap is considered.
   const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
-  const loop = source.slice(loopStart, loopStart + 34000)
+  const loop = source.slice(loopStart, loopStart + 40000)
   assert.match(loop, /const primaryColor = burstColors\[0\]/)
   assert.match(loop, /bot\.setQuickBarSlot\(resident\)/)
   const selectAt = loop.indexOf('const primaryColor = burstColors[0]')

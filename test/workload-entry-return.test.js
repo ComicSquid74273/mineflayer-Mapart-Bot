@@ -203,7 +203,7 @@ test('the placement burst collects and sorts once, closest-first, with a reach-e
   assert.ok(collect.indexOf('scored.push') < collect.indexOf('scored.sort'))
 
   const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
-  const loop = source.slice(loopStart, loopStart + 34000)
+  const loop = source.slice(loopStart, loopStart + 40000)
   assert.match(loop, /burstTargets = collectNervScannerCandidates\(/)
   assert.match(loop, /for \(let i = 0; i < burstTargets\.length; i \+= 1\)/)
   // One call per tick, not one per placement slot: the heuristic branch and
@@ -238,7 +238,7 @@ test('the burst gate re-reads stock rather than trusting a one-shot check', () =
   // The availability map must be rebuilt from live slot contents each tick. Caching it
   // across ticks is how a burst ends up committing against stock a previous tick spent.
   const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
-  const loop = source.slice(loopStart, loopStart + 32000)
+  const loop = source.slice(loopStart, loopStart + 38000)
 
   assert.match(loop, /const availability = new Map\(\)/)
   assert.match(loop, /for \(let index = 0; index < 9; index \+= 1\) \{/)
@@ -266,7 +266,7 @@ test('fast placement sends no delta and never forces a look', () => {
 
   // And the burst must not sleep between placements.
   const loopStart = source.indexOf('const placementLoop = observeBackgroundTask', source.indexOf('async function runNervTimeWorkloadPlacementBatch'))
-  const loop = source.slice(loopStart, loopStart + 12000)
+  const loop = source.slice(loopStart, loopStart + 15000)
   assert.doesNotMatch(loop, /scannerInterPlacementDelayMs/)
 })
 
