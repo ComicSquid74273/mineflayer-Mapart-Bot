@@ -38,6 +38,18 @@ test('the deadlock geometry is reachable only with full reach on trailing cells'
   assert.ok(d2 > aheadReach2, 'deadlock cell must be outside the lag-reduced reach')
 })
 
+test('entity intersection: a cell the bot stands in is never sent (fast path + plan eligibility)', () => {
+  // Live regression: the underfoot cell is always closest-scored, was sent
+  // first on every wake, silently rejected by the server every time, and
+  // optimistically marked placed -- one cell re-sent 20+ times froze the band
+  // for 210s at 0 bps and produced the historical 9x re-send storms.
+  assert.match(source, /if \(isFastNoWaitPlacement && targetPos\.y <= Math\.floor\(bot\.entity\.position\.y\)\)/, 'placeTarget fast path must guard horizontal entity intersection')
+  assert.match(source, /return \{ state: 'skip', reason: `entity-blocks-\$\{target\.blockName\}` \}/)
+  assert.match(source, /if \(ehx \* ehx \+ ehz \* ehz < 0\.36\) continue/, 'plan emission eligibility must skip underfoot cells')
+  const transientCount = (source.match(/text\.startsWith\('entity-blocks-'\)/g) || []).length
+  assert.equal(transientCount, 2, 'both transient-reason lambdas must treat entity-blocks as transient')
+})
+
 test('dual-hand printing: emission coherence and readiness count the offhand', () => {
   // A colour resident in the offhand places select-free via hand=1. Ranking
   // its cells as colour mismatches starved them behind every main-hand

@@ -17160,6 +17160,24 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
   if (!support || support.name === 'air') {
     return { state: 'skip', reason: 'missing-support' }
   }
+  // Entity intersection: the server silently rejects block_place into a cell
+  // occupied by the player's own hitbox. On this machine the carpet layer IS
+  // the walking layer, so the cell under the bot's feet is always the
+  // closest-scored candidate -- without this guard it was re-sent first on
+  // every wake, rejected every time, and marked optimistically placed,
+  // producing the historical re-send storms (9x placed/target) and a total
+  // freeze once the leash also held (observed live: one cell sent 20+ times,
+  // 210s at 0 bps). The 3D eye distance (~1.12 straight down) passes the
+  // minPlaceDistance check, so distance alone cannot catch it: the guard is
+  // horizontal, against the feet block. Fast path only -- the slow path
+  // already sidesteps off the cell and places properly.
+  if (isFastNoWaitPlacement && targetPos.y <= Math.floor(bot.entity.position.y)) {
+    const horizDx = bot.entity.position.x - (targetPos.x + 0.5)
+    const horizDz = bot.entity.position.z - (targetPos.z + 0.5)
+    if (horizDx * horizDx + horizDz * horizDz < 0.36) {
+      return { state: 'skip', reason: `entity-blocks-${target.blockName}` }
+    }
+  }
   if (isRepairPass && String(support.name || '').endsWith('_carpet')) {
     return { state: 'skip', reason: `support-is-carpet-possible-wrong-y-${support.name}` }
   }
@@ -18333,7 +18351,7 @@ async function runContinuousPlacementBatch(bot, config, batchTargets, rowOrder, 
   }
   const isTransientPlacementReason = (reason) => {
     const text = String(reason || '')
-    return text === 'unconfirmed-place' || text.startsWith('held-item-desync-')
+    return text === 'unconfirmed-place' || text.startsWith('held-item-desync-') || text.startsWith('entity-blocks-')
   }
   const shouldEmergencyRestockMissingItem = (blockName) => countInventoryItems(bot, blockName) <= 0
   const getUnresolvedTargets = (targets) => getUniqueTargets(scanPlacementErrors(bot, targets, {
@@ -19048,7 +19066,7 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
   }
   const isTransientPlacementReason = (reason) => {
     const text = String(reason || '')
-    return text === 'unconfirmed-place' || text.startsWith('held-item-desync-')
+    return text === 'unconfirmed-place' || text.startsWith('held-item-desync-') || text.startsWith('entity-blocks-')
   }
   const shouldWalkCheckpointStraight = (checkpoint) => {
     return shouldUseStraightWorkloadCheckpoint(checkpoint?.action, straightCheckpointMovement)
@@ -20089,6 +20107,14 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
                 const trailing = (tp.z - bot.entity.position.z) * leashDir <= 0.5
                 const reach2 = (trailing || leash.hold) ? fullReach2 : aheadReach2
                 if (d2 > reach2) continue
+                // Entity intersection (see placeTarget): a cell the bot is
+                // standing in cannot be accepted by the server; offering it
+                // wastes burst slots on guaranteed rejects every wake.
+                if (tp.y <= Math.floor(bot.entity.position.y)) {
+                  const ehx = bot.entity.position.x - (tp.x + 0.5)
+                  const ehz = bot.entity.position.z - (tp.z + 0.5)
+                  if (ehx * ehx + ehz * ehz < 0.36) continue
+                }
                 const Vec3Plan = bot.entity.position.constructor
                 const actual = bot.blockAt(new Vec3Plan(tp.x, tp.y, tp.z))
                 if (actual?.name === cell.target.blockName) {
