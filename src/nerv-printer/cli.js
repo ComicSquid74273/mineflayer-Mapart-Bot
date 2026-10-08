@@ -16851,19 +16851,28 @@ async function prepareWorkloadBatchEntry(bot, config, batchTargets, startOnNorth
     `range=${entryRange} from=${before.x.toFixed(2)} ${before.y.toFixed(2)} ${before.z.toFixed(2)} ` +
     `distance=${beforeDistance.toFixed(2)}`
   )
-  await gotoConfiguredAccess(
-    bot,
-    entry,
-    entry,
-    entryRange,
-    config,
-    'workload-batch-entry-return',
-    {
-      strict: true,
-      avoidLiquids: true,
-      allowVerifiedGaps: false
-    }
-  )
+  // Robust anchor walk: straight physics first (cannot hang), staged strict
+  // navigation second. The strict walk alone wedged at the corridor
+  // (bot11, 2026-10-08): staged segments logged, then silence -- path
+  // computed, walk never completed, no segment timeout.
+  try {
+    await walkToAnchorRobust(bot, config, entry, entryRange, 'entry-return')
+  } catch (robustErr) {
+    console.log(`[NERV-WORKLOAD-ENTRY-RETURN-WARN] robust -> ${robustErr?.message || robustErr}; trying strict staged walk`)
+    await gotoConfiguredAccess(
+      bot,
+      entry,
+      entry,
+      entryRange,
+      config,
+      'workload-batch-entry-return',
+      {
+        strict: true,
+        avoidLiquids: true,
+        allowVerifiedGaps: false
+      }
+    )
+  }
 
   const after = bot?.entity?.position
   const afterDistance = distanceToPoint(after, entry)
@@ -17087,6 +17096,88 @@ function dumpRestockReturnSurroundings(bot) {
   } catch { }
 }
 
+// Robust anchor walk: straight-line movement FIRST, pathfinder machinery
+// second, raw goto last. Ground truth from the surroundings dump
+// (2026-10-08, bot11 corridor): a plainly walkable line -- slab/obsidian
+// step, then open carpet -- that every A*-based walk nonetheless failed
+// to complete (think timeouts, and one staged walk that computed a path
+// and then hop-in-placed forever with no segment timeout). Plain physics
+// cannot hang: walkStraightToPointWithHardTimeout has a hard wall-clock
+// budget, jumps 1-block steps, and crosses carpet/slab floors the way the
+// dump shows them. Every primitive here is time-bounded.
+async function walkToAnchorRobust(bot, config, pos, range, label = 'anchor-walk') {
+  const here = bot?.entity?.position
+  if (!here?.constructor || !Number.isFinite(Number(pos?.x)) || !Number.isFinite(Number(pos?.z))) {
+    throw new Error(`${label}: no usable position`)
+  }
+  const Vec3W = here.constructor
+  const target = new Vec3W(Number(pos.x), here.y, Number(pos.z))
+  const dist = Math.hypot(target.x - here.x, target.z - here.z)
+  const rangeW = Math.max(0.5, toNumber(range, 1))
+
+  // 1) STRAIGHT WALK: hard timeout scaled to distance (sprint 7.2 bps,
+  //    3x slack for steps/turns). Cannot hang.
+  const straightBudgetMs = Math.max(8000, Math.ceil((dist / 7.2) * 3000) + 10000)
+  try {
+    await walkStraightToPointWithHardTimeout(bot, target, rangeW, straightBudgetMs, `${label}-straight`, {
+      config, sprint: true, jump: true
+    })
+    return { method: 'straight' }
+  } catch (straightErr) {
+    console.log(`[${label}-ROBUST-WARN] straight -> ${straightErr?.message || straightErr}; trying staged navigation`)
+    dumpRestockReturnSurroundings(bot)
+  }
+
+  // 2) STAGED MACHINE NAVIGATION (24-block segments, loaded frontiers).
+  try {
+    await gotoConfiguredAccess(bot, pos, pos, rangeW, config, `${label}-staged`, {
+      strict: false,
+      avoidLiquids: true,
+      allowVerifiedGaps: false
+    })
+    return { method: 'staged' }
+  } catch (stagedErr) {
+    console.log(`[${label}-ROBUST-WARN] staged -> ${stagedErr?.message || stagedErr}; trying sidestep escape`)
+    dumpRestockReturnSurroundings(bot)
+  }
+
+  // 3) SIDESTEP ESCAPE + straight legs: no A* at all.
+  const here2 = bot?.entity?.position
+  if (here2?.constructor) {
+    const Vec3E = here2.constructor
+    const dirX = Number(pos.x) - here2.x
+    const dirZ = Number(pos.z) - here2.z
+    const len = Math.hypot(dirX, dirZ) || 1
+    const fx = dirX / len
+    const fz = dirZ / len
+    const perpX = -fz
+    const perpZ = fx
+    for (const side of [1, -1]) {
+      const escapePoint = new Vec3E(here2.x + fx * 6 + perpX * 1.6 * side, here2.y, here2.z + fz * 6 + perpZ * 1.6 * side)
+      try {
+        await walkStraightToPointWithHardTimeout(bot, escapePoint, 0.9, 8000, `${label}-sidestep`, { config, jump: true })
+        await walkStraightToPointWithHardTimeout(bot, new Vec3E(Number(pos.x), here2.y, Number(pos.z)), rangeW, Math.max(20000, straightBudgetMs), `${label}-escape-straight`, {
+          config, sprint: true, jump: true
+        })
+        return { method: `sidestep-${side > 0 ? 'right' : 'left'}` }
+      } catch (escErr) {
+        console.log(`[${label}-ROBUST-WARN] sidestep side=${side} -> ${escErr?.message || escErr}`)
+      }
+    }
+  }
+
+  // 4) LAST RESORT: jump-enabled think-budgeted raw goto.
+  console.log(`[${label}-ROBUST-WARN] all walks failed; last-resort goto`)
+  configurePathfinderMovements(bot, config, { allowJump: true })
+  const goal = new GoalNear(Number(pos.x), Number(pos.y ?? here.y), Number(pos.z), rangeW)
+  await gotoWithTemporaryThinkTimeout(
+    bot,
+    goal,
+    Math.max(2000, toNumber(config?.advanced?.emergencyRestockReturnThinkTimeoutMs, 10000))
+  )
+  return { method: 'goto' }
+}
+
 async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true) {
   if (!batchTargets.length) {
     return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
@@ -17199,74 +17290,13 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       bot.setControlState('back', false)
       bot.setControlState('left', false)
       bot.setControlState('right', false)
-      // The return walk used a raw bot.pathfinder.goto straight at the
-      // anchor. Two failure shapes on bot11 (2026-10-07/08, multi-hour
-      // restock-loop stall): (a) it inherited the chest access's restricted
-      // Movements and could not route past a 1-block obsidian step --
-      // "Took to long to decide path to goal!"; (b) even with fresh
-      // movements it thrashed hop-in-place against the corridor geometry,
-      // resetting the stall timer every ~5s so the watchdog never fired.
-      // Every OTHER long walk on this machine -- dump station (127 blocks),
-      // chest ingress, batch entry returns -- goes through the staged
-      // machine navigation (gotoConfiguredAccess: 24-block ingress staging,
-      // loaded-frontier handling, verified flat routes). Those walks work
-      // through this same area. Route the restock return through the same
-      // machinery; fall back to a jump-enabled think-budgeted goto only if
-      // the staged walk itself fails.
-      try {
-        await gotoConfiguredAccess(bot, pos, pos, anchorRange, config, 'restock-return', {
-          strict: false,
-          avoidLiquids: true,
-          allowVerifiedGaps: false
-        })
-        return true
-      } catch (stagedErr) {
-        console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] staged target=${pos.x} ${pos.y} ${pos.z} -> ${stagedErr?.message || stagedErr}`)
-        dumpRestockReturnSurroundings(bot)
-        // NO-PATHFINDER ESCAPE. Even the staged walk's stage-1 A* timed out
-        // from this pocket (bot11: a lone solid block ahead, normal floor
-        // beside it -- geometry a player sidesteps without thinking). Stop
-        // asking A*: STRAIGHT-walk (basic physics, jump on) to a sidestep
-        // point past the obstruction, then retry the staged walk from open
-        // ground; only then fall back to the jump-enabled goto.
-        const here = bot?.entity?.position
-        if (here?.constructor) {
-          const Vec3Esc = here.constructor
-          const dirX = Number(pos.x) - here.x
-          const dirZ = Number(pos.z) - here.z
-          const len = Math.hypot(dirX, dirZ) || 1
-          const fx = dirX / len
-          const fz = dirZ / len
-          const perpX = -fz
-          const perpZ = fx
-          for (const side of [1, -1]) {
-            const escapePoint = new Vec3Esc(here.x + fx * 6 + perpX * 1.6 * side, here.y, here.z + fz * 6 + perpZ * 1.6 * side)
-            try {
-              await walkStraightToPointWithHardTimeout(bot, escapePoint, 0.9, 6000, 'restock-return-sidestep', { config, jump: true })
-              try {
-                await gotoConfiguredAccess(bot, pos, pos, anchorRange, config, 'restock-return-escaped', {
-                  strict: false,
-                  avoidLiquids: true,
-                  allowVerifiedGaps: false
-                })
-                return true
-              } catch (retryErr) {
-                console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] escaped-side=${side} retry -> ${retryErr?.message || retryErr}; trying the long straight leg`)
-              }
-              await walkStraightToPointWithHardTimeout(bot, new Vec3Esc(Number(pos.x), here.y, Number(pos.z)), anchorRange, 90000, 'restock-return-straight', { config, sprint: true, jump: true })
-              return true
-            } catch (escErr) {
-              console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] sidestep side=${side} -> ${escErr?.message || escErr}`)
-            }
-          }
-        }
-        console.log('[NERV-WORKLOAD-RESTOCK-RETURN-WARN] sidesteps failed; falling back to jump-enabled goto')
-        const thinkTimeoutMs = Math.max(2000, toNumber(advanced.emergencyRestockReturnThinkTimeoutMs, 10000))
-        const walkGoal = () => new GoalNear(pos.x, pos.y, pos.z, anchorRange)
-        configurePathfinderMovements(bot, config, { allowJump: true })
-        await gotoWithTemporaryThinkTimeout(bot, walkGoal(), thinkTimeoutMs)
-        return true
-      }
+      // Robust anchor walk: straight-line physics first (cannot hang), then
+      // staged navigation, sidestep escape, and a think-budgeted goto. The
+      // corridor wedge (bot11, hours across every A*-based primitive) is
+      // trivially straight-walkable per the surroundings dump.
+      const result = await walkToAnchorRobust(bot, config, pos, anchorRange, 'restock-return')
+      console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-OK] method=${result.method}`)
+      return true
     } catch (err) {
       console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] target=${pos.x} ${pos.y} ${pos.z} -> ${err?.message || err}`)
       return false
