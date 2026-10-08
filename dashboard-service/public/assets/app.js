@@ -312,7 +312,7 @@ function formatTime(value) {
   if (!value) return 'n/a'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return 'n/a'
-  return date.toLocaleString()
+  return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })
 }
 
 function formatDuration(value) {
