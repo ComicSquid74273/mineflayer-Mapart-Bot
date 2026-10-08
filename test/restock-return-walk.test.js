@@ -41,6 +41,15 @@ test('the emergency restock return walk uses staged machine navigation, not a ra
   const entryBody = source.slice(entryAt, source.indexOf('async function runNervScannerPlacementBatch', entryAt))
   assert.match(entryBody, /walkToAnchorRobust\(bot, config, entry, entryRange, 'entry-return'\)/)
 
+  // THE LATCH: a stuck sneak edge-clamps the bot -- every primitive failed
+  // on an open corridor because sneak never cleared. Both the robust walk
+  // and the straight walker clear it before moving.
+  assert.match(robust, /bot\.setControlState\('sneak', false\)/, 'robust walk clears sneak')
+  assert.match(robust, /forceStopBotSneaking\(bot\)/)
+  const walkerAt = source.indexOf('async function walkStraightToPointWithHardTimeout')
+  const walker = source.slice(walkerAt, source.indexOf('\n}', source.indexOf("bot.setControlState('jump', jump)", walkerAt)))
+  assert.match(walker, /bot\.setControlState\('sneak', false\)/, 'straight walker clears sneak before moving')
+
   // And the wedge point reports its actual surroundings, so the next
   // occurrence shows the world state instead of another inference chain.
   assert.match(source, /function dumpRestockReturnSurroundings\(bot\)/)

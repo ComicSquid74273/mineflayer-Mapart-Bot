@@ -8680,6 +8680,11 @@ async function walkStraightToPointWithHardTimeout(bot, point, range, timeoutMs, 
   try {
     try { bot.pathfinder?.stop?.() } catch { }
     try { bot.pathfinder?.setGoal?.(null) } catch { }
+    // A latched sneak edge-clamps the bot to its block: forward+jump produce
+    // in-place hops and every caller concludes the route is impassable
+    // (bot11 corridor, 2026-10-08 -- all walk primitives "failed" on an
+    // open corridor while only sneak was stuck). Clear it before walking.
+    try { bot.setControlState('sneak', false) } catch { }
     bot.setControlState('back', false)
     bot.setControlState('left', false)
     bot.setControlState('right', false)
@@ -17110,6 +17115,15 @@ async function walkToAnchorRobust(bot, config, pos, range, label = 'anchor-walk'
   if (!here?.constructor || !Number.isFinite(Number(pos?.x)) || !Number.isFinite(Number(pos?.z))) {
     throw new Error(`${label}: no usable position`)
   }
+  // SNEAK LATCH (the actual corridor wedge, 2026-10-08): repair placements
+  // set sneak=true per carpet and an error path can leave it latched. A
+  // sneaking bot is edge-clamped -- it shuffles ±0.06 blocks but can NEVER
+  // step off its block, which no walk primitive survives (physics,
+  // pathfinder, staged, sidestep all "fail" on a trivially open corridor
+  // while the surroundings dump shows clear cells). Clear it before any
+  // walking, always.
+  try { bot.setControlState('sneak', false) } catch { }
+  try { forceStopBotSneaking(bot) } catch { }
   const Vec3W = here.constructor
   const target = new Vec3W(Number(pos.x), here.y, Number(pos.z))
   const dist = Math.hypot(target.x - here.x, target.z - here.z)
