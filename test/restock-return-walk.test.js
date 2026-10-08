@@ -84,5 +84,5 @@ test('machine navigation never leaks restricted Movements to later raw gotos (ro
   assert.equal((source.match(/\{ allowJump: true \}/g) || []).length, 0, 'no forced allowJump overrides anywhere')
   const robust2 = source.slice(source.indexOf('async function walkToAnchorRobust('))
   assert.match(robust2, /const jumpAllowed = config\?\.printer\?\.allowJump !== false/, 'straight legs derive jump from config')
-  assert.match(robust2, /jump: false\)/, 'the lateral escape never jumps')
+  assert.match(robust2, /`\$\{label\}-lateral`, \{ config, jump: false \}\)/, 'the lateral escape never jumps')
 })
