@@ -17136,8 +17136,27 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
       bot.setControlState('back', false)
       bot.setControlState('left', false)
       bot.setControlState('right', false)
-      await bot.pathfinder.goto(new GoalNear(pos.x, pos.y, pos.z, anchorRange))
-      return true
+      // The raw goto inherited whatever restricted Movements the chest
+      // access left installed globally (step-elevation exclusions,
+      // maxDropDown=0): under those rules a 1-block obsidian step in the
+      // corridor had no route, and the pathfinder burned its entire think
+      // budget -- "Took to long to decide path to goal!" -- leaving the bot
+      // frozen until the 300s watchdog recycled the session (bot11's multi-
+      // hour restock-loop stall, 2026-10-07/08). Reset to NORMAL walking
+      // rules (1-block hops allowed) and put a hard budget on the compute so
+      // a pathological search fails in seconds, then retry once.
+      const thinkTimeoutMs = Math.max(2000, toNumber(advanced.emergencyRestockReturnThinkTimeoutMs, 10000))
+      const walkGoal = () => new GoalNear(pos.x, pos.y, pos.z, anchorRange)
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          configurePathfinderMovements(bot, config, { allowJump: true })
+          await gotoWithTemporaryThinkTimeout(bot, walkGoal(), attempt === 1 ? thinkTimeoutMs : thinkTimeoutMs * 2)
+          return true
+        } catch (err) {
+          console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] attempt=${attempt} target=${pos.x} ${pos.y} ${pos.z} -> ${err?.message || err}`)
+        }
+      }
+      return false
     } catch (err) {
       console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] target=${pos.x} ${pos.y} ${pos.z} -> ${err?.message || err}`)
       return false
