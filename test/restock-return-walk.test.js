@@ -45,3 +45,26 @@ test('the emergency restock return walk uses staged machine navigation, not a ra
   assert.match(source, /function dumpRestockReturnSurroundings\(bot\)/)
   assert.match(source, /\[RESTOCK-RETURN-SURROUNDINGS\]/)
 })
+
+test('machine navigation never leaks restricted Movements to later raw gotos (root cause)', () => {
+  // The corridor wedges (bot11, hours across three walk primitives) all
+  // traced to one root: strict machine access installs restricted
+  // Movements globally and left them installed. gotoConfiguredAccess now
+  // wraps its implementation and ALWAYS restores normal walking rules
+  // (1-block hops legal) and clears sprint suppression on exit.
+  const wrapperAt = source.indexOf('async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, config = null, reason = \'configured-access\', options = {}) {')
+  assert.ok(wrapperAt >= 0, 'the public wrapper must exist')
+  const wrapper = source.slice(wrapperAt, source.indexOf('async function gotoConfiguredAccessInner', wrapperAt))
+  assert.match(wrapper, /return await gotoConfiguredAccessInner\(/)
+  assert.match(wrapper, /finally \{/)
+  assert.match(wrapper, /configurePathfinderMovements\(bot, config \|\| bot\.__nervConfig \|\| \{\}, \{ allowJump: true \}\)/)
+  assert.match(wrapper, /__nervMachinePathSprintSuppressed = false/)
+  assert.match(wrapper, /__nervMachinePathSprintForced = false/)
+  assert.match(source, /async function gotoConfiguredAccessInner\(/, 'the implementation is renamed and wrapped')
+
+  // Defense in depth: the repair family's raw gotos each reinstall normal
+  // walking rules before moving, so even a future leak elsewhere cannot
+  // wedge a repair move.
+  const guardCount = (source.match(/configurePathfinderMovements\(bot, config, \{ allowJump: true \}\)/g) || []).length
+  assert.ok(guardCount >= 4, `expected >=4 allowJump guards (restock fallback + 3 repair gotos), found ${guardCount}`)
+})

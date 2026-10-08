@@ -9979,7 +9979,28 @@ function logMachinePathSprintDecision(reason, decision) {
   }
 }
 
+// LEAK FIX (root cause of the corridor wedges): machine navigation installs
+// restricted Movements GLOBALLY (maxDropDown 0, step-elevation exclusions,
+// sprint suppression) for precise chest/corridor access -- and used to leave
+// them installed after the walk finished. Every raw bot.pathfinder.goto call
+// site elsewhere (repair moves, checkpoint fallbacks, dump walks, restock
+// returns) then inherited restrictions that forbid the +0.5 slab step beside
+// a lone solid block in a corridor: "Took to long to decide path", 30s move
+// timeouts, hop-in-place thrash -- bot11 wedged for hours across THREE
+// different walk primitives this way. Whatever else happens, machine
+// navigation now always leaves NORMAL walking rules (1-block hops legal)
+// and clear sprint suppression behind.
 async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, config = null, reason = 'configured-access', options = {}) {
+  try {
+    return await gotoConfiguredAccessInner(bot, position, accessPosition, range, config, reason, options)
+  } finally {
+    try { configurePathfinderMovements(bot, config || bot.__nervConfig || {}, { allowJump: true }) } catch { }
+    try { bot.__nervMachinePathSprintSuppressed = false } catch { }
+    try { bot.__nervMachinePathSprintForced = false } catch { }
+  }
+}
+
+async function gotoConfiguredAccessInner(bot, position, accessPosition, range = 2, config = null, reason = 'configured-access', options = {}) {
   const goalPos = accessPosition || position
   if (!goalPos) throw new Error('Missing configured access position')
   const strict = options.strict === true
@@ -15638,6 +15659,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       if (!hasFloor || !feetOpen || !headOpen) continue
 
       try {
+        configurePathfinderMovements(bot, config, { allowJump: true })
         await bot.pathfinder.goto(new GoalNear(candidate.x, candidate.y, candidate.z, 0))
         break
       } catch {
@@ -15893,6 +15915,9 @@ async function repairTargets(bot, config, targets, placeRange) {
     const [target] = remaining.splice(bestIndex, 1)
     try {
       if (Math.sqrt(bestDist) > Math.max(1, placeRange - 0.25)) {
+        // Normal walking rules (see the gotoConfiguredAccess leak fix): never
+        // inherit restricted machine-access Movements on a repair move.
+        configurePathfinderMovements(bot, config, { allowJump: true })
         await bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, repairGoalRange))
       }
 
@@ -16294,6 +16319,11 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
       }
 
       try {
+        // Normal walking rules for the repair move: a stale restricted
+        // Movements set (leaked from machine access before the leak fix)
+        // turned every repair move toward the far lane into a 30s timeout
+        // and a skipped cell (bot11's repair-phase wedge).
+        configurePathfinderMovements(bot, config, { allowJump: true })
         const repairMovePromise = bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
         repairMovePromise.catch(() => {})
         await Promise.race([
