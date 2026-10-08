@@ -5163,6 +5163,10 @@ function startPlatformStallReconnectWatchdog(bot, config) {
       if (now - lastLogAt >= settings.logMs) {
         console.log(`[PLATFORM-STALL] phase=${progress.phase} state=${progress.state || 'n/a'} action=${progress.action || 'n/a'} same-position=${Math.round(stalledMs / 1000)}s/${Math.round(settings.timeoutMs / 1000)}s pos=${formatBotPosition(bot)}`)
         lastLogAt = now
+        // Ground truth on every stall window: what the bot's world actually
+        // shows around it. Three corridor wedges were debugged by inference;
+        // this prints the cells themselves (throttled internally to 1/min).
+        dumpRestockReturnSurroundings(bot)
       }
       return
     }
