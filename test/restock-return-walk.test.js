@@ -7,28 +7,26 @@ const path = require('node:path')
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'nerv-printer', 'cli.js'), 'utf8')
 
-test('the emergency restock return walk resets pathfinder rules and fails fast', () => {
+test('the emergency restock return walk uses staged machine navigation, not a raw goto', () => {
   const start = source.indexOf('const returnToEmergencyRestockAnchor = async () => {')
   assert.ok(start >= 0, 'returnToEmergencyRestockAnchor must exist')
   const body = source.slice(start, source.indexOf('const isTransientPlacementReason', start))
 
-  // The bug (bot11, 2026-10-07/08): a raw bot.pathfinder.goto inherited the
-  // chest access's restricted Movements (no step-up), could not route past a
-  // 1-block obsidian step, and burned the whole think budget -- the bot then
-  // stood frozen until the 300s watchdog recycled the session. Multi-hour
-  // restock-loop stall.
-  assert.doesNotMatch(body, /await bot\.pathfinder\.goto\(/, 'no raw goto: it inherits stale restricted movements')
+  // The bug (bot11, 2026-10-07/08): a raw bot.pathfinder.goto could not
+  // cross a single 1-block obsidian step in the machine corridor -- first
+  // "Took to long to decide path" under stale restricted Movements, then
+  // hop-in-place thrash that reset the stall timer every ~5s so the
+  // watchdog never fired. Multi-hour restock-loop stall.
+  assert.doesNotMatch(body, /await bot\.pathfinder\.goto\(/, 'no raw goto as the primary walk')
 
-  // Normal walking rules are reinstalled before every attempt, so 1-block
-  // hops (the obsidian) are legal again.
+  // Primary: the same staged machine navigation every other long walk on
+  // the machine uses (24-block ingress staging, loaded frontiers, verified
+  // flat routes) -- the dump-station walk crosses this corridor fine.
+  assert.match(body, /gotoConfiguredAccess\(bot, pos, pos, anchorRange, config, 'restock-return'/)
+
+  // Fallback: jump-enabled movements + a hard think budget, so a
+  // pathological compute fails in seconds instead of wedging the bot.
   assert.match(body, /configurePathfinderMovements\(bot, config, \{ allowJump: true \}\)/)
-
-  // The compute has a hard budget, so a pathological search fails in
-  // seconds instead of freezing the bot for a watchdog cycle.
   assert.match(body, /gotoWithTemporaryThinkTimeout\(bot, walkGoal\(\)/)
   assert.match(body, /emergencyRestockReturnThinkTimeoutMs/)
-
-  // One retry with a doubled budget before giving the anchor walk up.
-  assert.match(body, /for \(let attempt = 1; attempt <= 2; attempt \+= 1\)/)
-  assert.match(body, /attempt === 1 \? thinkTimeoutMs : thinkTimeoutMs \* 2/)
 })
