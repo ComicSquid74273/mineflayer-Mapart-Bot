@@ -32,7 +32,7 @@ test('the emergency restock return walk uses staged machine navigation, not a ra
   assert.match(robust, /walkStraightToPointWithHardTimeout\(bot, target, rangeW, straightBudgetMs/, 'straight walk first, distance-scaled hard timeout')
   assert.match(robust, /gotoConfiguredAccess\(bot, pos, pos, rangeW, config, `\$\{label\}-staged`/, 'staged navigation second')
   assert.match(robust, /'restock-return-sidestep'|\$\{label\}-sidestep/, 'sidestep escape third')
-  assert.match(robust, /configurePathfinderMovements\(bot, config, \{ allowJump: true \}\)/)
+  assert.match(robust, /configurePathfinderMovements\(bot, config\)\n/)
   assert.match(robust, /gotoWithTemporaryThinkTimeout\(/)
   assert.match(robust, /dumpRestockReturnSurroundings\(bot\)/, 'surroundings dumped when a walk layer fails')
 
@@ -67,7 +67,7 @@ test('machine navigation never leaks restricted Movements to later raw gotos (ro
   const wrapper = source.slice(wrapperAt, source.indexOf('async function gotoConfiguredAccessInner', wrapperAt))
   assert.match(wrapper, /return await gotoConfiguredAccessInner\(/)
   assert.match(wrapper, /finally \{/)
-  assert.match(wrapper, /configurePathfinderMovements\(bot, config \|\| bot\.__nervConfig \|\| \{\}, \{ allowJump: true \}\)/)
+  assert.match(wrapper, /configurePathfinderMovements\(bot, config \|\| bot\.__nervConfig \|\| \{\}\) \} catch/, 'wrapper restores CONFIG defaults, never forces capabilities')
   assert.match(wrapper, /__nervMachinePathSprintSuppressed = false/)
   assert.match(wrapper, /__nervMachinePathSprintForced = false/)
   assert.match(source, /async function gotoConfiguredAccessInner\(/, 'the implementation is renamed and wrapped')
@@ -75,6 +75,14 @@ test('machine navigation never leaks restricted Movements to later raw gotos (ro
   // Defense in depth: the repair family's raw gotos each reinstall normal
   // walking rules before moving, so even a future leak elsewhere cannot
   // wedge a repair move.
-  const guardCount = (source.match(/configurePathfinderMovements\(bot, config, \{ allowJump: true \}\)/g) || []).length
-  assert.ok(guardCount >= 4, `expected >=4 allowJump guards (restock fallback + 3 repair gotos), found ${guardCount}`)
+  const guardCount = (source.match(/configurePathfinderMovements\(bot, config\)\n/g) || []).length
+  assert.ok(guardCount >= 3, `expected >=3 config-honouring movement guards, found ${guardCount}`)
+
+  // The operator sets printer.allowJump=false fleet-wide: NOTHING may force
+  // jump capabilities over the config (the walk fixes briefly did, and were
+  // reverted -- the escape that actually works is the flat lateral step).
+  assert.equal((source.match(/\{ allowJump: true \}/g) || []).length, 0, 'no forced allowJump overrides anywhere')
+  const robust2 = source.slice(source.indexOf('async function walkToAnchorRobust('))
+  assert.match(robust2, /const jumpAllowed = config\?\.printer\?\.allowJump !== false/, 'straight legs derive jump from config')
+  assert.match(robust2, /jump: false\)/, 'the lateral escape never jumps')
 })

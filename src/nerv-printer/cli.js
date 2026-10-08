@@ -10003,7 +10003,9 @@ async function gotoConfiguredAccess(bot, position, accessPosition, range = 2, co
   try {
     return await gotoConfiguredAccessInner(bot, position, accessPosition, range, config, reason, options)
   } finally {
-    try { configurePathfinderMovements(bot, config || bot.__nervConfig || {}, { allowJump: true }) } catch { }
+    // Restore DEFAULTS from the bot's own config (printer.allowJump honoured) --
+    // never force capabilities the operator disabled.
+    try { configurePathfinderMovements(bot, config || bot.__nervConfig || {}) } catch { }
     try { bot.__nervMachinePathSprintSuppressed = false } catch { }
     try { bot.__nervMachinePathSprintForced = false } catch { }
   }
@@ -15668,7 +15670,7 @@ async function placeTarget(bot, config, target, isRepairPass = false) {
       if (!hasFloor || !feetOpen || !headOpen) continue
 
       try {
-        configurePathfinderMovements(bot, config, { allowJump: true })
+        configurePathfinderMovements(bot, config)
         await bot.pathfinder.goto(new GoalNear(candidate.x, candidate.y, candidate.z, 0))
         break
       } catch {
@@ -15926,7 +15928,7 @@ async function repairTargets(bot, config, targets, placeRange) {
       if (Math.sqrt(bestDist) > Math.max(1, placeRange - 0.25)) {
         // Normal walking rules (see the gotoConfiguredAccess leak fix): never
         // inherit restricted machine-access Movements on a repair move.
-        configurePathfinderMovements(bot, config, { allowJump: true })
+        configurePathfinderMovements(bot, config)
         await bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, repairGoalRange))
       }
 
@@ -16332,7 +16334,7 @@ async function repairTargetsWhileMovingWithStops(bot, config, targets, placeRang
         // Movements set (leaked from machine access before the leak fix)
         // turned every repair move toward the far lane into a 30s timeout
         // and a skipped cell (bot11's repair-phase wedge).
-        configurePathfinderMovements(bot, config, { allowJump: true })
+        configurePathfinderMovements(bot, config)
         const repairMovePromise = bot.pathfinder.goto(new GoalNear(target.position.x, target.position.y, target.position.z, goalRange))
         repairMovePromise.catch(() => {})
         await Promise.race([
@@ -17128,13 +17130,16 @@ async function walkToAnchorRobust(bot, config, pos, range, label = 'anchor-walk'
   const target = new Vec3W(Number(pos.x), here.y, Number(pos.z))
   const dist = Math.hypot(target.x - here.x, target.z - here.z)
   const rangeW = Math.max(0.5, toNumber(range, 1))
+  // Jump capability follows the bot's own config (printer.allowJump) -- the
+  // operator disabled forced jumping fleet-wide and that stands.
+  const jumpAllowed = config?.printer?.allowJump !== false
 
   // 1) STRAIGHT WALK: hard timeout scaled to distance (sprint 7.2 bps,
   //    3x slack for steps/turns). Cannot hang.
   const straightBudgetMs = Math.max(8000, Math.ceil((dist / 7.2) * 3000) + 10000)
   try {
     await walkStraightToPointWithHardTimeout(bot, target, rangeW, straightBudgetMs, `${label}-straight`, {
-      config, sprint: true, jump: true
+      config, sprint: true, jump: jumpAllowed
     })
     return { method: 'straight' }
   } catch (straightErr) {
@@ -17178,7 +17183,7 @@ async function walkToAnchorRobust(bot, config, pos, range, label = 'anchor-walk'
         try {
           await walkStraightToPointWithHardTimeout(bot, lateralPoint, 0.6, 4000, `${label}-lateral`, { config, jump: false })
           await walkStraightToPointWithHardTimeout(bot, new Vec3E(Number(pos.x), here2.y, Number(pos.z)), rangeW, Math.max(20000, straightBudgetMs), `${label}-escape-straight`, {
-            config, sprint: true, jump: true
+            config, sprint: true, jump: jumpAllowed
           })
           return { method: `lateral-${side > 0 ? 'right' : 'left'}-${lateral}` }
         } catch (latErr) {
@@ -17189,9 +17194,9 @@ async function walkToAnchorRobust(bot, config, pos, range, label = 'anchor-walk'
     for (const side of [1, -1]) {
       const escapePoint = new Vec3E(here2.x + fx * 6 + perpX * 1.6 * side, here2.y, here2.z + fz * 6 + perpZ * 1.6 * side)
       try {
-        await walkStraightToPointWithHardTimeout(bot, escapePoint, 0.9, 8000, `${label}-sidestep`, { config, jump: true })
+        await walkStraightToPointWithHardTimeout(bot, escapePoint, 0.9, 8000, `${label}-sidestep`, { config, jump: jumpAllowed })
         await walkStraightToPointWithHardTimeout(bot, new Vec3E(Number(pos.x), here2.y, Number(pos.z)), rangeW, Math.max(20000, straightBudgetMs), `${label}-escape-straight`, {
-          config, sprint: true, jump: true
+          config, sprint: true, jump: jumpAllowed
         })
         return { method: `sidestep-${side > 0 ? 'right' : 'left'}` }
       } catch (escErr) {
@@ -17202,7 +17207,7 @@ async function walkToAnchorRobust(bot, config, pos, range, label = 'anchor-walk'
 
   // 4) LAST RESORT: jump-enabled think-budgeted raw goto.
   console.log(`[${label}-ROBUST-WARN] all walks failed; last-resort goto`)
-  configurePathfinderMovements(bot, config, { allowJump: true })
+  configurePathfinderMovements(bot, config)
   const goal = new GoalNear(Number(pos.x), Number(pos.y ?? here.y), Number(pos.z), rangeW)
   await gotoWithTemporaryThinkTimeout(
     bot,
