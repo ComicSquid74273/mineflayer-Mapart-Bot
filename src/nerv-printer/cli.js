@@ -17166,6 +17166,26 @@ async function walkToAnchorRobust(bot, config, pos, range, label = 'anchor-walk'
     const fz = dirZ / len
     const perpX = -fz
     const perpZ = fx
+    // PURE LATERAL FIRST (the actual wedge shape, 2026-10-08: the bot stood
+    // inside a tripwire-hook cell -- wiring attached to a solid block -- and
+    // the physics jitter from that intersection defeats every climb; the
+    // adjacent same-z cells are flat open floor). One block sideways, no
+    // climb, THEN continue. Diagonal-forward sidesteps cross the obstacle
+    // row and fail; lateral steps do not.
+    for (const side of [1, -1]) {
+      for (const lateral of [1, 2]) {
+        const lateralPoint = new Vec3E(here2.x + perpX * lateral * side, here2.y, here2.z + perpZ * lateral * side)
+        try {
+          await walkStraightToPointWithHardTimeout(bot, lateralPoint, 0.6, 4000, `${label}-lateral`, { config, jump: false })
+          await walkStraightToPointWithHardTimeout(bot, new Vec3E(Number(pos.x), here2.y, Number(pos.z)), rangeW, Math.max(20000, straightBudgetMs), `${label}-escape-straight`, {
+            config, sprint: true, jump: true
+          })
+          return { method: `lateral-${side > 0 ? 'right' : 'left'}-${lateral}` }
+        } catch (latErr) {
+          console.log(`[${label}-ROBUST-WARN] lateral side=${side} n=${lateral} -> ${latErr?.message || latErr}`)
+        }
+      }
+    }
     for (const side of [1, -1]) {
       const escapePoint = new Vec3E(here2.x + fx * 6 + perpX * 1.6 * side, here2.y, here2.z + fz * 6 + perpZ * 1.6 * side)
       try {
