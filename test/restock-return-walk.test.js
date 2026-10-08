@@ -29,4 +29,19 @@ test('the emergency restock return walk uses staged machine navigation, not a ra
   assert.match(body, /configurePathfinderMovements\(bot, config, \{ allowJump: true \}\)/)
   assert.match(body, /gotoWithTemporaryThinkTimeout\(bot, walkGoal\(\)/)
   assert.match(body, /emergencyRestockReturnThinkTimeoutMs/)
+
+  // When even the staged walk cannot path out of the pocket, a NO-PATHFINDER
+  // sidestep escape runs first: straight-walk (jump on, plain physics) to a
+  // point past the lone solid block via the walkable sides, then retry the
+  // staged walk from open ground; the long straight leg is the last resort
+  // before the goto.
+  assert.match(body, /walkStraightToPointWithHardTimeout\(bot, escapePoint, 0\.9, 6000, 'restock-return-sidestep', \{ config, jump: true \}\)/)
+  assert.match(body, /'restock-return-escaped'/, 'staged walk retried from the escaped position')
+  assert.match(body, /'restock-return-straight', \{ config, sprint: true, jump: true \}/)
+
+  // And the wedge point reports its actual surroundings, so the next
+  // occurrence shows the world state instead of another inference chain.
+  assert.match(body, /dumpRestockReturnSurroundings\(bot\)/)
+  assert.match(source, /function dumpRestockReturnSurroundings\(bot\)/)
+  assert.match(source, /\[RESTOCK-RETURN-SURROUNDINGS\]/)
 })

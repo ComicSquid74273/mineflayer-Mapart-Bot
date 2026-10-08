@@ -17024,6 +17024,35 @@ async function runNervScannerPlacementBatch(bot, config, batchTargets, startOnNo
   return { placed, already, skipped, seen: seen.size + latencySafeSeen, missing }
 }
 
+// Diagnostic: when the restock return wedges, dump what the bot actually
+// sees around itself -- cell-by-cell names and collision shapes at floor,
+// feet and head level. The pathfinder's refusal to route past a lone solid
+// block while the sides are plainly walkable has twice survived log
+// archaeology; this makes the world state itself visible on the next hit.
+function dumpRestockReturnSurroundings(bot) {
+  try {
+    if (Date.now() - (bot.__nervReturnSurroundDumpAt || 0) < 10000) return
+    bot.__nervReturnSurroundDumpAt = Date.now()
+    const pos = bot?.entity?.position
+    if (!pos?.constructor || typeof bot?.blockAt !== 'function') return
+    const Vec3 = pos.constructor
+    const bx = Math.floor(pos.x)
+    const bz = Math.floor(pos.z)
+    const feetY = Math.floor(pos.y)
+    const cells = []
+    const label = (b) => b ? `${b.name || '?'}${b.boundingBox === 'block' ? '*' : ''}` : 'null'
+    for (let dx = -2; dx <= 2; dx += 1) {
+      for (let dz = -2; dz <= 2; dz += 1) {
+        const floor = bot.blockAt(new Vec3(bx + dx, feetY - 1, bz + dz), false)
+        const feet = bot.blockAt(new Vec3(bx + dx, feetY, bz + dz), false)
+        const head = bot.blockAt(new Vec3(bx + dx, feetY + 1, bz + dz), false)
+        cells.push(`${dx >= 0 ? '+' : ''}${dx},${dz >= 0 ? '+' : ''}${dz}: ${label(floor)}/${label(feet)}/${label(head)}`)
+      }
+    }
+    console.log(`[RESTOCK-RETURN-SURROUNDINGS] bot=${bx},${feetY},${bz} floor/feet/head: ${cells.join(' | ')}`)
+  } catch { }
+}
+
 async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, startOnNorthSide, allowEmergencyRestock = true) {
   if (!batchTargets.length) {
     return { placed: 0, already: 0, skipped: 0, seen: 0, missing: 0, hardStops: 0, rawAllowed: 0, capped: 0, maxAllowed: 0 }
@@ -17158,7 +17187,46 @@ async function runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, star
         })
         return true
       } catch (stagedErr) {
-        console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] staged target=${pos.x} ${pos.y} ${pos.z} -> ${stagedErr?.message || stagedErr}; falling back to jump-enabled goto`)
+        console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] staged target=${pos.x} ${pos.y} ${pos.z} -> ${stagedErr?.message || stagedErr}`)
+        dumpRestockReturnSurroundings(bot)
+        // NO-PATHFINDER ESCAPE. Even the staged walk's stage-1 A* timed out
+        // from this pocket (bot11: a lone solid block ahead, normal floor
+        // beside it -- geometry a player sidesteps without thinking). Stop
+        // asking A*: STRAIGHT-walk (basic physics, jump on) to a sidestep
+        // point past the obstruction, then retry the staged walk from open
+        // ground; only then fall back to the jump-enabled goto.
+        const here = bot?.entity?.position
+        if (here?.constructor) {
+          const Vec3Esc = here.constructor
+          const dirX = Number(pos.x) - here.x
+          const dirZ = Number(pos.z) - here.z
+          const len = Math.hypot(dirX, dirZ) || 1
+          const fx = dirX / len
+          const fz = dirZ / len
+          const perpX = -fz
+          const perpZ = fx
+          for (const side of [1, -1]) {
+            const escapePoint = new Vec3Esc(here.x + fx * 6 + perpX * 1.6 * side, here.y, here.z + fz * 6 + perpZ * 1.6 * side)
+            try {
+              await walkStraightToPointWithHardTimeout(bot, escapePoint, 0.9, 6000, 'restock-return-sidestep', { config, jump: true })
+              try {
+                await gotoConfiguredAccess(bot, pos, pos, anchorRange, config, 'restock-return-escaped', {
+                  strict: false,
+                  avoidLiquids: true,
+                  allowVerifiedGaps: false
+                })
+                return true
+              } catch (retryErr) {
+                console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] escaped-side=${side} retry -> ${retryErr?.message || retryErr}; trying the long straight leg`)
+              }
+              await walkStraightToPointWithHardTimeout(bot, new Vec3Esc(Number(pos.x), here.y, Number(pos.z)), anchorRange, 90000, 'restock-return-straight', { config, sprint: true, jump: true })
+              return true
+            } catch (escErr) {
+              console.log(`[NERV-WORKLOAD-RESTOCK-RETURN-WARN] sidestep side=${side} -> ${escErr?.message || escErr}`)
+            }
+          }
+        }
+        console.log('[NERV-WORKLOAD-RESTOCK-RETURN-WARN] sidesteps failed; falling back to jump-enabled goto')
         const thinkTimeoutMs = Math.max(2000, toNumber(advanced.emergencyRestockReturnThinkTimeoutMs, 10000))
         const walkGoal = () => new GoalNear(pos.x, pos.y, pos.z, anchorRange)
         configurePathfinderMovements(bot, config, { allowJump: true })
