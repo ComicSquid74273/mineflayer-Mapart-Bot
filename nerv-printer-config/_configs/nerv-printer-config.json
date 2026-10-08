@@ -606,8 +606,8 @@
   },
   "dashboard": {
     "enabled": true,
-    "maxZipEntries": 2000,
-    "maxTotalNbts": 5000,
+    "maxZipEntries": 5000,
+    "maxTotalNbts": 10000,
     "serviceUrl": "http://localhost:4080",
     "hostLabel": "Dashboard",
     "heartbeatMs": 5000,
