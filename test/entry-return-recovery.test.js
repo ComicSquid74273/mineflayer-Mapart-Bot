@@ -57,8 +57,15 @@ test('startup event listeners never propagate startAfterSpawn failures as unhand
   // unhandledRejection and crashes the process (the bot19 crash path).
   assert.match(source, /const startAfterSpawnSafe = async \(trigger = 'threshold'\) => \{/)
   assert.match(source, /\[STARTUP-LISTENER-ERR\]/)
-  const mainSession = source.slice(source.indexOf("const startAfterSpawnSafe = async (trigger = 'threshold')"))
-  const directCalls = mainSession.slice(0, mainSession.indexOf('function createDeliveryRuntime') > 0 ? mainSession.indexOf('function createDeliveryRuntime') : undefined)
-  assert.doesNotMatch(directCalls, /bot\.on\(([^)]+),\s*async[^)]*\)\s*=>\s*\{[\s\S]{0,400}?await startAfterSpawn\(/,
+  // The wrapper must call the REAL startAfterSpawn exactly once -- a wrapper
+  // that called itself deployed once and stack-overflowed every startup
+  // ("Maximum call stack size exceeded", bot19 2026-10-12).
+  const wrapperStart = source.indexOf("const startAfterSpawnSafe = async (trigger = 'threshold') => {")
+  const wrapperEnd = source.indexOf('\n    }', wrapperStart)
+  const wrapper = source.slice(wrapperStart, wrapperEnd)
+  assert.match(wrapper, /await startAfterSpawn\(trigger\)/, 'the wrapper must invoke the real startAfterSpawn')
+  assert.doesNotMatch(wrapper, /startAfterSpawnSafe\(/, 'the wrapper must never call itself')
+  const mainSession = source.slice(wrapperStart)
+  assert.doesNotMatch(mainSession.slice(0, 6000), /bot\.on\(([^)]+),\s*async[^)]*\)\s*=>\s*\{[\s\S]{0,400}?await startAfterSpawn\(/,
     'listener bodies must use the safe wrapper, not the raw startAfterSpawn')
 })

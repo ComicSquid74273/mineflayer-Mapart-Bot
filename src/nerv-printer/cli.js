@@ -25834,7 +25834,7 @@ function runSingleSession(config, sessionNumber) {
     // only starts the work and must never propagate its death.
     const startAfterSpawnSafe = async (trigger = 'threshold') => {
       try {
-        await startAfterSpawnSafe(trigger)
+        await startAfterSpawn(trigger)
       } catch (err) {
         if (isRuntimeStopError(err)) return
         console.log(`[STARTUP-LISTENER-ERR] ${err?.message || err} (handled; runtime loops own the retry)`)
