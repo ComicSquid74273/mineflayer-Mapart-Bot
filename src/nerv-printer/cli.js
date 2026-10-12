@@ -569,6 +569,7 @@ function shouldHoldQueueFileAfterRuntimeError(errorText) {
   if (!text) return false
   return (
     text.includes('nerv-workload-checkpoint-timeout') ||
+    text.includes('workload-batch-entry-return-incomplete') ||
     text.includes('checkpoint-timeout') ||
     text.includes('goal was changed') ||
     text.includes('goalchanged') ||
@@ -17154,7 +17155,23 @@ async function walkToAnchorRobust(bot, config, pos, range, label = 'anchor-walk'
       avoidLiquids: true,
       allowVerifiedGaps: false
     })
-    return { method: 'staged' }
+    // Honesty check. The non-strict staged call carries a broad internal
+    // ready tolerance (chest-era floor 2.25 in getMachineAccessReadyDistance)
+    // and can return WITHOUT MOVING when the bot is inside that broad radius
+    // but outside THIS walk's contract (rangeW). Treating that return as
+    // success skipped the lateral escape entirely and left the caller's own
+    // distance check to fail (bot19: pinned 1.82 blocks from the entry vs
+    // required 1.15 against a single boundary block, 1578+ process crashes
+    // via unhandled rejection). If the staged stage did not bring the bot
+    // within rangeW, keep descending the ladder -- the lateral escape below
+    // is the stage that actually walks around the obstacle.
+    const stagedDistance = distanceToPoint(bot?.entity?.position, target)
+    if (!(Number.isFinite(stagedDistance) && stagedDistance <= rangeW)) {
+      console.log(`[${label}-ROBUST-WARN] staged returned outside contract distance=${Number.isFinite(stagedDistance) ? stagedDistance.toFixed(2) : 'unknown'} range=${rangeW.toFixed(2)}; continuing to lateral escape`)
+      dumpRestockReturnSurroundings(bot)
+    } else {
+      return { method: 'staged' }
+    }
   } catch (stagedErr) {
     console.log(`[${label}-ROBUST-WARN] staged -> ${stagedErr?.message || stagedErr}; trying sidestep escape`)
     dumpRestockReturnSurroundings(bot)
@@ -19174,9 +19191,31 @@ async function runPrint(bot, config, dashboardRuntime = null) {
       const useLitematicRowMode = isLitematicBandMode
 
       if (useLitematicRowMode) {
-        await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
+        // Bounded entry-return retry. An unreachable band entry used to be a
+        // single-shot failure whose error escaped as an unhandled rejection
+        // and crashed the process (bot19, 1578+ restarts). Retry the entry a
+        // bounded number of times -- the robust ladder's lateral escape is
+        // what makes the second+ attempt succeed when the first ran into an
+        // obstacle -- and let a final failure flow into the print loop's
+        // error classification (hold + resume), never a crash.
+        const prepareBatchEntryWithRetry = async (retryLabel) => {
+          const entryAdvanced = config.advanced || {}
+          const maxEntryAttempts = Math.max(1, toNumber(entryAdvanced.workloadEntryReturnMaxAttempts, 3))
+          const entryRetryDelayMs = Math.max(250, toNumber(entryAdvanced.workloadEntryReturnRetryDelayMs, 1500))
+          for (let attempt = 1; attempt <= maxEntryAttempts; attempt += 1) {
+            try {
+              await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
+              return
+            } catch (entryErr) {
+              if (attempt >= maxEntryAttempts) throw entryErr
+              console.log(`[NERV-WORKLOAD-ENTRY-RETURN-RETRY] attempt=${attempt}/${maxEntryAttempts} (${retryLabel}) -> ${entryErr?.message || entryErr}`)
+              await delay(entryRetryDelayMs)
+            }
+          }
+        }
+        await prepareBatchEntryWithRetry('pre-food')
         await ensureFoodBeforeTraversal(bot, config, `litematic-batch cols=${colBatch.join(',')}`)
-        await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)
+        await prepareBatchEntryWithRetry('post-food')
         await prepareHotbarForBatch(bot, config, batchTargets)
         const result = await runNervTimeWorkloadPlacementBatch(bot, config, batchTargets, batchStartOnNorthSide)
         placed += result.placed
@@ -25787,6 +25826,21 @@ function runSingleSession(config, sessionNumber) {
       }
     }
 
+    // Event listeners have no awaiter: any error escaping startAfterSpawn in
+    // a listener context becomes an unhandledRejection and kills the process
+    // (bot19: workload-batch-entry-return-incomplete crash-looped 1578+ times
+    // through exactly this path). The managed print loop and the reconnect
+    // loop own error policy and already reported the failure; the listener
+    // only starts the work and must never propagate its death.
+    const startAfterSpawnSafe = async (trigger = 'threshold') => {
+      try {
+        await startAfterSpawnSafe(trigger)
+      } catch (err) {
+        if (isRuntimeStopError(err)) return
+        console.log(`[STARTUP-LISTENER-ERR] ${err?.message || err} (handled; runtime loops own the retry)`)
+      }
+    }
+
     bot.on('spawn', async () => {
       spawnedCount += 1
       dashboardRuntime?.noteActivity()
@@ -25797,12 +25851,12 @@ function runSingleSession(config, sessionNumber) {
       const autoTrigger = getLobbyPortalAutoTrigger(bot?.entity?.position, config)
       if (autoTrigger && !autoTrigger.hold) {
         console.log(`[SPAWN] Auto-triggering startup from ${autoTrigger.source} at ${spawnedCount}/${reqSpawn} spawn event(s).`)
-        await startAfterSpawn('zone-auto')
+        await startAfterSpawnSafe('zone-auto')
         return
       }
       if (canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) {
         console.log(`[SPAWN] Offline login confirmed; bypassing remaining spawn gate at ${spawnedCount}/${reqSpawn}.`)
-        await startAfterSpawn('offline-login')
+        await startAfterSpawnSafe('offline-login')
         return
       }
       if (spawnedCount < reqSpawn) {
@@ -25837,7 +25891,7 @@ function runSingleSession(config, sessionNumber) {
         return
       }
 
-      await startAfterSpawn('threshold')
+      await startAfterSpawnSafe('threshold')
     })
 
     bot.on('nerv-chat-login-success', async () => {
@@ -25846,7 +25900,7 @@ function runSingleSession(config, sessionNumber) {
       const reqSpawn = getRequiredSpawnCount(config)
       if (!canBypassRemainingSpawnGate(bot, config, spawnedCount, reqSpawn)) return
       console.log(`[SPAWN] Offline login completed after spawn ${spawnedCount}/${reqSpawn}; resuming startup without waiting for more spawn events.`)
-      await startAfterSpawn('offline-login')
+      await startAfterSpawnSafe('offline-login')
     })
 
     bot.on('messagestr', (message) => {

@@ -23,8 +23,8 @@ test('workload batch entry returns through verified machine navigation after res
 
 test('both workload modes stage before food access and return after it before traversal', () => {
   const litematicFood = source.indexOf('await ensureFoodBeforeTraversal(bot, config, `litematic-batch')
-  const litematicEntryBefore = source.lastIndexOf('await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)', litematicFood)
-  const litematicEntryAfter = source.indexOf('await prepareWorkloadBatchEntry(bot, config, batchTargets, batchStartOnNorthSide)', litematicFood)
+  const litematicEntryBefore = source.lastIndexOf("prepareBatchEntryWithRetry('pre-food')", litematicFood)
+  const litematicEntryAfter = source.indexOf("prepareBatchEntryWithRetry('post-food')", litematicFood)
   const litematicRun = source.indexOf('const result = await runNervTimeWorkloadPlacementBatch', litematicEntryAfter)
   assert.ok(litematicEntryBefore >= 0 && litematicEntryBefore < litematicFood)
   assert.ok(litematicFood < litematicEntryAfter && litematicEntryAfter < litematicRun)
