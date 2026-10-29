@@ -341,7 +341,7 @@
   },
   "advanced": {
     "antiHunger": {
-      "enabled": false,
+      "enabled": true,
       "sprint": true,
       "onGround": true
     },
@@ -432,6 +432,8 @@
     "supportStockChestPollMs": 100,
     "requiredStockRefillRetryMs": 5000,
     "requiredStockRefillLogEveryMs": 30000,
+    "latencyAdaptiveBackoffEnabled": false,
+    "latencyDisableSprintAboveMs": 300,
     "latencySafeModeEnterMs": 300,
     "latencySafeModeResumeMs": 280,
     "latencySafePlacementSettleMs": 50,
@@ -609,7 +611,7 @@
     "maxZipEntries": 5000,
     "maxTotalNbts": 10000,
     "serviceUrl": "http://localhost:4080",
-    "hostLabel": "Dashboard",
+    "hostLabel": "BotNumber",
     "heartbeatMs": 5000,
     "commandPollMs": 3000,
     "queuePrefetchHighWater": 10,
