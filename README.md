@@ -12,9 +12,10 @@ The largest mapart ever created. Made with this mineflayer-mapart-bot.
 
 Date: November 1, 2026
 
-![Baldur's Gate 3 — Wyrm's Crossing world record mapart](mapsartsimages/vulcan-mapart.png)
 
-[![Baldur's Gate 3 — Wyrm's Crossing video render](mapsartsimages/WR_video_thumbnail.jpg)](mapsartsimages/WR_Video_render.mp4)
+https://github.com/user-attachments/assets/5becb322-fc6a-4f8d-b831-435691aa5ace
+
+
 
 ### Michael Jackson – Greatest Hits
 
