@@ -14,7 +14,7 @@ Date: November 1, 2026
 
 ![Baldur's Gate 3 — Wyrm's Crossing world record mapart](mapsartsimages/vulcan-mapart.png)
 
-[![Baldur's Gate 3 — Wyrm's Crossing video render](mapsartsimages/WR_video_thumbnail.jpg)](mapsartsimages/WR_video_embed.mp4)
+[![Baldur's Gate 3 — Wyrm's Crossing video render](mapsartsimages/WR_video_thumbnail.jpg)](mapsartsimages/WR_Video_render.mp4)
 
 ### Michael Jackson – Greatest Hits
 
