@@ -4,6 +4,18 @@
 
 ## Mapart Showcase
 
+### Baldur's Gate 3 — Wyrm's Crossing
+
+The largest mapart ever created. Made with this mineflayer-mapart-bot.
+
+**World Record · 25,296 maps · 204 × 124**
+
+Date: November 1, 2026
+
+![Baldur's Gate 3 — Wyrm's Crossing world record map preview](mapsartsimages/WR_preview_204x124.png)
+
+[Watch the video render](mapsartsimages/WR_Video_render.mp4)
+
 ### Michael Jackson – Greatest Hits
 
 ![Michael Jackson – Greatest Hits](mapsartsimages/mj.png)
@@ -23,6 +35,11 @@ Made by **@pyrovane** using Skynet.
 Original painting: *A Friend in Need* by Cassius Marcellus Coolidge.
 
 > “And so many more” maparts were made using this project.
+
+## Videos
+
+- **Showcase:** [40,000 Map Empire on Minecraft's Biggest Anarchy Server](https://www.youtube.com/watch?v=dY-M5a_-trs)
+- **Tutorial:** [Mineflayer Mapart Bot](https://youtu.be/aHGdIeNDk5c)
 
 This repository has two entrypoints:
 
