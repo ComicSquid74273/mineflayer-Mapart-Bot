@@ -12,7 +12,7 @@ The largest mapart ever created. Made with this mineflayer-mapart-bot.
 
 Date: November 1, 2026
 
-![Baldur's Gate 3 — Wyrm's Crossing world record map preview](mapsartsimages/WR_preview_204x124.png)
+![Baldur's Gate 3 — Wyrm's Crossing world record mapart](mapsartsimages/vulcan-mapart.png)
 
 [Watch the video render](mapsartsimages/WR_Video_render.mp4)
 
